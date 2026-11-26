@@ -25,6 +25,7 @@ var _layer: CanvasLayer
 var _rect: TextureRect
 var _anchor: Node3D
 var _half_flip := false
+var _last_vp_size := Vector2i.ZERO
 
 
 func _ready() -> void:
@@ -35,6 +36,8 @@ func _ready() -> void:
 	_sub.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_sub.audio_listener_enable_3d = false
 	_sub.msaa_3d = Viewport.MSAA_DISABLED if is_mobile else Viewport.MSAA_2X
+	# Only the bedroom's single DirectionalLight3D casts shadows; skip omni/spot shadow atlas.
+	_sub.positional_shadow_atlas_size = 0
 	add_child(_sub)
 	bedroom = BedroomShell.new()
 	bedroom.name = "Bedroom"
@@ -71,17 +74,24 @@ func _on_size_changed() -> void:
 
 
 func _resize(window_size: Vector2) -> void:
+	var vp := Vector2i(roundi(window_size.x), roundi(window_size.y))
+	if vp.x <= 0 or vp.y <= 0:
+		return
+	_last_vp_size = vp
 	var is_mobile := _is_mobile_platform()
 	var res_ratio := MOBILE_RES_RATIO if is_mobile else DESKTOP_RES_RATIO
 	var min_size := MOBILE_MIN_SIZE if is_mobile else DESKTOP_MIN_SIZE
-	var target := Vector2i(
-		maxi(min_size.x, roundi(window_size.x * res_ratio)),
-		maxi(min_size.y, roundi(window_size.y * res_ratio)),
+	# Apply a single uniform scale to both axes so the SubViewport always matches the main
+	# viewport's exact aspect ratio (preventing STRETCH_KEEP_ASPECT_COVERED zoom drift).
+	var scale := clampf(
+		maxf(res_ratio, maxf(float(min_size.x) / float(vp.x), float(min_size.y) / float(vp.y))),
+		0.25,
+		1.0,
 	)
-	if window_size.x > 0.0 and window_size.y > 0.0:
-		target.x = mini(target.x, roundi(window_size.x))
-		target.y = mini(target.y, roundi(window_size.y))
-	_sub.size = Vector2i(maxi(target.x, 64), maxi(target.y, 64))
+	_sub.size = Vector2i(
+		maxi(64, roundi(float(vp.x) * scale)),
+		maxi(64, roundi(float(vp.y) * scale)),
+	)
 	_sub.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
@@ -89,6 +99,9 @@ func _process(_delta: float) -> void:
 	# The whole pose sync: anchor at the sandbox centre, harbour origin at (0,0,0), camera
 	# offset scaled by 1/6667 into the bedroom frame, rotation carried over untouched.
 	var view: Viewport = get_viewport()
+	var vp_size := Vector2i(view.size)
+	if vp_size != _last_vp_size and vp_size.x > 0 and vp_size.y > 0:
+		_resize(Vector2(vp_size))
 	var cam := view.get_camera_3d()
 	if cam == null or _anchor == null:
 		return

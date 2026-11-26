@@ -188,7 +188,8 @@ static func populate(district: Node3D, micro_ground: bool, half_land: float) -> 
 		if end > 0.0:
 			for direction in [Vector3.FORWARD, Vector3.BACK, Vector3.LEFT, Vector3.RIGHT]:
 				spawn_points.append(direction * end + Vector3.UP * 0.02)
-	_build_seawalls_and_maritime(scenery, bollard_transforms, half_land)
+	_build_sandbox_frame(district, half_land)
+	_build_seawalls_and_maritime(bollard_transforms, half_land)
 
 	var building_id := 1
 	var rng := RandomNumberGenerator.new()
@@ -212,7 +213,7 @@ static func populate(district: Node3D, micro_ground: bool, half_land: float) -> 
 				ZONE_OLDCORE:
 					building_id = _build_oldharbor_block(targets_node, scenery, center, bx, bz, rng, building_id)
 				ZONE_CONTAINERS:
-					building_id = _build_container_block(targets_node, scenery, center, bx, bz, rng, building_id)
+					building_id = _build_container_block(targets_node, scenery, center, bx, bz, rng, building_id, half_land)
 				ZONE_REFINERY:
 					building_id = _build_refinery_block(targets_node, scenery, center, bx, bz, rng, building_id)
 				ZONE_SHIPYARD:
@@ -975,7 +976,7 @@ static func _build_oldharbor_block(targets: Node3D, scenery: Node3D, center: Vec
 
 
 static func _build_container_block(targets: Node3D, scenery: Node3D, center: Vector3,
-		bx: int, bz: int, rng: RandomNumberGenerator, next_id: int) -> int:
+		bx: int, bz: int, rng: RandomNumberGenerator, next_id: int, half_land: float) -> int:
 	# Painted yellow freight lane stripes
 	var stripe := _make_box(Vector3(21.5, 0.03, 0.35), center + Vector3(0.0, 0.03, 0.0), _mats["hazard_yellow"], false)
 	scenery.add_child(stripe)
@@ -1010,8 +1011,8 @@ static func _build_container_block(targets: Node3D, scenery: Node3D, center: Vec
 		_add_kit_scenery(scenery, pile, center + Vector3(corner.x, 0.02, corner.y),
 				TAU * 0.25 * float(posmod(bx + bz, 4)), 3.0)
 
-	# Add occasional tall port gantry crane straddling the freight yard
-	if bx % 2 == 0 and bz == 4:
+	# Add occasional tall port gantry crane straddling the freight yard (kept strictly inside land)
+	if bx % 2 == 0 and bz == 4 and center.z + 16.0 + 23.5 <= half_land - 2.0:
 		scenery.add_child(_build_gantry_crane(center + Vector3(0.0, 0.02, 16.0), 0.0, bx == 0))
 	return next_id
 
@@ -1129,21 +1130,85 @@ static func _build_historic_block(targets: Node3D, center: Vector3, bx: int, bz:
 
 
 # ---------------------------------------------------------------------------
-# Waterfront Quays, Seawalls, Ships, Cranes & Landmarks
+# Desktop Diorama Wood Frame, Waterfront Quays, Cranes & Landmarks
 # ---------------------------------------------------------------------------
 
-static func _build_seawalls_and_maritime(scenery: Node3D, bollards: Array[Transform3D],
-		half_land: float) -> void:
-	var wall_len := half_land * 2.0 + 4.0
-	var segments := ceili(wall_len / RENDER_CHUNK_SIZE)
-	var length := wall_len / segments
-	for i in segments:
-		var pos := -wall_len * 0.5 + (i + 0.5) * length
-		for side: float in [-1.0, 1.0]:
-			var edge := (half_land + 1.5) * side
-			scenery.add_child(_make_box(Vector3(length, 3.6, 3.4), Vector3(pos, -1.65, edge), _mats["seawall"], false))
-			scenery.add_child(_make_box(Vector3(3.4, 3.6, length), Vector3(edge, -1.65, pos), _mats["seawall"], false))
+## Builds a single-mesh pale natural-wood miniature sandbox frame and solid tray skirt around
+## the city footprint (`half_land`), aligned to the 1:6667 bedroom desk top in
+## `scenes/skybox_bedroom.gd` (`base_depth = 32 m` <-> `4.8 mm` tray base on `DESK_TOP`).
+static func _build_sandbox_frame(district: Node3D, half_land: float) -> void:
+	if half_land <= 0.25:
+		return
+	var frame_w := clampf(half_land * 0.056, 0.05, 40.0)
+	var lip_h := clampf(half_land * 0.011, 0.02, 8.0)
+	var base_depth := clampf(half_land * (32.0 / 709.0), 0.12, 32.0)
+	var overlap := minf(0.6, half_land * 0.05)
+	var inner := half_land - overlap
+	var outer := half_land + frame_w
+	var rail_w := outer - inner
+	var rail_h := lip_h + base_depth
+	var rail_cy := (lip_h - base_depth) * 0.5
+	var full_span := outer * 2.0
 
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# North & South wooden frame rails (full outer span across corners)
+	var ns_size := Vector3(full_span, rail_h, rail_w)
+	_append_box(st, ns_size, Vector3(0.0, rail_cy, -(inner + rail_w * 0.5)))
+	_append_box(st, ns_size, Vector3(0.0, rail_cy, inner + rail_w * 0.5))
+	# West & East wooden frame rails (between north/south inner edges)
+	var we_size := Vector3(rail_w, rail_h, inner * 2.0)
+	_append_box(st, we_size, Vector3(-(inner + rail_w * 0.5), rail_cy, 0.0))
+	_append_box(st, we_size, Vector3(inner + rail_w * 0.5, rail_cy, 0.0))
+	# Solid underside baseplate closing the tray bottom flush against the desk surface
+	var base_top := -0.42
+	if base_top > -base_depth + 0.02:
+		var plate_h := base_top + base_depth
+		_append_box(st, Vector3(inner * 2.0, plate_h, inner * 2.0),
+				Vector3(0.0, -base_depth + plate_h * 0.5, 0.0))
+
+	var mesh := st.commit()
+	mesh.surface_set_material(0, _mats["sandbox_wood"])
+	var frame := MeshInstance3D.new()
+	frame.name = "SandboxFrame"
+	frame.mesh = mesh
+	frame.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	frame.set_meta(&"asset", "sandbox_frame")
+	district.add_child(frame)
+
+
+static func _append_box(st: SurfaceTool, size: Vector3, center: Vector3) -> void:
+	var h := size * 0.5
+	var faces := [
+		# +Y top
+		[Vector3(0, 1, 0), Vector3(-h.x, h.y, -h.z), Vector3(h.x, h.y, -h.z), Vector3(h.x, h.y, h.z), Vector3(-h.x, h.y, h.z)],
+		# -Y bottom
+		[Vector3(0, -1, 0), Vector3(-h.x, -h.y, h.z), Vector3(h.x, -h.y, h.z), Vector3(h.x, -h.y, -h.z), Vector3(-h.x, -h.y, -h.z)],
+		# +Z front
+		[Vector3(0, 0, 1), Vector3(-h.x, h.y, h.z), Vector3(h.x, h.y, h.z), Vector3(h.x, -h.y, h.z), Vector3(-h.x, -h.y, h.z)],
+		# -Z back
+		[Vector3(0, 0, -1), Vector3(h.x, h.y, -h.z), Vector3(-h.x, h.y, -h.z), Vector3(-h.x, -h.y, -h.z), Vector3(h.x, -h.y, -h.z)],
+		# +X right
+		[Vector3(1, 0, 0), Vector3(h.x, h.y, h.z), Vector3(h.x, h.y, -h.z), Vector3(h.x, -h.y, -h.z), Vector3(h.x, -h.y, h.z)],
+		# -X left
+		[Vector3(-1, 0, 0), Vector3(-h.x, h.y, -h.z), Vector3(-h.x, h.y, h.z), Vector3(-h.x, -h.y, h.z), Vector3(-h.x, -h.y, -h.z)],
+	]
+	for face: Array in faces:
+		var n: Vector3 = face[0]
+		var a: Vector3 = center + face[1]
+		var b: Vector3 = center + face[2]
+		var c: Vector3 = center + face[3]
+		var d: Vector3 = center + face[4]
+		for v: Vector3 in [a, b, c, a, c, d]:
+			st.set_normal(n)
+			st.add_vertex(v)
+
+
+static func _build_seawalls_and_maritime(bollards: Array[Transform3D],
+		half_land: float) -> void:
+	# Keep on-land perimeter bollards; offshore ships, ocean liners, buoys and sea rocks are
+	# omitted so the 1,418 m city sits cleanly inside its desktop sandbox frame with zero
+	# geometry spilling over the bedroom desk.
 	var pos := -half_land + 14.0
 	while pos <= half_land - 14.0:
 		for side: float in [-1.0, 1.0]:
@@ -1152,52 +1217,23 @@ static func _build_seawalls_and_maritime(scenery: Node3D, bollards: Array[Transf
 			bollards.append(Transform3D(Basis.IDENTITY, Vector3(edge, 0.02, pos)))
 		pos += 24.0
 
-	# Moored ships from the watercraft kit, sunk to the waterline (sea level y = -0.82).
-	var quay_ships := [
-		["watercraft/ship-cargo-a", Vector3(76.0, -2.6, half_land + 27.0), PI * 0.5, KIT_SCALE_SHIP],
-		["watercraft/ship-cargo-b", Vector3(-82.0, -2.6, half_land + 29.0), -PI * 0.5, KIT_SCALE_SHIP],
-		["watercraft/ship-cargo-c", Vector3(half_land + 27.0, -2.6, -42.0), 0.0, KIT_SCALE_SHIP],
-		["watercraft/boat-fishing-small", Vector3(-46.0, -1.2, half_land + 9.0), 0.0, KIT_SCALE_BOAT],
-		["watercraft/boat-fishing-small", Vector3(30.0, -1.2, half_land + 9.0), PI, KIT_SCALE_BOAT],
-	]
-	for entry: Array in quay_ships:
-		_add_kit_scenery(scenery, entry[0], entry[1], entry[2], entry[3])
-
-	# Horizon landmarks: an ocean liner and her small sister out past the breakwater.
-	_add_kit_scenery(scenery, "watercraft/ship-ocean-liner",
-			Vector3(-half_land - 62.0, -3.6, half_land * 0.36), 0.0, 5.0)
-	_add_kit_scenery(scenery, "watercraft/ship-ocean-liner-small",
-			Vector3(half_land + 58.0, -3.2, -half_land * 0.30), PI * 0.5, 4.5)
-
-	# Buoy line marking the fairway.
-	for offset: float in [-0.55, -0.22, 0.22, 0.55]:
-		_add_kit_scenery(scenery, "watercraft/buoy",
-				Vector3(half_land + 13.0, -0.6, half_land * offset), 0.0, KIT_SCALE_BUOY)
-
-	# Distant breakwaters & rocky islets out at sea for horizon depth
-	for islet in [
-		[Vector3(340.0, -0.4, -290.0), Vector3(62.0, 8.5, 34.0), 0.35],
-		[Vector3(-360.0, -0.4, 240.0), Vector3(74.0, 11.0, 42.0), -0.42],
-		[Vector3(-290.0, -0.4, -340.0), Vector3(54.0, 7.0, 28.0), 0.78],
-		[Vector3(320.0, -0.4, 330.0), Vector3(88.0, 5.5, 18.0), -0.18],
-	]:
-		var rock := _make_box(islet[1], islet[0], _mats["seawall"], false)
-		rock.position.x += signf(rock.position.x) * (half_land - 224.0)
-		rock.position.z += signf(rock.position.z) * (half_land - 224.0)
-		rock.rotation.y = islet[2]
-		scenery.add_child(rock)
-
 
 static func _build_waterfront_quays(targets: Node3D, scenery: Node3D,
 		rng: RandomNumberGenerator, next_id: int, half_land: float) -> void:
-	# East & South quay aprons feature iconic tall gantry cranes & waterfront container rows
+	# East & South quay aprons feature iconic tall gantry cranes & waterfront container rows.
+	# Cranes face INWARD over the yard so their 23 m cantilever booms stay strictly inside
+	# `half_land` and never poke past the miniature sandbox wood frame.
 	var play_edge := half_land - 5.0
-	for x_pos: float in [-96.0, 24.0, 108.0]:
-		if absf(x_pos) + 7.5 <= play_edge:
-			scenery.add_child(_build_gantry_crane(Vector3(x_pos, 0.02, half_land - 8.0), 0.0, x_pos > 0.0))
-	for z_pos: float in [-72.0, 48.0]:
-		if absf(z_pos) + 7.5 <= play_edge:
-			scenery.add_child(_build_gantry_crane(Vector3(half_land - 8.0, 0.02, z_pos), PI * 0.5, z_pos > 0.0))
+	var crane_inset := 14.0
+	if half_land > crane_inset + 24.0:
+		for x_pos: float in [-96.0, 24.0, 108.0]:
+			if absf(x_pos) + 8.0 <= play_edge:
+				scenery.add_child(_build_gantry_crane(
+						Vector3(x_pos, 0.02, half_land - crane_inset), PI, x_pos > 0.0))
+		for z_pos: float in [-72.0, 48.0]:
+			if absf(z_pos) + 8.0 <= play_edge:
+				scenery.add_child(_build_gantry_crane(
+						Vector3(half_land - crane_inset, 0.02, z_pos), -PI * 0.5, z_pos > 0.0))
 
 	# Additional waterfront destructible container stacks on the south apron
 	for x_pos: float in [-144.0, -48.0, 64.0, 152.0]:
@@ -1209,13 +1245,6 @@ static func _build_waterfront_quays(targets: Node3D, scenery: Node3D,
 				Vector3(x_pos, 0.02, half_land - 12.0), 0.0, Vector3(19.0, 26.0, 19.0), spec,
 				KIT_SCALE_CONTAINER, "containers", Color("#9a533b"), _container_stack(layers, rng))
 		next_id += 1
-
-	# Small moored craft along the quay wall.
-	for x_pos: float in [-168.0, -20.0, 88.0]:
-		if absf(x_pos) + 8.0 > play_edge:
-			continue
-		_add_kit_scenery(scenery, MOORED_BOATS[posmod(int(x_pos) + next_id, MOORED_BOATS.size())],
-				Vector3(x_pos, -1.1, half_land + 6.5), PI, KIT_SCALE_BOAT)
 
 
 static func _add_lighthouse(targets: Node3D, at: Vector3) -> void:
@@ -1418,6 +1447,8 @@ static func _ensure_materials() -> void:
 	_mats["concrete_light"] = _simple_mat(Color("#b6b0a3"), 0.88, 0.0)
 	_mats["concrete_warm"] = _simple_mat(Color("#9e8f7b"), 0.90, 0.0)
 	_mats["seawall"] = _simple_mat(Color("#54595c"), 0.94, 0.0)
+	# Warm light natural oak matching the bedroom desk/trim under main-world Filmic lighting
+	_mats["sandbox_wood"] = _simple_mat(Color(0.73, 0.59, 0.44), 0.78, 0.0)
 	_mats["steel_dark"] = _simple_mat(Color("#2f363c"), 0.58, 0.42)
 	_mats["steel_light"] = _simple_mat(Color("#8d969d"), 0.52, 0.48)
 	_mats["crane_red"] = _simple_mat(Color("#bf442c"), 0.58, 0.22)

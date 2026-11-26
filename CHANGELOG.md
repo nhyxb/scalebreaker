@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-11-26 — 阶段 2 录屏问题修复：移除外海/船礁、主世界微缩沙盘木框、卧室单灯阴影、桌面疏朗化与启动报错治理
+
+备份：`backups/20261126_130550_phase2_diorama_polish/{scenes,scripts,tests,rust/src,project.godot,CHANGELOG.md,MEMORY.md}`（改动前完整源码副本）。
+回滚：
+
+```sh
+cp -a backups/20261126_130550_phase2_diorama_polish/scenes/. scenes/
+cp -a backups/20261126_130550_phase2_diorama_polish/scripts/. scripts/
+cp -a backups/20261126_130550_phase2_diorama_polish/tests/. tests/
+cp -a backups/20261126_130550_phase2_diorama_polish/rust/src/. rust/src/
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+```
+
+### 一、移除外围巨型海面与外海模型，龙门吊内缩防出框（`scenes/district.tscn`、`scenes/district.gd`、`scenes/district_expansion.gd`）
+
+- 移除 `scenes/district.tscn` 中原 `3600 × 3600 m` 的 `Water` 节点与 `WaterMesh`/`WaterMaterial`，同步清理 `scenes/district.gd::_resize_land()` 中的 `$Water` 扩容逻辑。
+- 移除 `scenes/district_expansion.gd` 中所有位于城市陆地（`half_land`）之外的停泊货轮、渔船、大小邮轮、航道浮标、4 块远海岩石与旧外挂灰海堤（保留陆地内系船柱与船坞内船体）。
+- 岸线龙门吊（`_build_waterfront_quays()`）改为向港内朝向（南岸 `PI`、东岸 `-PI/2`）并内缩至 `half_land - 14.0`，内陆集装箱区龙门吊增加边界保护，实机几何审计确认陆地外（除 `SandboxFrame` 外）零网格越界（`outliers = 0`）。
+
+### 二、主世界浅原木微缩沙盘木框对齐桌面 + 默认白雾清零（`scenes/district_expansion.gd`、`scenes/skybox_bedroom.gd`、`scenes/main.tscn`、`rust/src/game.rs`）
+
+- 新增 `district_expansion.gd::_build_sandbox_frame()`：沿 `1418 × 1418 m` 陆地四周合并生成单个 60 三角面的 `SandboxFrame`（`1 draw call`、无碰撞、不挂进 `Scenery` 以防分块裁剪误伤），浅原木色系（`Color(0.73, 0.59, 0.44)`）与卧室书桌自然衔接；木框底面位于 `y = -32.0 m`（1:6667 下对应 `4.8 mm` 托盘厚），框外 360° 完整露出书桌桌面、键盘、显示器、台灯与转椅。
+- `skybox_bedroom.gd::_build_sandbox()` 移除卧室侧重复 CSG 木框，避免双包边与 Z-fighting，将 `sandbox_anchor` 精确对齐至 `DESK_TOP + 32.0 * SKY_SCALE`（`0.7548 m`），仅在桌面铺设柔和边缘渐变接触影贴片（`SandboxContactShadow`），任何视角与身高下沙盘木框底面均严丝合缝贴合桌面。
+- `scenes/main.tscn` 与 `rust/src/game.rs::view_fog_density()`：在默认及更宽视距下将 `fog_density` 置 `0.0`（保留 `fog_enabled = true` 与既有起止距离语义），彻底消除沙盘木框边缘发光白边；用户手动调低视距（`< DEFAULT_VIEW_DISTANCE`）时自动恢复 `0.85` 边界雾。
+
+### 三、卧室轻量单灯阴影与明暗层次（`scenes/skybox_bedroom.gd`、`scenes/harbor_skybox.gd`）
+
+- 卧室环境光 `ambient_light_energy` 降至 `0.28`，平衡 `WindowSun` 主光能量（`0.76`）与 AGX 曝光（`0.82`），彻底解决 `BG_CANVAS` 合成后向阳桌面/地板过曝与背光墙发灰的“纸片感”。
+- 桌面端仅对 `WindowSun` 开启轻量单级正交阴影（`SHADOW_ORTHOGONAL`、`max_distance = 6.0`、`shadow_bias = 0.02`、`shadow_normal_bias = 1.2`、`shadow_blur = 2.2`、`shadow_opacity = 0.56`），`harbor_skybox.gd` 将子视口 `positional_shadow_atlas_size` 置 `0` 避免无谓图集开销；仅 `Shell` 与主要大件家具投射阴影，小饰品与移动端关闭阴影。
+- 顺带修复 `harbor_skybox.gd::_resize()` 在窗口动态缩放/平铺时双轴独立夹紧导致 SubViewport 宽高比偏移的问题，改为单标量等比缩放并在 `_process` 中同步检测主视口尺寸，确保任何分辨率下 1:6667 透视零偏差。
+
+### 四、清理 `BearDesk` 并疏朗化桌面布局（`scenes/skybox_bedroom.gd`）
+
+- 移除桌面棱角过重的低模 `BearDesk`（`bear.glb`）。
+- 书桌宽度微调至 `1.63 m`（台面仍精确齐平 `0.75 m`），所有剩余桌面物件相对 `21.27 cm` 沙盘边缘向外退开 15–26 cm：`ComputerScreen` 左移至 `x = -0.46`、`LampRoundTable` 右移至 `x = +0.48`、左右音箱外移至 `x = ±0.74`，沙盘正后方 60+ cm 北窗天光完全敞开无遮挡。
+
+### 五、运行时 `ERROR` 排查与修复（`rust/src/game.rs`）
+
+- 修复两类实机运行时 `ERROR`：
+  1. `HarborGame::on_notification()` 在 `show_menu()` / `start_round()` / `pause()` / `present()` 期间触发同步系统或场景树通知时偶发 `Gd<T>::bind_mut() failed, already bound` panic：改用 `self.base_mut()` 作用域包裹 `set_pause`、`MapSlot.add_child/remove_child`、`set_mouse_mode` 与 `Interface.call`，安全释放可重入借用锁。
+  2. X11 未获焦窗口下调用 `Input::set_mouse_mode(MouseMode::CAPTURED)` 触发 `ERROR: NO GRAB`：改为仅在 `DisplayServer::window_is_focused()` 为真时捕获鼠标，并在 `NOTIFICATION_APPLICATION_FOCUS_IN` 获焦时自动补捕获。
+
+### 六、AMD Renoir 核显 ABBA 实测与四视角目视核验
+
+- 同口径 ABBA 帧率基准（`build/tmp/diorama_fps_bench.gd`，`MESA_LOADER_DRIVER_OVERRIDE=radeonsi`，`gl_compatibility`，`vsync=0`，全图俯瞰 `(0, 620, 980) -> (0,0,0)`，预热 360 帧、每档正反序各 90 帧）：
+
+  | 配置 | 口径（SubViewport / 阴影） | 数据源 | 正序 FPS | 反序 FPS | ABBA 均帧 | 相对无阴影 Δ | Draw Calls | Primitives |
+  |---|---|---|---:|---:|---:|---:|---:|---:|
+  | 无 Skybox | 禁用 / 关 | `diorama_fps_bench.gd` | 42.9 | 49.8 | 46.4 | +0.1 | 2,637 | 3,156,916 |
+  | `0.85` + 2× MSAA（无阴影） | 1629×938 / 关 | `diorama_fps_bench.gd` | 45.4 | 47.2 | 46.3 | +0.0 | 2,646 | 3,157,625 |
+  | **`0.85` + 2× MSAA + 单级正交阴影（最终）** | **1629×938 / 开（隔帧）** | **`diorama_fps_bench.gd`** | **45.5** | **47.3** | **46.4** | **+0.1** | **2,652** | **3,158,281** |
+
+- 沿用 `build/tmp/ab_probe.gd`（`1280×720`、`gl_compatibility`、`vsync=0`）单次复测：**50.0 FPS**（worst 50.0，draws 2,644，因移除外海船礁与旧海堤减少 ~42 draw calls）。单级正交阴影实测几乎零掉帧（远低于 3 FPS 阈值），故桌面端保留开启。
+- 实机四视角截屏（`build/tmp/diorama_shots/`）逐张核验通过：500 m 东南向斜下俯瞰（可见木框、桌面、门框、衣帽架）、500 m 北向斜下俯瞰（木框、桌面、显示器、北窗无遮挡、零白雾边）、100 m 南向回望（转椅、衣帽架、地板光影立体）、城内低仰角（无小熊、北窗通透），及卧室全景/桌面近景确认窗格阳光投影细腻、零阴影痤疮、零过曝。
+
+### 七、回归验证
+
+- Rust：`cargo build --locked`（零警告）与 `cargo test --locked` **40/40 通过**（新增默认/低视距 `view_fog_density` 断言）。
+- Godot（`--headless --fixed-fps 60`，`XDG_DATA_HOME="$PWD/build/xdg"`）：**playtest 212**（已同步校验无 `BearDesk`/无 `Water`/有 `SandboxFrame`）、**growth 192、brawl 43、mode_menu 45、touch 42、audio 36、sit_crush_gameplay 44、sit_crush 57**，合计 **671 项全绿**；`scripts/district_stats.gd` 确认 `SandboxFrame` 仅 1 节点 60 面；`--quit-after 5` 零错误。
+
+---
+
 ## 2026-11-26 — 阶段 2 收尾：Kenney 家具卧室替换灰盒、Skybox 去锯齿/防漏缝、椅上超巨锚点与雾色调和
 
 备份：`backups/20261126_110542_phase2_bedroom_furniture/{scenes,scripts,tests,rust/src,project.godot,CHANGELOG.md,MEMORY.md}`（改动前完整源码副本）。

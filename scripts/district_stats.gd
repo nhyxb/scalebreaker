@@ -15,7 +15,7 @@ extends SceneTree
 
 ## Batches hold the global prop MultiMeshes, BuildingBatches the three building layers.
 const ROOTS: Array[String] = ["Roads", "Lots", "Scenery", "Targets", "Batches",
-		"BuildingBatches"]
+		"BuildingBatches", "SandboxFrame"]
 const TOP_ASSETS := 12
 
 var _game: Node

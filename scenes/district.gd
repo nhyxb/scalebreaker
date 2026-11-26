@@ -75,12 +75,6 @@ func _resize_land(surface: MeshInstance3D, land: BoxMesh) -> void:
 		wall.position = outward * edge + Vector3.UP * wall.position.y
 		wall.shape = wall_shape
 
-	var water: MeshInstance3D = $Water
-	if water.mesh.size.x < map_side + 200.0:
-		var sea := water.mesh.duplicate() as PlaneMesh
-		sea.size = Vector2.ONE * (map_side + 200.0)
-		water.mesh = sea
-
 
 func _fit_core() -> void:
 	var limit := Vector2.ONE * (play_edge - 0.5)

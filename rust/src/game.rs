@@ -1,6 +1,6 @@
 use godot::classes::{
-    Camera3D, DirectionalLight3D, Input, InputEvent, Node, PackedScene, WorldEnvironment,
-    environment::FogMode, input::MouseMode, notify::Node3DNotification,
+    Camera3D, DirectionalLight3D, DisplayServer, Input, InputEvent, Node, PackedScene,
+    WorldEnvironment, environment::FogMode, input::MouseMode, notify::Node3DNotification,
 };
 use godot::prelude::*;
 use std::time::Instant;
@@ -32,6 +32,17 @@ const FOG_MAP_END: f32 = 1.12;
 /// preventing 500 m giants overlooking the whole island from being veiled by near fog.
 const FOG_ALTITUDE_BEGIN_SLACK: f32 = 0.45;
 const FOG_ALTITUDE_END_SLACK: f32 = 0.85;
+
+fn view_fog_density(draw_distance: f32) -> f32 {
+    // At or above the shipped view distance the whole city sits inside a tabletop diorama frame
+    // on the bedroom desk, so zero fog density removes the pale glow along the wood rim while
+    // lowered view-distance settings still keep their distance-veiling haze.
+    if draw_distance >= DEFAULT_VIEW_DISTANCE {
+        0.0
+    } else {
+        0.85
+    }
+}
 
 fn view_fog_bounds(draw_distance: f32, camera_height: f32, map_side: f32) -> (f32, f32) {
     let distance = draw_distance.max(1.0);
@@ -102,6 +113,12 @@ impl INode3D for HarborGame {
                 }
             }
             Node3DNotification::APPLICATION_PAUSED => self.pause(),
+            Node3DNotification::APPLICATION_FOCUS_IN
+                if !cfg!(target_os = "android") && self.screen == "playing" && !self.paused =>
+            {
+                let _base = self.base_mut();
+                Input::singleton().set_mouse_mode(MouseMode::CAPTURED);
+            }
             Node3DNotification::APPLICATION_FOCUS_OUT if cfg!(target_os = "android") => {
                 self.pause();
             }
@@ -200,9 +217,10 @@ impl HarborGame {
         let mut district = round.get_node_as::<Node3D>("District");
         district.set("map_side", &settings.map_side.to_variant());
         district.set("micro_ground", &mode.has_growth().to_variant());
-        self.base()
-            .get_node_as::<Node3D>("MapSlot")
-            .add_child(&round);
+        {
+            let mut slot = self.base_mut().get_node_as::<Node3D>("MapSlot");
+            slot.add_child(&round);
+        }
         self.round = Some(round);
         self.present("playing");
         if cfg!(target_os = "android") {
@@ -229,7 +247,10 @@ impl HarborGame {
     fn pause(&mut self) {
         if self.screen == "playing" {
             self.paused = true;
-            self.base().get_tree().set_pause(true);
+            {
+                let mut tree = self.base_mut().get_tree();
+                tree.set_pause(true);
+            }
             self.present("paused");
         }
     }
@@ -248,12 +269,11 @@ impl HarborGame {
         self.stop_gameplay_sfx();
         self.clear_map();
         let preview = self.district_scene.as_ref().unwrap().instantiate().unwrap();
-        self.base()
-            .get_node_as::<Node3D>("MapSlot")
-            .add_child(&preview);
-        self.base()
-            .get_node_as::<Camera3D>("Overview")
-            .make_current();
+        {
+            let base = self.base_mut();
+            base.get_node_as::<Node3D>("MapSlot").add_child(&preview);
+            base.get_node_as::<Camera3D>("Overview").make_current();
+        }
         self.present("menu");
     }
 
@@ -414,12 +434,13 @@ impl HarborGame {
 
     fn unpause_tree(&mut self) {
         self.paused = false;
-        self.base().get_tree().set_pause(false);
+        let mut tree = self.base_mut().get_tree();
+        tree.set_pause(false);
     }
 
     fn clear_map(&mut self) {
         self.round = None;
-        let mut slot = self.base().get_node_as::<Node3D>("MapSlot");
+        let mut slot = self.base_mut().get_node_as::<Node3D>("MapSlot");
         for mut child in slot.get_children().iter_shared() {
             slot.remove_child(&child);
             child.queue_free();
@@ -436,24 +457,38 @@ impl HarborGame {
                     round.clear_touch();
                     (round.mode, round.player)
                 });
-        Input::singleton().set_mouse_mode(if screen == "playing" && !cfg!(target_os = "android") {
+        let mouse_mode = if screen == "playing"
+            && !cfg!(target_os = "android")
+            && DisplayServer::singleton().window_is_focused()
+        {
             MouseMode::CAPTURED
         } else {
             MouseMode::VISIBLE
-        });
-        let mut view = self.view();
-        view.call(
-            "show_screen",
-            &[
-                GString::from(screen).to_variant(),
-                (mode as i32).to_variant(),
-                self.round.to_variant(),
-                (player as i32).to_variant(),
-            ],
-        );
-        if screen == "playing" {
-            let snapshot = self.round.as_ref().unwrap().bind().snapshot();
-            view.call("update_hud", &[snapshot.to_variant()]);
+        };
+        let round_arg = self.round.to_variant();
+        let snapshot_arg = if screen == "playing" {
+            Some(self.round.as_ref().unwrap().bind().snapshot().to_variant())
+        } else {
+            None
+        };
+        {
+            // Release the Rust borrow guard across calls that can dispatch synchronous OS/tree
+            // notifications (WM_WINDOW_FOCUS_OUT, WM_MOUSE_ENTER, etc.) back to on_notification.
+            let base = self.base_mut();
+            Input::singleton().set_mouse_mode(mouse_mode);
+            let mut view = base.get_node_as::<Node>("Interface");
+            view.call(
+                "show_screen",
+                &[
+                    GString::from(screen).to_variant(),
+                    (mode as i32).to_variant(),
+                    round_arg,
+                    (player as i32).to_variant(),
+                ],
+            );
+            if let Some(snapshot) = snapshot_arg {
+                view.call("update_hud", &[snapshot]);
+            }
         }
         self.sync_view_fog();
         if cfg!(target_os = "android") {
@@ -498,6 +533,7 @@ impl HarborGame {
         self.fog_camera_height = camera_height;
         self.fog_map_side = map_side;
         let (begin, end) = view_fog_bounds(draw_distance, camera_height, map_side);
+        let density = view_fog_density(draw_distance);
         if let Some(mut env) = self
             .base()
             .get_node_as::<WorldEnvironment>("Atmosphere")
@@ -505,13 +541,15 @@ impl HarborGame {
         {
             env.set_fog_enabled(true);
             env.set_fog_mode(FogMode::DEPTH);
+            env.set_fog_density(density);
             env.set_fog_depth_begin(begin);
             env.set_fog_depth_end(end);
         }
     }
 
-    fn handle_interface_back(&self) -> bool {
-        self.view().call("handle_back", &[]).to::<bool>()
+    fn handle_interface_back(&mut self) -> bool {
+        let mut view = self.base_mut().get_node_as::<Node>("Interface");
+        view.call("handle_back", &[]).to::<bool>()
     }
 
     fn view(&self) -> Gd<Node> {
@@ -521,7 +559,7 @@ impl HarborGame {
 
 #[cfg(test)]
 mod tests {
-    use super::view_fog_bounds;
+    use super::{DEFAULT_VIEW_DISTANCE, view_fog_bounds, view_fog_density};
 
     #[test]
     fn view_fog_veils_the_draw_boundary_while_keeping_feet_clear_at_altitude() {
@@ -554,5 +592,10 @@ mod tests {
         // well past 1,000 m with full fog pushed beyond 1,900 m.
         let (giant500_begin, giant500_end) = view_fog_bounds(300.0, 560.0, 1418.0);
         assert!(giant500_begin > 1000.0 && giant500_end > 1900.0);
+        // Default and overview view distances clear the fog density so the diorama wood frame
+        // has no white edge glow, while lowered view distances restore boundary fog.
+        assert_eq!(view_fog_density(DEFAULT_VIEW_DISTANCE), 0.0);
+        assert_eq!(view_fog_density(460.0), 0.0);
+        assert!(view_fog_density(DEFAULT_VIEW_DISTANCE - 40.0) > 0.5);
     }
 }

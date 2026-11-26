@@ -81,19 +81,22 @@ func _bedroom_skybox() -> void:
 	var furniture := bedroom.get_node_or_null("Furniture")
 	var required := [
 		"Desk", "ChairDesk", "ComputerScreen", "ComputerKeyboard", "ComputerMouse",
-		"LampRoundTable", "BooksDesk", "BearDesk", "PlantSmallDesk", "SpeakerLeft",
+		"LampRoundTable", "BooksDesk", "PlantSmallDesk", "SpeakerLeft", "SpeakerRight",
 		"BedDouble", "Pillow", "PillowLong", "CabinetBedDrawer", "BookcaseOpen",
 		"BookcaseClosedDoors", "RugRounded", "PottedPlant", "LampSquareCeiling",
 		"Trashcan", "CoatRackStanding",
 	]
-	var all_present := furniture != null
+	var all_present := furniture != null and furniture.get_node_or_null("BearDesk") == null
 	if all_present:
 		for item: String in required:
 			if furniture.get_node_or_null(item) == null:
 				all_present = false
 				break
-	_check(all_present and _count_collisions_in(bedroom) == 0,
-			"all Kenney furniture landmarks load into the bedroom with zero physics collisions")
+	var district := _game.get_node_or_null("MapSlot/District")
+	var diorama_ok := district != null and district.get_node_or_null("Water") == null \
+			and district.get_node_or_null("SandboxFrame") != null
+	_check(all_present and diorama_ok and _count_collisions_in(bedroom) == 0,
+			"all Kenney furniture landmarks load without BearDesk/Water, with SandboxFrame and zero collisions")
 	var sandbox_anchor: Node3D = bedroom.sandbox_anchor
 	var ug_anchor: Node3D = bedroom.ultra_giant_anchor
 	var to_sandbox := Vector3.ZERO

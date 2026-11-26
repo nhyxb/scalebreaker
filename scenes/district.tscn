@@ -35,14 +35,6 @@ size = Vector3(24, 0.14, 24)
 [sub_resource type="BoxShape3D" id="BoundaryShape"]
 size = Vector3(1414, 120, 2)
 
-[sub_resource type="StandardMaterial3D" id="WaterMaterial"]
-albedo_color = Color(0.09, 0.24, 0.28, 1)
-roughness = 0.56
-
-[sub_resource type="PlaneMesh" id="WaterMesh"]
-material = SubResource("WaterMaterial")
-size = Vector2(3600, 3600)
-
 [node name="District" type="Node3D"]
 script = ExtResource("District")
 
@@ -55,10 +47,6 @@ mesh = SubResource("GroundMesh")
 
 [node name="Collision" type="CollisionShape3D" parent="Ground"]
 shape = SubResource("GroundShape")
-
-[node name="Water" type="MeshInstance3D" parent="."]
-position = Vector3(0, -0.82, 0)
-mesh = SubResource("WaterMesh")
 
 [node name="Boundary" type="StaticBody3D" parent="."]
 collision_layer = 2
