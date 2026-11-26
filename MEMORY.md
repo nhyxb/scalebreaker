@@ -2,7 +2,7 @@
 
 ## 项目名称（2026-11-26 确认）
 
-- 项目已更名为 **Scalebreaker**（中文名待定）。只改玩家可见字符串：`project.godot` 的 `config/name`（窗口标题同源）、主菜单大标题与首页入口、港区分页标题、`export_presets.cfg` 的 Android `package/name`。
+- 项目已更名为 **Scalebreaker**（中文名待定）。改名范围：`project.godot` 的 `config/name`（窗口标题同源）、主菜单大标题与首页入口、港区分页标题、`export_presets.cfg` 的 Android `package/name`；**README.md 与 CHANGELOG.md 头部也已改为 Scalebreaker 门面**（README 开头注明原名《港区警报》，2026-11-26 公开 GitHub 仓库时更新）。PLAN.md 仍是历史设计文档、保留旧名不改；CHANGELOG 历史条目里的旧名属历史记录，不改。
 - **内部一律不改**：包名 `org.gba.harboralert`（改了旧包无法覆盖升级）、`assets/harbor-alert-icon.png` 等路径、Rust crate `harbor`、GDScript `class_name`、`user://` 存档路径与键、技能 `harbor-alert-workflow`、`native/harbor.gdextension`、`scripts/build_android.sh`。
 - 主菜单大标题用 `interface.gd::_set_menu_title()` 自适应字号（目标 428 px、≥44 px）：拉丁文名比中文页名宽，不缩放会把 442 px 菜单列撑宽。
 
