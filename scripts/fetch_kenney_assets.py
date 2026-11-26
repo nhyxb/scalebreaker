@@ -93,6 +93,17 @@ PACKS: dict[str, tuple[str, list[str]]] = {
             "police", "firetruck", "ambulance",
         ],
     ),
+    "furniture": (
+        "kenney_furniture-kit.zip",
+        [
+            "desk", "chairDesk",
+            "computerScreen", "computerKeyboard", "computerMouse",
+            "lampRoundTable", "books", "bear", "plantSmall1", "speakerSmall",
+            "bedDouble", "pillow", "pillowLong", "cabinetBedDrawer",
+            "bookcaseOpen", "bookcaseClosedDoors", "rugRounded", "pottedPlant",
+            "lampSquareCeiling", "trashcan", "coatRackStanding",
+        ],
+    ),
 }
 
 
@@ -111,13 +122,17 @@ def download(pack: str, zip_name: str) -> str:
 
 def extract(pack: str, zip_path: str, stems: list[str]) -> int:
     out_dir = os.path.join(ASSET_ROOT, pack)
-    tex_dir = os.path.join(out_dir, "Textures")
-    os.makedirs(tex_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
     written = 0
     with zipfile.ZipFile(zip_path) as archive:
         names = set(archive.namelist())
+        model_dir = (
+            "Models/GLB format"
+            if any(n.startswith("Models/GLB format/") for n in names)
+            else "Models/GLTF format"
+        )
         for stem in stems:
-            member = f"Models/GLB format/{stem}.glb"
+            member = f"{model_dir}/{stem}.glb"
             if member not in names:
                 raise SystemExit(f"{zip_path}: missing {member}")
             with archive.open(member) as src:
@@ -125,13 +140,14 @@ def extract(pack: str, zip_path: str, stems: list[str]) -> int:
             with open(os.path.join(out_dir, f"{stem}.glb"), "wb") as dst:
                 dst.write(data)
             written += 1
-        atlas = "Models/GLB format/Textures/colormap.png"
-        if atlas not in names:
-            raise SystemExit(f"{zip_path}: missing {atlas}")
-        with archive.open(atlas) as src:
-            data = src.read()
-        with open(os.path.join(tex_dir, "colormap.png"), "wb") as dst:
-            dst.write(data)
+        atlas = f"{model_dir}/Textures/colormap.png"
+        if atlas in names:
+            tex_dir = os.path.join(out_dir, "Textures")
+            os.makedirs(tex_dir, exist_ok=True)
+            with archive.open(atlas) as src:
+                data = src.read()
+            with open(os.path.join(tex_dir, "colormap.png"), "wb") as dst:
+                dst.write(data)
     return written
 
 

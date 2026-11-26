@@ -23,10 +23,15 @@ const DEFAULT_VIEW_DISTANCE: f32 = if cfg!(target_os = "android") {
 } else {
     300.0
 };
-/// Fraction of `map_side` where the haze starts and fully resolves. The harbour is 1,418 m
-/// across, so 0.30/0.55 put the fog at ~425 m / ~780 m: beyond the whole city core.
-const FOG_MAP_BEGIN: f32 = 0.30;
-const FOG_MAP_END: f32 = 0.55;
+/// Fraction of `map_side` where the haze starts and fully resolves. On the 1,418 m harbour,
+/// 0.52 / 1.12 push the haze past the island core (~737 m / ~1,588 m) so the city stays crisp
+/// while the outer sea blends gently into the warm bedroom skybox.
+const FOG_MAP_BEGIN: f32 = 0.52;
+const FOG_MAP_END: f32 = 1.12;
+/// Extra horizontal slack per metre of camera altitude at or above the shipped view distance,
+/// preventing 500 m giants overlooking the whole island from being veiled by near fog.
+const FOG_ALTITUDE_BEGIN_SLACK: f32 = 0.45;
+const FOG_ALTITUDE_END_SLACK: f32 = 0.85;
 
 fn view_fog_bounds(draw_distance: f32, camera_height: f32, map_side: f32) -> (f32, f32) {
     let distance = draw_distance.max(1.0);
@@ -35,9 +40,9 @@ fn view_fog_bounds(draw_distance: f32, camera_height: f32, map_side: f32) -> (f3
     let mut end = distance * FOG_END_RATIO;
     if draw_distance >= DEFAULT_VIEW_DISTANCE && map_side > 0.0 {
         // Everything is batched and always visible now; the fog, not a draw-distance cut,
-        // keeps the far edge of the map from popping.
-        begin = begin.max(map_side * FOG_MAP_BEGIN);
-        end = end.max(map_side * FOG_MAP_END);
+        // softens the far sea rim without obscuring high-altitude overviews.
+        begin = begin.max(map_side * FOG_MAP_BEGIN + height * FOG_ALTITUDE_BEGIN_SLACK);
+        end = end.max(map_side * FOG_MAP_END + height * FOG_ALTITUDE_END_SLACK);
     }
     let end = end.hypot(height);
     let begin = begin
@@ -545,5 +550,9 @@ mod tests {
         // The 460 m overview keeps its own 0.92 of the draw distance when the map is small.
         let (small_begin, small_end) = view_fog_bounds(460.0, 1.5, 300.0);
         assert!(small_begin < 400.0 && small_end < 460.0);
+        // A 500 m giant overlooking the whole 1,418 m map (camera ~560 m high) sees clear city
+        // well past 1,000 m with full fog pushed beyond 1,900 m.
+        let (giant500_begin, giant500_end) = view_fog_bounds(300.0, 560.0, 1418.0);
+        assert!(giant500_begin > 1000.0 && giant500_end > 1900.0);
     }
 }

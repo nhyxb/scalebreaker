@@ -1,62 +1,111 @@
 extends Node3D
-## 1:1 bedroom shell rendered inside the harbour skybox SubViewport (scenes/harbor_skybox.gd).
-##新版 Phase-2 step 1: CSG walls/floor/ceiling/window with Poly Haven CC0 textures
-## (assets/textures/polyhaven, all CC0), dimensionally correct gray-box furniture placeholders
-## (desk, chair, bed, bookshelf — final furniture style is a later step), and the desktop
-## sandbox whose inner tray is exactly 1.418 m / 6666.67 = 21.27 cm square, centred on the desk,
-## mirroring the harbour footprint the scale-matched camera hovers over.
+## 1:1 soft Japanese cream & light natural-wood bedroom rendered inside the harbour skybox
+## SubViewport (scenes/harbor_skybox.gd). Uses real Kenney Furniture Kit GLB assets
+## (assets/kenney/furniture/, visual-only, zero physics collision), an airtight CSG room
+## shell with baseboards and a recessed sunlit two-pane window, a 21.27 cm desktop harbour
+## sandbox centred at (0, DESK_TOP, 0), and an exported `ultra_giant_anchor` above the swivel
+## chair cushion ready for Phase 3 seated anime Yumeka.
 
-const RES_PATH := "res://assets/textures/polyhaven/"
+const FLOOR_WOOD_DIFF := "res://assets/textures/polyhaven/floor_wood_diff.jpg"
+const FURNITURE_DIR := "res://assets/kenney/furniture/"
 ## 1 m of harbour ↔ 0.15 mm of bedroom (1:6667). Kept in one place with the skybox sync.
 const SKY_SCALE := 1.0 / 6666.67
 ## Inner tray side for the default 1418 m harbour, in metres.
 const SANDBOX_SIDE := 0.2127
 
-const ROOM := Vector3(4.4, 2.8, 3.6)  # width, height, depth
-const WALL := 0.12
+## Room shell in metres: north wall sits just behind the desk (z = ROOM_Z_MIN) so the sunlit
+## window and desktop props frame the harbour skyline naturally from low city elevations.
+const ROOM := Vector3(4.6, 2.6, 3.8)
+const ROOM_Z_MIN := -0.54
+const ROOM_Z_MAX := ROOM_Z_MIN + ROOM.z
+const ROOM_Z_CENTER := (ROOM_Z_MIN + ROOM_Z_MAX) * 0.5
+const WALL := 0.14
 const DESK_TOP := 0.75
-const WINDOW := Rect2(Vector2(0.6, 0.9), Vector2(1.7, 1.25))  # x from centre, sill height
+
+## Two-pane north window centred behind the desk.
+const WIN_CENTER_X := -0.05
+const WIN_WIDTH := 1.84
+const WIN_SILL_Y := 0.94
+const WIN_HEIGHT := 1.28
+
+## Uniform scale for chairDesk.glb (seat cushion top raw Y = 0.2335 -> 0.4553 m real metric).
+const CHAIR_SCALE := 1.95
+const CHAIR_RAW_SEAT_TOP_Y := 0.2335
+const CHAIR_RAW_SEAT_CENTER_Z_OFFSET := 0.047
 
 var _mat_wall: StandardMaterial3D
 var _mat_ceiling: StandardMaterial3D
-var _mat_floor: StandardMaterial3D
-var _mat_wood: StandardMaterial3D
-var _mat_gray: StandardMaterial3D
+var _mat_floor: Material
+var _mat_wood_trim: StandardMaterial3D
+var _mat_sash: StandardMaterial3D
+var _mat_door: StandardMaterial3D
+var _mat_metal: StandardMaterial3D
+var _mat_tray_base: StandardMaterial3D
+
 var sandbox_anchor: Node3D
+## Anchor perched directly above the chairDesk.glb cushion, facing `sandbox_anchor`, for
+## attaching the Phase 3 seated ultra-giant Yumeka model.
+@export var ultra_giant_anchor: Node3D
+var ultra_giant_seat_y := 0.0
 
 
 func _ready() -> void:
 	_build_materials()
 	_build_shell()
-	_build_furniture()
 	_build_sandbox()
+	_build_furniture()
 	_build_lights()
 	_build_environment()
 
 
 func _build_materials() -> void:
-	_mat_wall = _textured("wall_plaster", Color(1, 1, 1), Vector3(2.6, 2.6, 2.6))
-	_mat_ceiling = _textured("wall_plaster", Color(0.97, 0.97, 1.0), Vector3(3.4, 3.4, 3.4))
-	_mat_floor = _textured("floor_wood", Color(1, 1, 1), Vector3(2.9, 2.9, 2.9))
-	_mat_wood = _textured("floor_wood", Color(0.86, 0.8, 0.72), Vector3.ONE)
-	var rough := StandardMaterial3D.new()
-	rough.albedo_color = Color(0.62, 0.62, 0.62)
-	rough.roughness = 0.9
-	_mat_gray = rough
+	# Soft Japanese cream-white matte plaster (clean low-saturation finish, zero gritty banding).
+	_mat_wall = _matte(Color(0.945, 0.916, 0.862), 0.92)
+	_mat_ceiling = _matte(Color(0.972, 0.956, 0.922), 0.95)
+	_mat_floor = _light_oak_floor_material()
+	# Pale natural birch/oak wood matching Kenney furniture wood tone.
+	_mat_wood_trim = _matte(Color(0.865, 0.768, 0.632), 0.74)
+	_mat_sash = _matte(Color(0.955, 0.938, 0.902), 0.68)
+	_mat_door = _matte(Color(0.928, 0.892, 0.835), 0.76)
+	_mat_metal = _matte(Color(0.74, 0.75, 0.76), 0.35, 0.45)
+	_mat_tray_base = _matte(Color(0.78, 0.76, 0.72), 0.90)
 
 
-func _textured(prefix: String, tint: Color, uv1_scale: Vector3) -> StandardMaterial3D:
+func _matte(color: Color, roughness: float, metallic := 0.0) -> StandardMaterial3D:
 	var mat := StandardMaterial3D.new()
-	var diff := load(RES_PATH + prefix + "_diff.jpg") as Texture2D
-	var rough := load(RES_PATH + prefix + "_rough.jpg") as Texture2D
-	if diff != null:
-		mat.albedo_texture = diff
-		mat.albedo_color = tint
-	if rough != null:
-		mat.roughness_texture = rough
-		mat.roughness = 1.0
-	mat.metallic = 0.0
-	mat.uv1_scale = uv1_scale
+	mat.albedo_color = color
+	mat.roughness = roughness
+	mat.metallic = metallic
+	mat.specular_mode = BaseMaterial3D.SPECULAR_SCHLICK_GGX
+	return mat
+
+
+func _light_oak_floor_material() -> Material:
+	var diff := load(FLOOR_WOOD_DIFF) as Texture2D
+	if diff == null:
+		return _matte(Color(0.86, 0.77, 0.63), 0.74)
+	# Lift the walnut plank texture into a soft pale Japanese oak floor while preserving subtle
+	# plank lines (compatible with GL Compatibility on desktop & mobile).
+	var shader := Shader.new()
+	shader.code = """
+shader_type spatial;
+uniform sampler2D wood_tex : source_color, filter_linear_mipmap, repeat_enable;
+uniform vec2 uv_scale = vec2(3.6, 3.6);
+uniform vec3 pale_base = vec3(0.84, 0.74, 0.59);
+void fragment() {
+	vec3 raw = texture(wood_tex, UV * uv_scale).rgb;
+	float luma = dot(raw, vec3(0.299, 0.587, 0.114));
+	float s_luma = pow(max(luma, 0.0001), 0.4545);
+	float grain = clamp((s_luma - 0.43) * 1.15, -0.18, 0.18);
+	ALBEDO = clamp(pale_base + vec3(grain * 0.65, grain * 0.58, grain * 0.48), vec3(0.45), vec3(0.95));
+	ROUGHNESS = 0.72;
+	METALLIC = 0.0;
+	SPECULAR = 0.24;
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = shader
+	mat.set_shader_parameter(&"wood_tex", diff)
 	return mat
 
 
@@ -72,162 +121,478 @@ func _box(parent: Node, size: Vector3, pos: Vector3, mat: Material,
 
 
 func _build_shell() -> void:
-	var floor_root := CSGCombiner3D.new()
-	floor_root.name = "Shell"
-	add_child(floor_root)
-	# Floor: top surface at y = 0.
-	_box(floor_root, Vector3(ROOM.x, 0.06, ROOM.z), Vector3(0, -0.03, 0), _mat_floor,
-		CSGBox3D.OPERATION_UNION)
-	# Ceiling.
-	_box(floor_root, Vector3(ROOM.x, 0.06, ROOM.z), Vector3(0, ROOM.y + 0.03, 0),
-		_mat_ceiling, CSGBox3D.OPERATION_UNION)
-	# North wall (-Z) with the window cut out; other walls are plain slabs.
-	var north := _box(floor_root, Vector3(ROOM.x, ROOM.y, WALL),
-		Vector3(0, ROOM.y * 0.5, -ROOM.z * 0.5 - WALL * 0.5), _mat_wall,
-		CSGBox3D.OPERATION_UNION)
-	north.name = "WallNorth"
-	_box(north, Vector3(WINDOW.size.x, WINDOW.size.y, WALL),
-		Vector3(-WINDOW.position.x, WINDOW.position.y, 0), _mat_wall,
-		CSGBox3D.OPERATION_SUBTRACTION)
-	_box(floor_root, Vector3(ROOM.x, ROOM.y, WALL),
-		Vector3(0, ROOM.y * 0.5, ROOM.z * 0.5 + WALL * 0.5), _mat_wall,
-		CSGBox3D.OPERATION_UNION).name = "WallSouth"
-	_box(floor_root, Vector3(WALL, ROOM.y, ROOM.z + WALL * 2.0),
-		Vector3(-ROOM.x * 0.5 - WALL * 0.5, ROOM.y * 0.5, 0), _mat_wall,
-		CSGBox3D.OPERATION_UNION).name = "WallWest"
-	_box(floor_root, Vector3(WALL, ROOM.y, ROOM.z + WALL * 2.0),
-		Vector3(ROOM.x * 0.5 + WALL * 0.5, ROOM.y * 0.5, 0), _mat_wall,
-		CSGBox3D.OPERATION_UNION).name = "WallEast"
-	# Window glass + wooden frame (the cut above leaves the opening).
-	var glass := CSGBox3D.new()
-	glass.size = Vector3(WINDOW.size.x - 0.06, WINDOW.size.y - 0.06, 0.015)
-	glass.position = Vector3(-WINDOW.position.x, WINDOW.position.y,
-			-ROOM.z * 0.5 - WALL * 0.5)
+	var shell := CSGCombiner3D.new()
+	shell.name = "Shell"
+	shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(shell)
+
+	var half_x := ROOM.x * 0.5
+	var win_left := WIN_CENTER_X - WIN_WIDTH * 0.5
+	var win_right := WIN_CENTER_X + WIN_WIDTH * 0.5
+	var win_top := WIN_SILL_Y + WIN_HEIGHT
+	var win_mid_y := WIN_SILL_Y + WIN_HEIGHT * 0.5
+
+	# Floor (top at y = 0) & ceiling (bottom at y = ROOM.y): extended past all wall faces so
+	# grazing low-elevation angles can never leak background sky through floor/wall corners.
+	_box(shell, Vector3(ROOM.x + WALL * 2.0, 0.10, ROOM.z + WALL * 2.0),
+		Vector3(0.0, -0.05, ROOM_Z_CENTER), _mat_floor)
+	_box(shell, Vector3(ROOM.x + WALL * 2.0, 0.10, ROOM.z + WALL * 2.0),
+		Vector3(0.0, ROOM.y + 0.05, ROOM_Z_CENTER), _mat_ceiling)
+
+	# North wall (-Z) assembled from 4 overlapping slabs around the exact window opening
+	# (avoids CSG subtraction offset traps and guarantees zero corner cracks).
+	var wall_h := ROOM.y + 0.08
+	var wall_y := ROOM.y * 0.5
+	var north_z := ROOM_Z_MIN - WALL * 0.5
+	var left_w := win_left - (-half_x - WALL)
+	_box(shell, Vector3(left_w, wall_h, WALL),
+		Vector3(-half_x - WALL + left_w * 0.5, wall_y, north_z), _mat_wall)
+	var right_w := (half_x + WALL) - win_right
+	_box(shell, Vector3(right_w, wall_h, WALL),
+		Vector3(win_right + right_w * 0.5, wall_y, north_z), _mat_wall)
+	var spandrel_h := WIN_SILL_Y + 0.04
+	_box(shell, Vector3(WIN_WIDTH + 0.04, spandrel_h, WALL),
+		Vector3(WIN_CENTER_X, spandrel_h * 0.5 - 0.04, north_z), _mat_wall)
+	var lintel_h := (ROOM.y + 0.04) - win_top
+	_box(shell, Vector3(WIN_WIDTH + 0.04, lintel_h, WALL),
+		Vector3(WIN_CENTER_X, win_top + lintel_h * 0.5, north_z), _mat_wall)
+
+	# South, West, East walls (overlapping into floor, ceiling, and north/south corners).
+	_box(shell, Vector3(ROOM.x + WALL * 2.0, wall_h, WALL),
+		Vector3(0.0, wall_y, ROOM_Z_MAX + WALL * 0.5), _mat_wall)
+	_box(shell, Vector3(WALL, wall_h, ROOM.z + WALL * 2.0),
+		Vector3(-half_x - WALL * 0.5, wall_y, ROOM_Z_CENTER), _mat_wall)
+	_box(shell, Vector3(WALL, wall_h, ROOM.z + WALL * 2.0),
+		Vector3(half_x + WALL * 0.5, wall_y, ROOM_Z_CENTER), _mat_wall)
+
+	# Recessed 3D pale-wood window frame (overlaps 1.5 cm into wall edges for zero seams).
+	var frame_t := 0.055
+	var frame_d := WALL + 0.036
+	var frame_z := north_z + 0.012
+	var ov := 0.015
+	# Top & bottom outer frame (flush corners with jambs)
+	_box(shell, Vector3(WIN_WIDTH + frame_t * 2.0 - ov * 2.0, frame_t, frame_d),
+		Vector3(WIN_CENTER_X, win_top + frame_t * 0.5 - ov, frame_z), _mat_wood_trim)
+	_box(shell, Vector3(WIN_WIDTH + frame_t * 2.0 - ov * 2.0, frame_t, frame_d),
+		Vector3(WIN_CENTER_X, WIN_SILL_Y - frame_t * 0.5 + ov, frame_z), _mat_wood_trim)
+	# Left & right outer jambs (exact span between top and bottom frame bars)
+	_box(shell, Vector3(frame_t, WIN_HEIGHT - ov * 2.0 + 0.004, frame_d),
+		Vector3(win_left - frame_t * 0.5 + ov, win_mid_y, frame_z), _mat_wood_trim)
+	_box(shell, Vector3(frame_t, WIN_HEIGHT - ov * 2.0 + 0.004, frame_d),
+		Vector3(win_right + frame_t * 0.5 - ov, win_mid_y, frame_z), _mat_wood_trim)
+	# Projecting interior window sill
+	_box(shell, Vector3(WIN_WIDTH + frame_t * 2.0 + 0.08, 0.036, 0.09),
+		Vector3(WIN_CENTER_X, WIN_SILL_Y - 0.004, ROOM_Z_MIN + 0.032), _mat_wood_trim)
+	# Inner cream sash border + centre mullion + subtle upper transom bar (clean two-pane look)
+	var sash_z := north_z + 0.005
+	var sash_d := 0.042
+	var sash_w := 0.032
+	_box(shell, Vector3(sash_w, WIN_HEIGHT, sash_d),
+		Vector3(WIN_CENTER_X, win_mid_y, sash_z), _mat_sash)
+	_box(shell, Vector3(WIN_WIDTH, 0.026, sash_d),
+		Vector3(WIN_CENTER_X, WIN_SILL_Y + WIN_HEIGHT * 0.72, sash_z), _mat_sash)
+	_box(shell, Vector3(sash_w * 0.85, WIN_HEIGHT, sash_d),
+		Vector3(win_left + sash_w * 0.5, win_mid_y, sash_z), _mat_sash)
+	_box(shell, Vector3(sash_w * 0.85, WIN_HEIGHT, sash_d),
+		Vector3(win_right - sash_w * 0.5, win_mid_y, sash_z), _mat_sash)
+	_box(shell, Vector3(WIN_WIDTH, sash_w * 0.85, sash_d),
+		Vector3(WIN_CENTER_X, win_top - sash_w * 0.5, sash_z), _mat_sash)
+	_box(shell, Vector3(WIN_WIDTH, sash_w * 0.85, sash_d),
+		Vector3(WIN_CENTER_X, WIN_SILL_Y + sash_w * 0.5, sash_z), _mat_sash)
+
+	# Window glass (separate MeshInstance3D outside combiner so alpha doesn't split CSG).
+	var glass := MeshInstance3D.new()
+	glass.name = "WindowGlass"
+	var glass_mesh := BoxMesh.new()
+	glass_mesh.size = Vector3(WIN_WIDTH - 0.04, WIN_HEIGHT - 0.04, 0.008)
+	glass.mesh = glass_mesh
+	glass.position = Vector3(WIN_CENTER_X, win_mid_y, north_z)
 	var glass_mat := StandardMaterial3D.new()
-	glass_mat.albedo_color = Color(0.86, 0.93, 0.98, 0.28)
+	glass_mat.albedo_color = Color(0.92, 0.96, 1.0, 0.14)
 	glass_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	glass_mat.roughness = 0.08
+	glass_mat.roughness = 0.06
 	glass_mat.metallic = 0.05
 	glass_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	glass.material = glass_mat
+	glass.material_override = glass_mat
 	glass.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	floor_root.add_child(glass)
-	# A bolder window frame that stands out from both sides of the wall.
-	var frame_t := 0.07
-	var frame_z := -ROOM.z * 0.5 - WALL * 0.5
-	_box(floor_root, Vector3(WINDOW.size.x + frame_t * 2.0, frame_t, WALL),
-		Vector3(-WINDOW.position.x, WINDOW.position.y - WINDOW.size.y * 0.5 - frame_t * 0.5,
-				frame_z), _mat_wood, CSGBox3D.OPERATION_UNION)
-	_box(floor_root, Vector3(WINDOW.size.x + frame_t * 2.0, frame_t, WALL),
-		Vector3(-WINDOW.position.x, WINDOW.position.y + WINDOW.size.y * 0.5 + frame_t * 0.5,
-				frame_z), _mat_wood, CSGBox3D.OPERATION_UNION)
-	var frame_x := WINDOW.position.x - WINDOW.size.x * 0.5 - frame_t * 0.5
-	_box(floor_root, Vector3(frame_t, WINDOW.size.y + frame_t * 2.0, WALL),
-		Vector3(-frame_x, WINDOW.position.y, frame_z), _mat_wood, CSGBox3D.OPERATION_UNION)
-	_box(floor_root, Vector3(frame_t, WINDOW.size.y + frame_t * 2.0, WALL),
-		Vector3(frame_x, WINDOW.position.y, frame_z), _mat_wood, CSGBox3D.OPERATION_UNION)
-	# Window sill inside the room plus a thick mullion for a clear two-pane look.
-	_box(floor_root, Vector3(WINDOW.size.x + frame_t * 2.0, 0.05, 0.16),
-		Vector3(-WINDOW.position.x, WINDOW.position.y - WINDOW.size.y * 0.5 - 0.03,
-				-ROOM.z * 0.5 + 0.08), _mat_wood, CSGBox3D.OPERATION_UNION)
-	_box(floor_root, Vector3(0.05, WINDOW.size.y, WALL),
-		Vector3(-WINDOW.position.x, WINDOW.position.y, frame_z), _mat_wood,
-		CSGBox3D.OPERATION_UNION)
-	# Door slab on the east wall: a shallow gray inset that reads as a closed door.
-	_box(floor_root, Vector3(0.02, 2.05, 0.82),
-		Vector3(ROOM.x * 0.5 - 0.015, 1.025, 0.72), _mat_gray,
-		CSGBox3D.OPERATION_UNION)
+	add_child(glass)
 
+	# Minimalist pale-wood baseboards (踢脚线) sealing every wall/floor corner cleanly.
+	var base_h := 0.08
+	var base_t := 0.022
+	var base_y := base_h * 0.5 - 0.005  # embedded 5 mm into floor
+	# North & South baseboards
+	_box(shell, Vector3(ROOM.x + 0.02, base_h, base_t),
+		Vector3(0.0, base_y, ROOM_Z_MIN + base_t * 0.5 - 0.004), _mat_wood_trim)
+	_box(shell, Vector3(ROOM.x + 0.02, base_h, base_t),
+		Vector3(0.0, base_y, ROOM_Z_MAX - base_t * 0.5 + 0.004), _mat_wood_trim)
+	# West baseboard
+	_box(shell, Vector3(base_t, base_h, ROOM.z + 0.02),
+		Vector3(-half_x + base_t * 0.5 - 0.004, base_y, ROOM_Z_CENTER), _mat_wood_trim)
+	# East baseboard split around the bedroom door
+	var door_z := 1.78
+	var door_w := 0.84
+	var door_h := 2.02
+	var door_z0 := door_z - door_w * 0.5
+	var door_z1 := door_z + door_w * 0.5
+	var east_n_len := door_z0 - ROOM_Z_MIN
+	_box(shell, Vector3(base_t, base_h, east_n_len),
+		Vector3(half_x - base_t * 0.5 + 0.004, base_y, ROOM_Z_MIN + east_n_len * 0.5), _mat_wood_trim)
+	var east_s_len := ROOM_Z_MAX - door_z1
+	_box(shell, Vector3(base_t, base_h, east_s_len),
+		Vector3(half_x - base_t * 0.5 + 0.004, base_y, door_z1 + east_s_len * 0.5), _mat_wood_trim)
 
-func _build_furniture() -> void:
-	var furniture := CSGCombiner3D.new()
-	furniture.name = "Furniture"
-	add_child(furniture)
-	# Gray-box placeholders with real-world dimensions; final furniture art is a later step.
-	var desk_top := DESK_TOP
-	_box(furniture, Vector3(1.4, 0.035, 0.68), Vector3(0, desk_top - 0.0175, 0), _mat_gray)
-	for leg: Vector2 in [Vector2(-0.64, -0.29), Vector2(-0.64, 0.29),
-			Vector2(0.64, -0.29), Vector2(0.64, 0.29)]:
-		_box(furniture, Vector3(0.05, desk_top - 0.035, 0.05),
-			Vector3(leg.x, (desk_top - 0.035) * 0.5, leg.y), _mat_gray)
-	# Chair: seat 45x45 at 45 cm, backrest to 85 cm.
-	_box(furniture, Vector3(0.44, 0.04, 0.44), Vector3(0, 0.45, 0.62), _mat_gray)
-	_box(furniture, Vector3(0.44, 0.4, 0.04), Vector3(0, 0.65, 0.84), _mat_gray)
-	for leg: Vector2 in [Vector2(-0.18, 0.45), Vector2(0.18, 0.45),
-			Vector2(-0.18, 0.79), Vector2(0.18, 0.79)]:
-		_box(furniture, Vector3(0.035, 0.43, 0.035), Vector3(leg.x, 0.215, leg.y), _mat_gray)
-	# Bed: single 90x200, mattress top ~35 cm; headboard toward the north wall.
-	_box(furniture, Vector3(0.9, 0.22, 2.0), Vector3(-1.55, 0.24, -0.06), _mat_gray)
-	_box(furniture, Vector3(0.9, 0.05, 1.95), Vector3(-1.55, 0.375, -0.03), _mat_gray)
-	_box(furniture, Vector3(0.9, 0.45, 0.06), Vector3(-1.55, 0.5, -1.06), _mat_gray)
-	# Bookshelf against the north wall, east of the window.
-	_box(furniture, Vector3(0.9, 1.9, 0.28), Vector3(1.35, 0.95, -1.6), _mat_gray)
-	for i in 4:
-		_box(furniture, Vector3(0.86, 0.03, 0.26), Vector3(1.35, 0.32 + i * 0.42, -1.6), _mat_gray)
+	# East wall cream bedroom door with pale-wood casing and handle.
+	var trim := 0.055
+	_box(shell, Vector3(0.022, door_h, door_w),
+		Vector3(half_x - 0.009, door_h * 0.5, door_z), _mat_door)
+	_box(shell, Vector3(0.032, door_h + trim, trim),
+		Vector3(half_x - 0.012, (door_h + trim) * 0.5, door_z0 - trim * 0.5), _mat_wood_trim)
+	_box(shell, Vector3(0.032, door_h + trim, trim),
+		Vector3(half_x - 0.012, (door_h + trim) * 0.5, door_z1 + trim * 0.5), _mat_wood_trim)
+	_box(shell, Vector3(0.032, trim, door_w + trim * 2.0),
+		Vector3(half_x - 0.012, door_h + trim * 0.5, door_z), _mat_wood_trim)
+	_box(shell, Vector3(0.045, 0.025, 0.11),
+		Vector3(half_x - 0.035, 0.96, door_z - door_w * 0.36), _mat_metal)
 
 
 func _build_sandbox() -> void:
 	var sandbox := CSGCombiner3D.new()
 	sandbox.name = "Sandbox"
+	sandbox.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(sandbox)
 	# Tray floor centred on the desk top; port ground (y = 0) sits at its surface.
 	const TRAY_DEPTH := 0.012
-	_box(sandbox, Vector3(SANDBOX_SIDE + 0.016, TRAY_DEPTH, SANDBOX_SIDE + 0.016),
-		Vector3(0, DESK_TOP + TRAY_DEPTH * 0.5, 0), _mat_gray)
-	# Rim: thin wooden walls around the tray so the sandbox reads as a model base.
+	_box(sandbox, Vector3(SANDBOX_SIDE + 0.014, TRAY_DEPTH, SANDBOX_SIDE + 0.014),
+		Vector3(0.0, DESK_TOP + TRAY_DEPTH * 0.5, 0.0), _mat_tray_base)
+	# Clean pale-wood miniature frame around the 21.27 cm sandbox.
 	var rim_h := 0.014
-	var half := SANDBOX_SIDE * 0.5 + 0.008
-	var rim_pos := [Vector3(0, DESK_TOP + rim_h * 0.5, -half), Vector3(0, DESK_TOP + rim_h * 0.5, half),
-			Vector3(-half, DESK_TOP + rim_h * 0.5, 0), Vector3(half, DESK_TOP + rim_h * 0.5, 0)]
-	var rim_size := [Vector3(SANDBOX_SIDE + 0.032, rim_h, 0.008),
-			Vector3(SANDBOX_SIDE + 0.032, rim_h, 0.008),
-			Vector3(0.008, rim_h, SANDBOX_SIDE + 0.016),
-			Vector3(0.008, rim_h, SANDBOX_SIDE + 0.016)]
+	var rim_t := 0.009
+	var half := SANDBOX_SIDE * 0.5 + rim_t * 0.5
+	var rim_pos := [
+		Vector3(0.0, DESK_TOP + rim_h * 0.5, -half),
+		Vector3(0.0, DESK_TOP + rim_h * 0.5, half),
+		Vector3(-half, DESK_TOP + rim_h * 0.5, 0.0),
+		Vector3(half, DESK_TOP + rim_h * 0.5, 0.0),
+	]
+	var rim_size := [
+		Vector3(SANDBOX_SIDE + rim_t * 2.0, rim_h, rim_t),
+		Vector3(SANDBOX_SIDE + rim_t * 2.0, rim_h, rim_t),
+		Vector3(rim_t, rim_h, SANDBOX_SIDE),
+		Vector3(rim_t, rim_h, SANDBOX_SIDE),
+	]
 	for i in 4:
-		_box(sandbox, rim_size[i], rim_pos[i], _mat_wood, CSGBox3D.OPERATION_UNION)
+		_box(sandbox, rim_size[i], rim_pos[i], _mat_wood_trim)
 	# The anchor the skybox camera extrapolates from: port origin (0,0,0) lands here, in the
 	# tray surface centre, facing the same axes as the harbour.
 	sandbox_anchor = Node3D.new()
 	sandbox_anchor.name = "SandboxAnchor"
-	sandbox_anchor.position = Vector3(0, DESK_TOP + TRAY_DEPTH, 0)
+	sandbox_anchor.position = Vector3(0.0, DESK_TOP + TRAY_DEPTH, 0.0)
 	sandbox.add_child(sandbox_anchor)
+
+
+func _build_furniture() -> void:
+	var furniture := Node3D.new()
+	furniture.name = "Furniture"
+	add_child(furniture)
+
+	# Soft Japanese cream / milk-tea / dusty-rose material harmonies for Kenney's saturated
+	# coral `carpet` surfaces, keeping natural warm wood intact.
+	var mat_wood_soft := {"wood": {"roughness": 0.76}}
+	var mat_chair := {
+		"carpet": {"color": Color(0.83, 0.72, 0.64), "roughness": 0.86},
+		"metalMedium": {"color": Color(0.64, 0.67, 0.70), "roughness": 0.45, "metallic": 0.25},
+	}
+	var mat_bed := {
+		"carpet": {"color": Color(0.88, 0.73, 0.67), "roughness": 0.90},
+		"carpetWhite": {"color": Color(0.97, 0.95, 0.92), "roughness": 0.90},
+		"wood": {"roughness": 0.76},
+	}
+	var mat_pillow_sage := {"carpet": {"color": Color(0.83, 0.86, 0.79), "roughness": 0.92}}
+	var mat_pillow_rose := {"carpet": {"color": Color(0.91, 0.79, 0.74), "roughness": 0.92}}
+	var mat_rug := {
+		"carpet": {"color": Color(0.89, 0.83, 0.75), "roughness": 0.94},
+		"carpetDarker": {"color": Color(0.81, 0.74, 0.65), "roughness": 0.94},
+	}
+	var mat_lamp := {
+		"lamp": {
+			"color": Color(1.0, 0.95, 0.82),
+			"roughness": 0.72,
+			"emission": Color(1.0, 0.93, 0.75),
+			"emission_energy": 0.48,
+		},
+		"metal": {"color": Color(0.86, 0.84, 0.80), "roughness": 0.45},
+	}
+	var mat_screen := {
+		"metalDark": {"color": Color(0.32, 0.34, 0.37), "roughness": 0.55},
+		"metal": {
+			"color": Color(0.82, 0.89, 0.94),
+			"roughness": 0.25,
+			"emission": Color(0.76, 0.86, 0.95),
+			"emission_energy": 0.22,
+		},
+	}
+	var mat_periph := {
+		"metalDark": {"color": Color(0.42, 0.44, 0.47), "roughness": 0.62},
+		"metalMedium": {"color": Color(0.78, 0.78, 0.76), "roughness": 0.65},
+	}
+
+	# --- 1. Study desk & swivel chair ---
+	# Scale desk so its tabletop lands at exact DESK_TOP (0.75 m); real footprint ~1.43 x 0.765 m.
+	var desk_probe := _load_bounds("desk")
+	var desk_scale := DESK_TOP / maxf(desk_probe.size.y, 0.001)
+	_place_glb(furniture, "Desk", "desk", Vector3(0.0, 0.0, 0.0),
+		Vector3.ONE * desk_scale, 0.0, false, mat_wood_soft)
+
+	var chair_pos := Vector3(0.0, 0.0, 0.64)
+	_place_glb(furniture, "ChairDesk", "chairDesk", chair_pos,
+		Vector3.ONE * CHAIR_SCALE, PI, false, mat_chair)
+
+	# Exported/accessible anchor above the chairDesk cushion facing `sandbox_anchor`
+	# for Phase 3 seated anime Yumeka.
+	ultra_giant_seat_y = CHAIR_RAW_SEAT_TOP_Y * CHAIR_SCALE
+	ultra_giant_anchor = Node3D.new()
+	ultra_giant_anchor.name = "UltraGiantAnchor"
+	ultra_giant_anchor.position = Vector3(
+		chair_pos.x,
+		ultra_giant_seat_y,
+		chair_pos.z - CHAIR_RAW_SEAT_CENTER_Z_OFFSET * CHAIR_SCALE,
+	)
+	ultra_giant_anchor.set_meta(&"seat_y", ultra_giant_seat_y)
+	ultra_giant_anchor.set_meta(&"faces", &"SandboxAnchor")
+	add_child(ultra_giant_anchor)
+	ultra_giant_anchor.look_at(
+		Vector3(sandbox_anchor.position.x, ultra_giant_seat_y, sandbox_anchor.position.z),
+		Vector3.UP,
+	)
+
+	# --- 2. Desktop near-field landmarks surrounding the 21.27 cm sandbox ---
+	# Left side: monitor, keyboard, mouse, succulent, left stereo speaker (all with clean gaps).
+	_place_glb(furniture, "ComputerScreen", "computerScreen",
+		Vector3(-0.31, DESK_TOP, -0.26), Vector3.ONE * 1.08, deg_to_rad(18.0), false, mat_screen)
+	_place_glb(furniture, "ComputerKeyboard", "computerKeyboard",
+		Vector3(-0.39, DESK_TOP, 0.02), Vector3.ONE * 1.20, deg_to_rad(15.0), false, mat_periph)
+	_place_glb(furniture, "ComputerMouse", "computerMouse",
+		Vector3(-0.20, DESK_TOP, 0.17), Vector3.ONE * 1.18, deg_to_rad(14.0), false, mat_periph)
+	_place_glb(furniture, "PlantSmallDesk", "plantSmall1",
+		Vector3(-0.58, DESK_TOP, 0.19), Vector3.ONE * 1.55, deg_to_rad(12.0), false, mat_wood_soft)
+	_place_glb(furniture, "SpeakerLeft", "speakerSmall",
+		Vector3(-0.62, DESK_TOP, -0.17), Vector3.ONE * 0.80, deg_to_rad(28.0), false, mat_wood_soft)
+
+	# Right & back-right side: bear figurine/plaque, warm glowing table lamp, books, right speaker.
+	_place_glb(furniture, "BearDesk", "bear",
+		Vector3(0.14, DESK_TOP, -0.27), Vector3.ONE * 0.44, deg_to_rad(-14.0), false, mat_wood_soft)
+	_place_glb(furniture, "LampRoundTable", "lampRoundTable",
+		Vector3(0.39, DESK_TOP, -0.24), Vector3.ONE * 1.24, deg_to_rad(-18.0), false, mat_lamp)
+	_place_glb(furniture, "BooksDesk", "books",
+		Vector3(0.36, DESK_TOP, 0.08), Vector3.ONE * 1.62, deg_to_rad(-22.0), false, mat_wood_soft)
+	_place_glb(furniture, "SpeakerRight", "speakerSmall",
+		Vector3(0.62, DESK_TOP, -0.17), Vector3.ONE * 0.80, deg_to_rad(-28.0), false, mat_wood_soft)
+
+	# --- 3. Large bedroom background furniture ---
+	# West wall: potted floor plant (NW), bedside nightstand, double bed with accent pillows.
+	_place_glb(furniture, "PottedPlant", "pottedPlant",
+		Vector3(-1.88, 0.0, -0.18), Vector3.ONE * 1.85, deg_to_rad(25.0), false, mat_wood_soft)
+	var nightstand := _place_glb(furniture, "CabinetBedDrawer", "cabinetBedDrawer",
+		Vector3(-2.02, 0.0, 0.62), Vector3.ONE * 1.95, PI * 0.5, false, mat_wood_soft)
+	# Small succulent accent on the nightstand (reuses plantSmall1.glb).
+	var ns_top := 0.2632 * 1.95
+	_place_glb(furniture, "PlantSmallNightstand", "plantSmall1",
+		Vector3(nightstand.position.x + 0.02, ns_top, nightstand.position.z - 0.06),
+		Vector3.ONE * 1.40, deg_to_rad(45.0), false, mat_wood_soft)
+
+	const BED_SCALE := 1.82
+	var bed_mattress_y := 0.23 * BED_SCALE
+	_place_glb(furniture, "BedDouble", "bedDouble",
+		Vector3(-1.24, 0.0, 2.02), Vector3.ONE * BED_SCALE, PI * 0.5, false, mat_bed)
+	var pillow_a := _place_glb(furniture, "Pillow", "pillow",
+		Vector3(-1.80, bed_mattress_y, 1.66), Vector3.ONE * 1.45, deg_to_rad(82.0), false, mat_pillow_sage)
+	pillow_a.rotation.x = deg_to_rad(-22.0)
+	var pillow_b := _place_glb(furniture, "PillowLong", "pillowLong",
+		Vector3(-1.74, bed_mattress_y, 2.28), Vector3.ONE * 1.40, deg_to_rad(96.0), false, mat_pillow_rose)
+	pillow_b.rotation.x = deg_to_rad(-20.0)
+
+	# Floor rug under chair / alongside bed (+2 mm to guarantee zero z-fighting with floor).
+	_place_glb(furniture, "RugRounded", "rugRounded",
+		Vector3(0.38, 0.002, 1.55), Vector3.ONE * 1.45, PI * 0.5, false, mat_rug)
+
+	# North-east & East wall: open bookcase (with shelf books), closed-door cabinet, trashcan, coat rack.
+	_place_glb(furniture, "BookcaseOpen", "bookcaseOpen",
+		Vector3(1.42, 0.0, -0.26), Vector3.ONE * 1.95, 0.0, false, mat_wood_soft)
+	# Shelf decoration on open bookcase (exact shelf top Ys in bookcaseOpen.glb: 0.37 & 0.61).
+	_place_glb(furniture, "BooksShelfMid", "books",
+		Vector3(1.48, 0.37 * 1.95, -0.24), Vector3.ONE * 1.50, deg_to_rad(-8.0), false, mat_wood_soft)
+	_place_glb(furniture, "BooksShelfUpper", "books",
+		Vector3(1.28, 0.61 * 1.95, -0.24), Vector3.ONE * 1.55, deg_to_rad(6.0), false, mat_wood_soft)
+	_place_glb(furniture, "PlantShelfUpper", "plantSmall1",
+		Vector3(1.60, 0.61 * 1.95, -0.24), Vector3.ONE * 1.35, deg_to_rad(-18.0), false, mat_wood_soft)
+	_place_glb(furniture, "BookcaseClosedDoors", "bookcaseClosedDoors",
+		Vector3(2.02, 0.0, 0.58), Vector3.ONE * 1.95, -PI * 0.5, false, mat_wood_soft)
+	_place_glb(furniture, "Trashcan", "trashcan",
+		Vector3(0.94, 0.0, 0.14), Vector3.ONE * 0.90, deg_to_rad(-18.0), false, mat_periph)
+	_place_glb(furniture, "CoatRackStanding", "coatRackStanding",
+		Vector3(1.86, 0.0, 2.78), Vector3.ONE * 2.05, deg_to_rad(-30.0), false, mat_wood_soft)
+
+	# Ceiling pendant light flush-mounted against y = ROOM.y.
+	_place_glb(furniture, "LampSquareCeiling", "lampSquareCeiling",
+		Vector3(0.0, ROOM.y, 1.20), Vector3.ONE * 2.10, 0.0, true, mat_lamp)
+
+
+func _load_bounds(stem: String) -> AABB:
+	var packed := load(FURNITURE_DIR + stem + ".glb") as PackedScene
+	if packed == null:
+		return AABB(Vector3.ZERO, Vector3.ONE)
+	var temp := packed.instantiate()
+	var bounds := _subtree_aabb(temp, Transform3D.IDENTITY)
+	temp.free()
+	return bounds
+
+
+func _place_glb(parent: Node, node_name: String, stem: String, world_pos: Vector3,
+		scale_vec: Vector3, rot_y: float, align_top := false,
+		material_overrides := {}) -> Node3D:
+	var pivot := Node3D.new()
+	pivot.name = node_name
+	pivot.position = world_pos
+	pivot.rotation.y = rot_y
+	pivot.scale = scale_vec
+	parent.add_child(pivot)
+	var packed := load(FURNITURE_DIR + stem + ".glb") as PackedScene
+	if packed == null:
+		push_warning("Missing bedroom furniture asset: %s%s.glb" % [FURNITURE_DIR, stem])
+		return pivot
+	var inst := packed.instantiate()
+	_prepare_visual_subtree(inst, material_overrides)
+	var bounds := _subtree_aabb(inst, Transform3D.IDENTITY)
+	if bounds.size != Vector3.ZERO:
+		var center := bounds.position + bounds.size * 0.5
+		var anchor_y := (bounds.position.y + bounds.size.y) if align_top else bounds.position.y
+		inst.position = Vector3(-center.x, -anchor_y, -center.z)
+	pivot.add_child(inst)
+	return pivot
+
+
+func _prepare_visual_subtree(node: Node, material_overrides: Dictionary) -> void:
+	# Strip any physics collider if present and turn off shadow casting (bedroom lights have
+	# shadows disabled for iGPU budget).
+	for child in node.get_children():
+		if child is CollisionObject3D:
+			node.remove_child(child)
+			child.free()
+			continue
+		_prepare_visual_subtree(child, material_overrides)
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		if mi.mesh == null:
+			return
+		for surf_idx in mi.mesh.get_surface_count():
+			var base_mat := mi.get_active_material(surf_idx)
+			if not (base_mat is StandardMaterial3D):
+				continue
+			var src := base_mat as StandardMaterial3D
+			var rule: Variant = material_overrides.get(src.resource_name, null)
+			if rule == null:
+				continue
+			var dup := src.duplicate() as StandardMaterial3D
+			if rule.has("color"):
+				dup.albedo_color = rule["color"]
+			if rule.has("roughness"):
+				dup.roughness = float(rule["roughness"])
+			if rule.has("metallic"):
+				dup.metallic = float(rule["metallic"])
+			if rule.has("emission"):
+				dup.emission_enabled = true
+				dup.emission = rule["emission"]
+				dup.emission_energy_multiplier = float(rule.get("emission_energy", 0.4))
+			mi.set_surface_override_material(surf_idx, dup)
+
+
+func _subtree_aabb(node: Node, parent_xf: Transform3D) -> AABB:
+	var xf := parent_xf
+	if node is Node3D:
+		xf = parent_xf * (node as Node3D).transform
+	var merged := AABB()
+	var has_any := false
+	if node is MeshInstance3D:
+		var mi := node as MeshInstance3D
+		if mi.mesh != null:
+			var local_box := mi.mesh.get_aabb()
+			merged = _transform_aabb(xf, local_box)
+			has_any = true
+	for child in node.get_children():
+		var sub := _subtree_aabb(child, xf)
+		if sub.size != Vector3.ZERO:
+			merged = sub if not has_any else merged.merge(sub)
+			has_any = true
+	return merged if has_any else AABB()
+
+
+func _transform_aabb(xf: Transform3D, box: AABB) -> AABB:
+	var p := box.position
+	var s := box.size
+	var corners := [
+		Vector3(p.x, p.y, p.z),
+		Vector3(p.x + s.x, p.y, p.z),
+		Vector3(p.x, p.y + s.y, p.z),
+		Vector3(p.x + s.x, p.y + s.y, p.z),
+		Vector3(p.x, p.y, p.z + s.z),
+		Vector3(p.x + s.x, p.y, p.z + s.z),
+		Vector3(p.x, p.y + s.y, p.z + s.z),
+		Vector3(p.x + s.x, p.y + s.y, p.z + s.z),
+	]
+	var lo: Vector3 = xf * corners[0]
+	var hi: Vector3 = lo
+	for i in range(1, corners.size()):
+		var pt: Vector3 = xf * corners[i]
+		lo = Vector3(minf(lo.x, pt.x), minf(lo.y, pt.y), minf(lo.z, pt.z))
+		hi = Vector3(maxf(hi.x, pt.x), maxf(hi.y, pt.y), maxf(hi.z, pt.z))
+	return AABB(lo, hi - lo)
 
 
 func _build_lights() -> void:
 	var lights := Node3D.new()
 	lights.name = "Lights"
 	add_child(lights)
-	# Warm afternoon sun through the north window. Shadows stay off: the room only fills
-	# the harbour's backdrop band, and a second shadow pass is too costly on iGPUs.
+	# Soft warm daylight coming through the north window; shadows stay off for iGPU budget.
 	var sun := DirectionalLight3D.new()
 	sun.name = "WindowSun"
-	sun.light_color = Color(1.0, 0.82, 0.6)
-	sun.light_energy = 3.2
+	sun.light_color = Color(1.0, 0.94, 0.84)
+	sun.light_energy = 1.18
 	sun.shadow_enabled = false
 	lights.add_child(sun)
-	sun.look_at_from_position(Vector3(1.4, 3.6, -6.4), Vector3(-0.5, 0.4, 1.6), Vector3.UP)
-	# Soft warm ceiling fill so the room reads at a glance even away from the window light.
+	sun.look_at_from_position(Vector3(1.2, 3.4, -3.2), Vector3(-0.4, 0.5, 1.2), Vector3.UP)
+	# Soft bounce fill from the room interior so the north wall, window frame, and front faces
+	# of desktop props stay warm cream-white with clear 3D facet separation.
+	var bounce := DirectionalLight3D.new()
+	bounce.name = "InteriorBounce"
+	bounce.light_color = Color(0.90, 0.92, 0.96)
+	bounce.light_energy = 0.28
+	bounce.shadow_enabled = false
+	lights.add_child(bounce)
+	bounce.look_at_from_position(Vector3(-0.8, 2.2, 3.0), Vector3(0.2, 1.0, -0.5), Vector3.UP)
+	# Warm cozy ceiling fill near the pendant lamp.
 	var fill := OmniLight3D.new()
 	fill.name = "CeilingFill"
-	fill.position = Vector3(0.0, ROOM.y - 0.18, 0.4)
-	fill.light_color = Color(0.96, 0.87, 0.78)
-	fill.light_energy = 0.55
-	fill.omni_range = 7.0
+	fill.position = Vector3(0.0, ROOM.y - 0.52, 1.20)
+	fill.light_color = Color(1.0, 0.93, 0.82)
+	fill.light_energy = 0.30
+	fill.omni_range = 6.5
 	fill.shadow_enabled = false
 	lights.add_child(fill)
 
 
 func _build_environment() -> void:
-	# Ambient + tonemapping only: no glow/SSAO/SDFGI so the second viewport stays cheap on
-	# the integrated GPU. The outside seen through the window is a plain sky colour.
+	# Ambient + AGX tonemapping only: no glow/SSAO/SDFGI so the second viewport stays cheap
+	# on integrated GPUs. The outdoor sky seen through the window is a soft pastel morning sky.
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.66, 0.76, 0.85)
+	env.background_color = Color(0.78, 0.88, 0.96)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.74, 0.68, 0.62)
-	env.ambient_light_energy = 0.38
+	env.ambient_light_color = Color(0.95, 0.92, 0.87)
+	env.ambient_light_energy = 0.48
 	env.tonemap_mode = Environment.TONE_MAPPER_AGX
-	env.tonemap_exposure = 1.12
+	env.tonemap_exposure = 1.0
 	var we := WorldEnvironment.new()
 	we.name = "BedroomEnvironment"
 	we.environment = env

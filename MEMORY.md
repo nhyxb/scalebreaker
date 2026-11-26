@@ -17,7 +17,7 @@
 - **`batch_spec()` 不包含 `kit_scale`**：实例变换自带各自 `_kit_fit`，写进 key 会让每个地标放大率都拆出一个新 MultiMesh（曾导致 162 个近层节点）。
 - **中心 12 栋换模**（`scenes/district.tscn`）：`intact_scene` + `kit_scale`（DockPress → `commercial/building-e` 6.16、Tidewater → `commercial/building-m` 5.08、MarineWorks → `industrial/building-s` 6.55），同时保留 `historic_style` 与 `ruin_floor`：完好模型是 Kenney，废墟仍是历史高度图瓦砾。`footprint` 由 `_fit_kit_intact()` 改写（10.1×5.5×6.2 / 6.3×16×6.3 / 13.9×5.5×6.0），测试一律按运行时 `footprint` 计算落点。
 - **第三人称相机**（`rust/src/round.rs`）：三态 `view_mode()` 0/1/2 = 第三人称全身 / 斜侧跟脚 / 第一人称，`V` 与触屏按钮循环，`camera_view_mode()`、`set_camera_view()` 供触屏与测试；焦点 `0.55 × height`（成长模式地板 0.037），臂长 `1.30 × height × zoom`（滚轮 0.45–3.0 平滑）；跟脚模式朝向 = `body_yaw + PI + 0.79`、臂长 `0.62 × height`、焦点在左脚，进出该模式要保存/恢复玩家朝向。`far = max(2500, world_limit × 4.4 + height × 3)`、`near = clamp(arm × 0.005, 0.09, 5.0)`；臂长 < `0.2 × height` 时焦点抬到 `0.82 × height`。**不要再引入 `GIANT_CAMERA_MAX_LENGTH` 这类写死上限**，500 m 巨人曾因此把镜头埋进双腿。
-- **海雾**（`rust/src/game.rs::view_fog_bounds`）：视距 ≥ 出厂默认（桌面 300 / 安卓 200）时雾按 `map_side × 0.30 / 0.55` 推到地图外圈（1,418 m → 425/780 m）；低于默认视距时仍严格按用户设置，旧设置语义与断言不变。
+- **海雾**（`rust/src/game.rs::view_fog_bounds` + `scenes/main.tscn`）：视距 ≥ 出厂默认（桌面 300 / 安卓 200）时雾按 `map_side × 0.52 / 1.12` 并叠加相机高度裕度 `+0.45h / +0.85h` 推至外海（1,418 m 低空约 737 / 1,588 m，500 m 巨人高空约 1,000+ / 1,900+ m，俯瞰全图不被近雾糊住）；雾色采用暖日光柔雾 `Color(0.89, 0.87, 0.83)`、`fog_density=0.68`、`fog_aerial_perspective=0.15` 与奶油卧室背景无缝衔接；低于默认视距时仍严格按用户设置，旧设置语义与断言不变。
 - **巨人远距降级**：`giant_visual.set_detail_tier()` 由 `round.rs::update_distant_silhouettes()` 按 `max(180, height × 1.2)` / `max(240, 上一档 × 2.2)` 驱动；tier1 关实时阴影并跳过头发/狐尾弹簧，tier2 再隐藏眼睛/眼线/睫毛/眉/鼻线；第一人称的 `SHADOWS_ONLY` 头部不会被 tier 覆盖（tier 逻辑必须跳过 `SHADOWS_ONLY`）。
 - **测试落点**：核心街区 4×3 栋楼几乎贴满 24 m 地块，把 23–25 m 巨人放在 `DockPress1/Tidewater1` 南侧会插进 `MarineWorks1` 的碰撞盒，`is_on_floor()` 变假、手部攻击起不来。要放到北侧空街（`-(footprint.z*0.5 + 5)`）并把身体朝向设为 `PI`。
 - **卡墙缺陷已修（2026-11-26）**：踩踏蓄力/冷却期间按住前进不再取消原地转身。`update_giant` 里 pivot 标志跨 pending/Windup/Cooldown 存活（只松方向输入才取消，蓄力结束后从剩余角度续演，不再要求 >55° 重新入场）；`was_walking` 只在蓄力/冷却期间按实际位移判定（被墙挡＝站立），解锁阶段保持原输入意图语义——把"被挡判站立"扩到所有阶段会误伤 12 m 大乱斗 AI 漫游（贴楼原地把位移断言耗光，brawl 变红）。回归入口 `tests/playtest.gd::_stomp_charge_pivot` 与 Tidewater4 塔的自然转身收敛段。贴墙测试要用"胶囊贴边界墙"（`z ≈ -(play_edge)+半径+0.2`），随手放墙前 9 m 时甩视角的瞬间巨人仍在自由行走，测不出走-挡切换。
@@ -95,13 +95,14 @@
 - 站立小碎步转身仅由地面待机且未处于制动/重踏/手部动作时触发，落脚只给轻震动脉冲、不返回 `Vector4` 行走踩踏触地事件，避免原地转身误拆邻近建筑；实机回归入口在 `tests/playtest.gd` 的 `_giant_layered_turn()`。
 - 独立原型 `prototypes/giant_turn/` 保留供交互预览，已在 `export_presets.cfg` 两个预设中通过 `prototypes/*` 排除出打包产物。
 
-## 桌面沙盘 3D Skybox（2026-11-26 接入，阶段 2 第一步）
+## 桌面沙盘 3D Skybox（2026-11-26 阶段 2 完成）
 
-- 架构：`scenes/harbor_skybox.gd`（挂在 `main.tscn` 根的 `Skybox` 节点）+ `scenes/skybox_bedroom.gd`（程序化卧室，跑在 SubViewport 的 `own_world_3d`）。主视口 `Atmosphere` 用 `Environment.BG_CANVAS=3`，卧室经 `CanvasLayer(-64)+TextureRect(ViewportTexture)` 合成为 3D 背景（UI 在零层之上不受影响）。**不要改回 dome/sky 方案**：港区水域 3600 m 见方、远面 4600 m，几何穹顶罩不住且有贴雾问题；canvas 背景天然不受雾/光照/远面影响（"海雾不遮卧室、卧室不曝港区"由架构保证）。
-- 位姿同步：`_process` 内 `sky_cam.global_transform = anchor.global_transform * Transform3D(active.basis, active.origin * (1/6666.67))` + fov 复制。锚点=书桌沙盘托盘面中心（`skybox_bedroom.gd::SANDBOX_SIDE=0.2127` 内膛，1,418 m ↔ 21.27 cm）。所有港区模式（含菜单 Overview）共用这一个 Skybox；GirlBedroom 玩法场景是独立 change_scene 不受影响。
-- 性能半价手法：子视口 `RES_RATIO=0.4` + **隔帧渲染**（`UPDATE_ONCE` 每两帧触发一次；背景 1:6667 尺度下运动不可察觉）；卧室平行光**无阴影**。全图俯瞰同口径交叠 A/B 成本 ≈ -3.5~4 FPS（52 vs 56）。
-- 卧室资产：墙/天花板 `plastered_wall_02`、地板/木框 `floor_wood`（Poly Haven CC0，1k jpg diff+rough，存 `assets/textures/polyhaven/`，未随包同步）。CSG 一律套 `CSGCombiner3D` 融合（38 个独立 CSG box = +90 draw calls 的教训）。CSGBox3D 没有 `uv_scale` 属性（只有 material 三件套），平铺用材质级 `uv1_scale`。
-- 已知视觉问题（两轮复核后记录）：低出生眼位下卧室背景多为整片浅暖墙面（站在托盘底部的几何事实），室内元素辨识度低；雾色与墙面色未调和；0.4 比例远景偏糊。后续方向：降房高、加大窗占比、家具剪影化。
+- 架构：`scenes/harbor_skybox.gd`（挂在 `main.tscn` 根的 `Skybox` 节点）+ `scenes/skybox_bedroom.gd`（1:1 日系奶油 + 浅原木风格化卧室，跑在 SubViewport 的 `own_world_3d`）。主视口 `Atmosphere` 用 `Environment.BG_CANVAS=3`，卧室经 `CanvasLayer(-64)+TextureRect(ViewportTexture)` 合成为 3D 背景（UI 在零层之上不受影响）。**不要改回 dome/sky 方案**：港区水域 3600 m 见方、远面 4600 m，几何穹顶罩不住且有贴雾问题；canvas 背景天然不受雾/光照/远面影响（"海雾不遮卧室、卧室不曝港区"由架构保证）。
+- 位姿同步：`_process` 内 `sky_cam.global_transform = anchor.global_transform * Transform3D(active.basis, active.origin * (1/6666.67))` + fov 复制，卧室相机 `near=0.005 / far=20.0`。锚点 `sandbox_anchor` 在书桌沙盘托盘面中心 `(0, DESK_TOP+0.012, 0)`（`SANDBOX_SIDE=0.2127`，1,418 m ↔ 21.27 cm）。所有港区模式（含菜单 Overview）共用这一个 Skybox；GirlBedroom 玩法场景是独立 change_scene 不受影响。
+- 画质与性能平衡：桌面端 `DESKTOP_RES_RATIO=0.85` + `Viewport.MSAA_2X` + `TEXTURE_FILTER_LINEAR` + **隔帧渲染**（`UPDATE_ONCE` 每两帧触发一次，尺寸变化时立即补画一帧）；移动端保持 `MOBILE_RES_RATIO=0.55` + `MSAA_DISABLED`。卧室全部光源关闭阴影、所有家具禁用 `cast_shadow`。AMD Renoir 核显 1916×1104 同口径 ABBA 全图俯瞰成本仅约 **-1.3 FPS**（45.2 vs 46.6，+12 draw calls；单次冷态 `ab_probe.gd` 48.2 FPS）。
+- 卧室壳体与材质：房体 `4.6 × 2.6 × 3.8 m`（北墙紧靠书桌后沿 `z=-0.54 m`），北墙窗洞由 4 块重叠实心板围合（避免 CSG 减法偏移），地板/天花板外延覆盖墙底墙顶并配 8 cm 浅原木踢脚线、立体淡木窗框/内窗台/奶油双开窗扇，彻底消除墙角与家具底漏缝。墙面/顶面为干净哑光浅奶油暖白；地板由 `floor_wood_diff.jpg` 经轻量 `ShaderMaterial` 提亮为柔和浅原木木地板。CSG 一律放 `CSGCombiner3D` 合并。
+- Kenney 家具与椅上超巨锚点：21 个 GLB 仅从 `kenney_furniture-kit.zip` 的 `Models/GLTF format/` 提取至 `assets/kenney/furniture/`（不含 OBJ/FBX/Previews，不触碰其他包 `colormap.png`；`scripts/fetch_kenney_assets.py` 已收录 `furniture` 包）。Kenney 家具默认约为真实米制一半尺寸且枢轴在角点，`_place_glb()` 通过子树 AABB 居中对齐底面/顶面并剥离任何碰撞体（零物理碰撞）。桌面 21.27 cm 沙盘外侧由显示器、键盘、鼠标、台灯、书堆、小熊、绿植、双音箱环绕，周围配双人床、抱枕、床头柜、开放/带门书柜、圆角地毯、盆栽、吸顶灯、垃圾桶、衣帽架与转椅。
+- **阶段 3 预留锚点**：`skybox_bedroom.gd` 在 `chairDesk.glb` 坐垫正上方导出 `ultra_giant_anchor: Node3D`（节点名 `UltraGiantAnchor`，位置 `(0.0, 0.4553, 0.5484)`，属性 `ultra_giant_seat_y = 0.4553` 及元数据 `seat_y`，水平面向 `sandbox_anchor` `-Z`），并透出到 `harbor_skybox.gd::ultra_giant_anchor`，供阶段 3 直接挂接坐姿高精细度 Yumeka。回归入口在 `tests/playtest.gd::_bedroom_skybox()`。
 
 ## 本机开发注意
 - bash 工具的 `/tmp` 不跨命令保留。临时源码副本放工程内的 `build/tmp/`，不要依赖 `/tmp`。

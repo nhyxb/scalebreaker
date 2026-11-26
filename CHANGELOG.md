@@ -4,6 +4,72 @@
 
 ---
 
+## 2026-11-26 — 阶段 2 收尾：Kenney 家具卧室替换灰盒、Skybox 去锯齿/防漏缝、椅上超巨锚点与雾色调和
+
+备份：`backups/20261126_110542_phase2_bedroom_furniture/{scenes,scripts,tests,rust/src,project.godot,CHANGELOG.md,MEMORY.md}`（改动前完整源码副本）。
+回滚：
+
+```sh
+cp -a backups/20261126_110542_phase2_bedroom_furniture/scenes/. scenes/
+cp -a backups/20261126_110542_phase2_bedroom_furniture/scripts/. scripts/
+cp -a backups/20261126_110542_phase2_bedroom_furniture/tests/. tests/
+cp -a backups/20261126_110542_phase2_bedroom_furniture/rust/src/. rust/src/
+rm -rf assets/kenney/furniture
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+godot --headless --path . --editor --import
+```
+
+### 一、SubViewport 去锯齿与卧室壳体密封（`scenes/harbor_skybox.gd`、`scenes/skybox_bedroom.gd`）
+
+- **去锯齿**：`harbor_skybox.gd` 将子视口分辨率比例由 `0.4` 提升为桌面端 `DESKTOP_RES_RATIO = 0.85`（移动端保留 `MOBILE_RES_RATIO = 0.55`），显式设置 `_rect.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR`，桌面端开启轻量 `Viewport.MSAA_2X`（移动端保持关闭），保持隔帧 `UPDATE_ONCE` 渲染并在尺寸变化时立即触发一帧刷新；同时收紧卧室相机 `near = 0.005 / far = 20.0` 避免低眼位近裁桌面。
+- **壳体接缝修复与建筑细节**：
+  - 修复旧版北墙 CSG 减法开窗的局部坐标偏移缺陷（原窗洞误偏至天花板）及左右窗框对称符号错误；改用 4 块相互重叠的实心墙体板围合精确窗洞（宽 1.84 m × 高 1.28 m，窗台高 0.94 m），地板与天花板外延覆盖四面墙底/顶，彻底消除低仰角墙角与家具底部的细白漏缝。
+  - 补齐 8 cm 浅原木简约踢脚线（嵌地 5 mm、沿门洞自动分段）、立体淡木窗框/内窗台/双开奶油窗扇与玻璃、东墙奶油色卧室门与门套把手。
+  - 房高收敛至 2.60 m，北墙紧靠书桌后沿（`z = -0.54 m`），城内低仰角抬头即可见明窗与桌面巨物轮廓。
+
+### 二、柔和日系奶油 + 浅原木材质与灯光（`scenes/skybox_bedroom.gd`）
+
+- 替换偏灰暗颗粒感的 `wall_plaster` 墙面为干净低饱和浅奶油暖白哑光墙（`Color(0.945, 0.916, 0.862)`）与柔白顶面；地板基于现有 `floor_wood_diff.jpg` 经轻量 `ShaderMaterial` 提亮为柔和浅原木木地板（保留细微木板纹，兼容 `gl_compatibility`）；窗框/踢脚线/沙盘外框统一为低饱和浅原木色。
+- 灯光调整为北窗暖日照（`WindowSun`，无阴影）+ 室内柔反光（`InteriorBounce`，无阴影）+ 吊灯柔补光（`CeilingFill`，无阴影）+ AGX 色调映射（`exposure = 1.0`），柔和明亮、立体感清晰且不过曝，与 Kenney 城市及二次元角色风格统一。
+
+### 三、Kenney Furniture Kit 21 件真实 GLB 替换全部灰盒 + 椅上超巨锚点
+
+- 从 `kenney_furniture-kit.zip` 的 `Models/GLTF format/` 仅提取 21 个 `.glb` 至独立目录 `assets/kenney/furniture/`（零 OBJ/FBX/Previews，不触碰其他包的 `colormap.png`），并同步更新 `scripts/fetch_kenney_assets.py`：
+  - 书桌与转椅：`desk.glb`（精确缩放使台面齐平 `DESK_TOP = 0.75 m`）、`chairDesk.glb`（`1.95×`，坐面高 `0.4553 m`）。
+  - 环绕 `21.27 cm × 21.27 cm` 沙盘外沿的桌面近景地标：`computerScreen.glb`、`computerKeyboard.glb`、`computerMouse.glb`、`lampRoundTable.glb`（柔暖自发光灯罩）、`books.glb`、`bear.glb`、`plantSmall1.glb`、`speakerSmall.glb`（左右立体声成对）。
+  - 卧室背景大件：`bedDouble.glb`、`pillow.glb`、`pillowLong.glb`、`cabinetBedDrawer.glb`、`bookcaseOpen.glb`（隔板放书与绿植）、`bookcaseClosedDoors.glb`、`rugRounded.glb`、`pottedPlant.glb`、`lampSquareCeiling.glb`（齐顶贴合 `y = 2.60 m`）、`trashcan.glb`、`coatRackStanding.glb`。
+- 全部家具纯视觉实例化（`_prepare_visual_subtree()` 确保零 `CollisionObject3D` 碰撞体、关闭投影开销），通过精确 AABB 对齐落地/贴台面/齐顶，并对偏艳红的 `carpet` 材质做柔和日系奶茶/杏粉/燕麦色调和。
+- 在 `chairDesk.glb` 坐垫正上方导出并挂接 `ultra_giant_anchor: Node3D`（世界坐标 `(0.0, 0.4553, 0.5484)`，记录 `ultra_giant_seat_y = 0.4553` 与元数据 `seat_y`，水平正对 `sandbox_anchor` `-Z` 方向），同时透出为 `harbor_skybox.gd::ultra_giant_anchor`，供阶段 3 直接挂接高精细度坐姿 Yumeka。
+
+### 四、海雾色与起止距离调和（`scenes/main.tscn`、`rust/src/game.rs`）
+
+- `scenes/main.tscn` 的海雾与天空地平色由偏冷青灰（`Color(0.66, 0.73, 0.73)`，`fog_density = 1.0`，`fog_aerial_perspective = 0.75`）调和为暖日光柔雾（`fog_light_color = Color(0.89, 0.87, 0.83)`、`fog_density = 0.68`、`fog_aerial_perspective = 0.15`、`fog_depth_curve = 1.45`），消除港区海雾与奶油卧室背景的生硬色差。
+- `rust/src/game.rs::view_fog_bounds()` 在默认及以上视距的大地图下将雾起止比例由 `0.30 / 0.55` 调整为 `0.52 / 1.12`（1,418 m 港区约 `737 / 1,588 m`），并增加随相机高度放宽的裕度（`+0.45h / +0.85h`），确保 500 m 巨人俯瞰全图时整座城市清晰锐利不被近距雾糊住；低于默认视距时的原有设置语义与断言完全保留。
+
+### 五、实机 GPU 帧率复测与目视核验（AMD Renoir 核显）
+
+- 同口径 ABBA 交叠基准（`build/tmp/sky_fps_bench.gd`，`MESA_LOADER_DRIVER_OVERRIDE=radeonsi`，窗口 `1916×1104`，`gl_compatibility`，`vsync=0`，全图俯瞰 `(0, 620, 980) -> (0,0,0)`，预热 360 帧、每档正反序各测 90 帧）：
+
+  | 配置 | 子视口分辨率 | MSAA | 正序 FPS | 反序 FPS | ABBA 均帧 | 相对无 Skybox Δ | Draw Calls（均值） | Primitives（均值） |
+  |---|---|---|---:|---:|---:|---:|---:|---:|
+  | 无 Skybox | — | 关闭 | 46.2 | 46.9 | 46.6 | +0.0 | 2,679 | 3,151,792 |
+  | 旧 `0.40` 无 MSAA | 766×442 | 关闭 | 46.3 | 46.2 | 46.3 | -0.3 | 2,689 | 3,152,588 |
+  | `0.75` + 2× MSAA | 1437×828 | 2× | 43.3 | 42.1 | 42.7 | -3.9 | 2,690 | 3,152,596 |
+  | **`0.85` + 2× MSAA（最终）** | **1629×938** | **2×** | **47.4** | **43.1** | **45.2** | **-1.3** | **2,690** | **3,152,632** |
+  | `1.00` 无 MSAA | 1916×1104 | 关闭 | 46.3 | 47.0 | 46.6 | +0.1 | 2,691 | 3,152,665 |
+  | `1.00` + 2× MSAA | 1916×1104 | 2× | 45.2 | 44.5 | 44.9 | -1.7 | 2,690 | 3,152,608 |
+
+- 沿用既有 `build/tmp/ab_probe.gd`（同窗口 `1916×1104`、`gl_compatibility`、`vsync=0`）单独复测 `0.85 + 2× MSAA`：首次较冷状态 **48.2 FPS**（worst 48.0，draws 2,686），连续热态 43.7 FPS；最终收敛在 **`DESKTOP_RES_RATIO = 0.85` + `Viewport.MSAA_2X` + 隔帧**，相对无 Skybox 仅约 `-1.3 FPS`（-2.8%）。
+- 实机截屏目视核验（`build/tmp/sky_phase2_final/` 与 `build/tmp/sky_phase2/04_giant500_overview.png`）：城内低仰角北向/南向、500 m 巨人俯瞰、全图高空俯瞰及卧室/桌面近景均确认无窗框或家具阶梯锯齿、无墙底/墙角白缝、21 件家具落地贴台面无穿模悬空、雾与卧室背景柔和过渡且 500 m 全图清晰。
+
+### 六、回归验证
+
+- 资源导入：`godot --headless --path . --editor --import` 成功导入全部 21 个家具 GLB。
+- Rust：`cargo build --locked` 通过；`cargo test --locked` **40/40**（含新增 500 m 巨人高空雾距断言）。
+- Godot（`--headless --fixed-fps 60`，`XDG_DATA_HOME="$PWD/build/xdg"`）：**playtest 212**（新增 4 项卧室 Skybox、零碰撞与 `ultra_giant_anchor` 回归）、**growth 192、brawl 43、mode_menu 45、touch 42、audio 36、sit_crush_gameplay 44、sit_crush 57**，合计 **671 项全绿**；`--quit-after 5` 启动校验零错误。
+
+---
+
 ## 2026-11-26 — 踩踏蓄力卡墙缺陷修复 + 阶段 2 第一步：桌面沙盘 3D Skybox 卧室壳体
 
 备份：`backups/20261126_013057_stomp_pivot_bedroom_skybox/{scenes,scripts,tests,rust/src}`（改动前完整源码副本）。

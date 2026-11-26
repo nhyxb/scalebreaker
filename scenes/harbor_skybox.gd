@@ -10,11 +10,15 @@ extends Node3D
 const BedroomShell := preload("res://scenes/skybox_bedroom.gd")
 const SKY_SCALE := BedroomShell.SKY_SCALE
 const CANVAS_LAYER := -64
-## Bedroom resolution relative to the window; the backdrop is soft, so a reduced buffer
-## keeps the second viewport cheap on integrated GPUs.
-const RES_RATIO := 0.4
-const MIN_SIZE := Vector2i(640, 360)
+## Bedroom SubViewport resolution relative to the window: crisp on desktop to remove
+## stair-stepped window/furniture edges, lighter on mobile GPUs.
+const DESKTOP_RES_RATIO := 0.85
+const MOBILE_RES_RATIO := 0.55
+const DESKTOP_MIN_SIZE := Vector2i(960, 540)
+const MOBILE_MIN_SIZE := Vector2i(640, 360)
 
+var bedroom: Node3D
+var ultra_giant_anchor: Node3D
 var _sub: SubViewport
 var _sky_cam: Camera3D
 var _layer: CanvasLayer
@@ -24,20 +28,23 @@ var _half_flip := false
 
 
 func _ready() -> void:
+	var is_mobile := _is_mobile_platform()
 	_sub = SubViewport.new()
 	_sub.name = "BedroomViewport"
 	_sub.own_world_3d = true
 	_sub.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	_sub.audio_listener_enable_3d = false
+	_sub.msaa_3d = Viewport.MSAA_DISABLED if is_mobile else Viewport.MSAA_2X
 	add_child(_sub)
-	var shell: Node3D = BedroomShell.new()
-	shell.name = "Bedroom"
-	_sub.add_child(shell)
-	_anchor = shell.sandbox_anchor
+	bedroom = BedroomShell.new()
+	bedroom.name = "Bedroom"
+	_sub.add_child(bedroom)
+	_anchor = bedroom.sandbox_anchor
+	ultra_giant_anchor = bedroom.ultra_giant_anchor
 	_sky_cam = Camera3D.new()
 	_sky_cam.name = "BedroomCamera"
-	_sky_cam.near = 0.01
-	_sky_cam.far = 40.0
+	_sky_cam.near = 0.005
+	_sky_cam.far = 20.0
 	_sub.add_child(_sky_cam)
 	_layer = CanvasLayer.new()
 	_layer.name = "BedroomBackdrop"
@@ -47,6 +54,7 @@ func _ready() -> void:
 	_rect.name = "BedroomPicture"
 	_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	_rect.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_rect.texture = _sub.get_texture()
 	_layer.add_child(_rect)
@@ -54,14 +62,27 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_on_size_changed)
 
 
+func _is_mobile_platform() -> bool:
+	return OS.has_feature("mobile") or OS.has_feature("android") or OS.has_feature("ios")
+
+
 func _on_size_changed() -> void:
 	_resize(get_viewport().size)
 
 
 func _resize(window_size: Vector2) -> void:
-	var ratio := Vector2i(maxi(MIN_SIZE.x, roundi(window_size.x * RES_RATIO)),
-			maxi(MIN_SIZE.y, roundi(window_size.y * RES_RATIO)))
-	_sub.size = ratio
+	var is_mobile := _is_mobile_platform()
+	var res_ratio := MOBILE_RES_RATIO if is_mobile else DESKTOP_RES_RATIO
+	var min_size := MOBILE_MIN_SIZE if is_mobile else DESKTOP_MIN_SIZE
+	var target := Vector2i(
+		maxi(min_size.x, roundi(window_size.x * res_ratio)),
+		maxi(min_size.y, roundi(window_size.y * res_ratio)),
+	)
+	if window_size.x > 0.0 and window_size.y > 0.0:
+		target.x = mini(target.x, roundi(window_size.x))
+		target.y = mini(target.y, roundi(window_size.y))
+	_sub.size = Vector2i(maxi(target.x, 64), maxi(target.y, 64))
+	_sub.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 
 func _process(_delta: float) -> void:

@@ -32,6 +32,7 @@ func _run() -> void:
 	root.add_child(_game)
 	await process_frame
 	_check(_game.get_screen() == "menu", "main menu opens")
+	_bedroom_skybox()
 	await _human_controls()
 	await _human_evacuates()
 	await _human_vs_ai()
@@ -61,6 +62,61 @@ func _run() -> void:
 		DirAccess.remove_absolute(settings_path)
 	print("Gameplay: %d passed, %d failed" % [_checks - _failures, _failures])
 	quit(1 if _failures else 0)
+
+
+func _bedroom_skybox() -> void:
+	var sky: Node = _game.get_node_or_null("Skybox")
+	var sub: SubViewport = sky.get_node_or_null("BedroomViewport") if sky != null else null
+	var rect: TextureRect = sky.get_node_or_null("BedroomBackdrop/BedroomPicture") if sky != null else null
+	var bedroom: Node3D = sub.get_node_or_null("Bedroom") if sub != null else null
+	_check(sky != null and sub != null and rect != null and bedroom != null,
+			"bedroom skybox viewport, backdrop and shell initialize with the main scene")
+	if bedroom == null:
+		return
+	var win := root.size
+	var expected_min := int(round(win.x * 0.75))
+	_check(rect.texture_filter == CanvasItem.TEXTURE_FILTER_LINEAR
+			and sub.size.x >= mini(win.x, expected_min) and sub.msaa_3d == Viewport.MSAA_2X,
+			"desktop skybox renders with linear filtering, high resolution ratio and 2x MSAA")
+	var furniture := bedroom.get_node_or_null("Furniture")
+	var required := [
+		"Desk", "ChairDesk", "ComputerScreen", "ComputerKeyboard", "ComputerMouse",
+		"LampRoundTable", "BooksDesk", "BearDesk", "PlantSmallDesk", "SpeakerLeft",
+		"BedDouble", "Pillow", "PillowLong", "CabinetBedDrawer", "BookcaseOpen",
+		"BookcaseClosedDoors", "RugRounded", "PottedPlant", "LampSquareCeiling",
+		"Trashcan", "CoatRackStanding",
+	]
+	var all_present := furniture != null
+	if all_present:
+		for item: String in required:
+			if furniture.get_node_or_null(item) == null:
+				all_present = false
+				break
+	_check(all_present and _count_collisions_in(bedroom) == 0,
+			"all Kenney furniture landmarks load into the bedroom with zero physics collisions")
+	var sandbox_anchor: Node3D = bedroom.sandbox_anchor
+	var ug_anchor: Node3D = bedroom.ultra_giant_anchor
+	var to_sandbox := Vector3.ZERO
+	var ug_fwd := Vector3.ZERO
+	if sandbox_anchor != null and ug_anchor != null:
+		var flat_target := Vector3(sandbox_anchor.global_position.x,
+				ug_anchor.global_position.y, sandbox_anchor.global_position.z)
+		to_sandbox = (flat_target - ug_anchor.global_position).normalized()
+		ug_fwd = (-ug_anchor.global_transform.basis.z).normalized()
+	_check(sandbox_anchor != null and ug_anchor != null and sky.ultra_giant_anchor == ug_anchor
+			and is_equal_approx(sandbox_anchor.position.x, 0.0)
+			and is_equal_approx(sandbox_anchor.position.z, 0.0)
+			and bedroom.ultra_giant_seat_y > 0.40 and bedroom.ultra_giant_seat_y < 0.52
+			and is_equal_approx(ug_anchor.position.y, bedroom.ultra_giant_seat_y)
+			and ug_fwd.dot(to_sandbox) > 0.99,
+			"ultra_giant_anchor sits above the swivel chair seat cushion facing sandbox_anchor")
+
+
+func _count_collisions_in(node: Node) -> int:
+	var total := 1 if node is CollisionObject3D else 0
+	for child in node.get_children():
+		total += _count_collisions_in(child)
+	return total
 
 
 func _human_controls() -> void:
