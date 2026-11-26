@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-11-26 — 阶段 3A 修复：坐姿改走 1 帧 SeatedPose 动画（Apply-Pose-as-Rest 在带形态键网格上会让 glTF 弹回 T-pose）
+
+用户目视 `04_side_profile.png` 定案：导出的模型在 Godot 里是**站立 T-pose**（双臂水平、双腿笔直穿入椅子底座）。
+
+### 根因
+
+- `export_yumeka_seated.py` 旧管线在导出前调用 `bpy.ops.pose.armature_apply()`：该算子只改骨架 Rest 骨，**不会把变形烘焙进带 Shape Keys 的网格**；glTF 皮肤绑定随后退化为恒等变形式——网格顶点数据永远停在 T-pose，姿态偏移全部丢失，Godot 端渲染出穿椅 T-pose。BeeaEye 内预览曾“确认”坐姿，属于 Blender 侧评估管线差异掩盖了该缺陷。
+
+### 修复（管线改结构）
+
+- **导出器**：删除 Apply-as-Rest；`pose_seated`+`measure_and_scale` 完成后把 16 根受控骨骼及骨架根变换在第 1 帧写入 1 帧 Action `SeatedPose` 绑到 `arm.animation_data.action`；改 `export_animations=True`、`export_rest_position_armature=False`、`export_force_sampling=True`、`export_morph_animation=False`——rest 与网格数据保持原始 T-pose（形态键参考系不变），坐姿整段作为动画进入 glTF。
+- **坐姿几何定稿**：大腿折叠 −89°（近水平）+ 小腿 86°，小腿+鞋长可自然落地；**取消椅垫压陷补偿**（旧 `cushion_sink` 符号还写反过一次：加号=抬离椅垫）。终值：`cushion_sink=0`、骨盆精确落在椅垫 0.4553、坐姿眼高 **1.200 m**、鞋底 −1.2 cm 属自然脚跟间隙带（阈值 1.5 cm 内不补偿）。
+- **Godot 侧**（`scenes/yumeka_ultra_giant.gd`）：`_ready()` 先找 `AnimationPlayer` 播放 `SeatedPose` → `seek(0, true)` → `pause()`（动画落定）；**之后**才缓存 Spine/Chest/Neck/Head 的 `get_bone_global_pose()` 作为呼吸/视线叠加基准（取代此前错误使用的 `get_bone_global_rest()` = T-pose rest）。新增 `debug_bone_pos()`。
+- **GDScript 陷阱**：lambda 按值捕获局部变量——从 `_walk` 内给局部赋值静默失败（数组收集解决；本项目两次踩中，含本修复过程内的上帝视角误判）。
+
+### 硬防回归断言（`tests/playtest.gd::_bedroom_skybox`）
+
+- 世界坐标断言新增 1 条：`Hand_L/R.y < Eye_L.y − 0.35`（手远低于眼）、`Foot_L/R.y < 0.25 且 z < 0.35`（脚前伸低位）、`Eye_L.y ∈ (1.10, 1.30)`——T-pose（手≈肩高 1.1、脚在锚点正下 0.55 z）全部判负。
+- headless 探针 `build/tmp/yumeka_bone_probe.gd` 实测：Eye_L y=**1.200**✓、Hand_L y=0.759/z=0.304（搭桌沿）✓、Foot 踝 y=0.127/z=0.20（前伸桌下）✓、`ANIMS=[SeatedPose]`✓、`eye_close` 形态键在✓。
+
+### 验证
+
+- 8 套 Godot 回归全绿：playtest **220** / growth 192 / mode_menu 45 / touch 42 / sit_crush_gameplay 44 / sit_crush 57 / brawl 43 / audio 36；`cargo build`+`cargo test` **40/40**。
+- Xvfb（llvmpipe）复拍：`04_side_profile.png`（手臂前下 40° 落桌面、头微俯、坐姿非 T-pose）+ `05_side_lap_feet.png`（躯干前倾、大腿前伸、小腿近垂直落地）；实测 FPS 依旧未测（llvmpipe 不作性能结论）。
+- 备份沿用 `backups/20261126_154640_yumeka_phase3a/`（本轮改动文件集一致）。
+
+---
+
 ## 2026-11-26 — 阶段 3A：坐姿 Yumeka 登上书房转椅（ultra_giant_anchor）— 哑光二次元、呼吸/眨眼/视线跟随玩家
 
 备份：`backups/20261126_154640_yumeka_phase3a/{.gitignore,scenes/{harbor_skybox.gd,skybox_bedroom.gd},tests/playtest.gd,CHANGELOG.md,MEMORY.md}`（改动前副本）。
@@ -28,7 +56,7 @@ rm -rf assets/characters/yumeka/ scenes/yumeka_ultra_giant.gd* scripts/export_yu
 - 形态键白名单裁剪：保留 14 个面部键（`eye_close(_L/_R)`、`eye_joy`、`eye_nagomi_1`、`eye_under_up_1`、`look_up/look_down`、`mouth_smile_1/2`、`mouth_a/i_1/u`、`mouth_w_1`），删除 549 个体型/MMD 冗余键（含 `vrc.*` 点号与 `ω` 重命名为 Godot 属性路径安全名）。
 - 材质全部重建为 Principled（皮肤/脸/衣服/头发 + 三个 `*_Transparent` alpha 卡），4096² 贴图降至 2048²。
 - 坐姿 FK：世界系关节扭转表（`bend()` 写 pose 骨全局矩阵；**关键坑：`pb.matrix` 写入延迟生效，每次写后必须 `view_layer.update()`，否则同骨叠加扭转静默丢失**）。大腿水平折叠 −84°、小腿 82°、脊柱 +5°/胸 +5° 前倾、颈 +3°/头 +18° 俯看沙盘、上臂前挂 −12°+88°、肘 −52°、手 −14° 搭桌面/腿上。
-- 规格化测量：坐姿眼高自动缩放（盆骨-接触面基准）→ **坐姿眼高 1.154 m（规格 1.15–1.25 m，高出 0.75 m 桌面 40 cm）**；petite 腿部差量用**椅垫压陷 4.6 cm** 补偿（鞋底精确落地 −0.000 m）；GLB 原点 = 椅垫接触面，挂 `ultra_giant_anchor` 即贴合。武装带导出 = `Apply Pose as Rest` 后 `export_scene.gltf`（**5.3 需先 `addon_enable io_scene_gltf2`，算子名是 `export_scene.gltf` 而非 `wm.gltf_export`**）。产物 `assets/characters/yumeka/Yumeka_seated.glb` **15.4 MB**（贴图内嵌，打包 2048²）。
+- 规格化测量：坐姿眼高自动缩放（盆骨-接触面基准）→ **坐姿眼高 1.154 m（规格 1.15–1.25 m，高出 0.75 m 桌面 40 cm）**；petite 腿部差量用**椅垫压陷 4.6 cm** 补偿（鞋底精确落地 −0.000 m）；GLB 原点 = 椅垫接触面，挂 `ultra_giant_anchor` 即贴合。武装带导出 = `Apply Pose as Rest` 后 `export_scene.gltf`（**5.3 需先 `addon_enable io_scene_gltf2`，算子名是 `export_scene.gltf` 而非 `wm.gltf_export`**）。产物 `assets/characters/yumeka/Yumeka_seated.glb`（贴图内嵌，打包 2048²）。*(勘误 2026-11-26 晚：本条所述“Apply Pose as Rest 导出”在带形态键网格上会令 glTF 回退 T-pose，当日晚间已改为 1 帧 SeatedPose 动画方案，见上条修复记录。)*
 - 产物目录附 `README.txt` + `license/YUMEKA_License*`（VN3 许可条款副本，与资产一起被 gitignore）。
 
 ### 三、Godot 生命感（`scenes/yumeka_ultra_giant.gd` + 挂载）

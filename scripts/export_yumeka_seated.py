@@ -61,11 +61,11 @@ TEXTURE_SIZE = 2048
 ## parent-first. She faces Blender -Y (the desk/sandbox direction), Z is up.
 POSE_TWISTS = [
     # -- thighs: horizontal, sinking slightly into the cushion (knees over toes)
-    ("UpperLeg_L", (1, 0, 0), -84.0),
-    ("UpperLeg_R", (1, 0, 0), -84.0),
+    ("UpperLeg_L", (1, 0, 0), -89.0),
+    ("UpperLeg_R", (1, 0, 0), -89.0),
     # -- knees: shins near vertical, toes slightly tucked under the desk front
-    ("LowerLeg_L", (1, 0, 0), 82.0),
-    ("LowerLeg_R", (1, 0, 0), 82.0),
+    ("LowerLeg_L", (1, 0, 0), 86.0),
+    ("LowerLeg_R", (1, 0, 0), 86.0),
     # -- feet: flat on the floor
     ("Foot_L", (1, 0, 0), 6.0),
     ("Foot_R", (1, 0, 0), 6.0),
@@ -383,12 +383,16 @@ def measure_and_scale(arm_obj) -> dict:
 
     # Petite-figure leg reach vs the 0.4553 m bench reality: her shin+shoe line
     # measures a few centimetres short of the floor, so the sole would dig in.
-    # Soft-cushion compensation: sink the pelvis into the chair pad just deep
-    # enough to plant the shoe soles flush on the bedroom floor.
+    # Soft-cushion compensation: press the pelvis INTO the chair pad just deep
+    # enough to plant the shoe soles flush on the bedroom floor. The pelvis sinks
+    # below the cushion plane (foam compress) and the eye drops by the same
+    # amount - the opposite sign (lifting) would float her off the cushion.
     cushion_sink = 0.0
-    if foot_world is not None and foot_world + SEAT_TOP < 0.0:
-        cushion_sink = min(-(foot_world + SEAT_TOP), 0.08)
-        arm_obj.location.z += cushion_sink
+    if foot_world is not None and foot_world + SEAT_TOP < -0.015:
+        # She clears up to 1.5 cm on heel-lift naturally; deeper shortfalls
+        # press the pelvis into the chair foam so the soles land flush.
+        cushion_sink = min(-(foot_world + SEAT_TOP) - 0.015, 0.08)
+        arm_obj.location.z -= cushion_sink
         bpy.context.view_layer.update()
         foot_world = _mesh_lowest(arm_obj, foot_region)
 
@@ -414,15 +418,37 @@ def measure_and_scale(arm_obj) -> dict:
     return stats
 
 
-def apply_pose_as_rest(arm_obj) -> None:
-    for ob in bpy.data.objects:
-        ob.select_set(ob.type in {"ARMATURE", "MESH"})
-    bpy.context.view_layer.objects.active = arm_obj
-    bpy.ops.object.mode_set(mode="POSE")
-    bpy.ops.pose.select_all(action="SELECT")
-    bpy.ops.pose.armature_apply()
-    bpy.ops.pose.select_all(action="DESELECT")
-    bpy.ops.object.mode_set(mode="OBJECT")
+def keyframe_seated_pose(arm_obj) -> None:
+    """Author a 1-frame `SeatedPose` action preserving the FK pose exactly.
+
+    NEVER use `bpy.ops.pose.armature_apply()` here: "Apply Pose as Rest" merely
+    rewrites the edit bones, so mesh vertex data stays at the T-pose and the
+    glTF skin ends up binding identity -> Godot renders the raw T-pose block-
+    through-the-chair (diagnosed 2026-11-26 on the side profile shot). Keying
+    the pose at frame 1 keeps the original rest/mesh data (and every shape
+    key) intact while the animation carries the seated pose into glTF.
+    """
+    scene = bpy.context.scene
+    action = bpy.data.actions.new("SeatedPose")
+    arm_obj.animation_data_create()
+    arm_obj.animation_data.action = action
+    scene.frame_set(1)
+    # The armature object itself carries the eye-height scale + cushion rebase.
+    arm_obj.keyframe_insert("location", frame=1)
+    arm_obj.keyframe_insert("rotation_euler", frame=1)
+    arm_obj.keyframe_insert("scale", frame=1)
+    pose_bones = {bone for bone, _, _ in POSE_TWISTS}
+    for pb in arm_obj.pose.bones:
+        if pb.name not in pose_bones:
+            continue
+        pb.keyframe_insert("location", frame=1)
+        pb.keyframe_insert("scale", frame=1)
+        rot_channel = "rotation_quaternion" if pb.rotation_mode == "QUATERNION" \
+            else "rotation_euler"
+        pb.keyframe_insert(rot_channel, frame=1)
+    scene.frame_set(1)
+    bpy.context.view_layer.update()
+    _log(f"keyframed SeatedPose on {len(pose_bones)} bones at frame 1")
 
 
 def render_preview(out_dir: str, arm_obj: bpy.types.Object) -> None:
@@ -516,9 +542,14 @@ def export_glb(path: str) -> None:
         filepath=path,
         use_selection=True,
         export_format="GLB",
-        export_animations=False,
-        export_skins=True,
+        export_animations=True,
+        # Keep the armature's ORIGINAL rest (the raw blend file T-pose): the
+        # seated pose travels as the 1-frame SeatedPose animation.
+        export_rest_position_armature=False,
+        export_force_sampling=True,
         export_morph=True,
+        export_morph_animation=False,
+        export_skins=True,
         export_apply=False,
         export_extras=False,
     )
@@ -570,7 +601,7 @@ def main() -> None:
     if not eye_ok:
         raise SystemExit("seated eye height out of spec; adjust POSE_TWISTS")
 
-    apply_pose_as_rest(arm)
+    keyframe_seated_pose(arm)
     export_glb(out_path)
     print("[yumeka-export] DONE")
 

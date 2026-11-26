@@ -44,6 +44,9 @@ var _head_idx := -1
 var _neck_idx := -1
 var _chest_idx := -1
 var _spine_idx := -1
+## Baked (animated) seated transforms per animated bone: breathing and gaze
+## compose over these, never over the armature's raw T-pose rest.
+var _posed_bases := {}
 
 var _anim_acc := 0.0
 var _time := 0.0
@@ -80,6 +83,12 @@ func _ready() -> void:
 	if _skeleton == null or _head_idx < 0:
 		push_warning("Yumeka seated GLB has no animatable rig: static mount only")
 		return
+	# The GLB's real pose ships as a 1-frame `SeatedPose` action (Apply-Pose-as-
+	# Rest breaks glTF skinning against shape keys, so the exporter keeps the
+	# T-pose rest + this animation). Land it FIRST so every runtime base below
+	# reads the seated skeleton, then freeze the player so ticks own the bones.
+	_land_seated_pose()
+	_cache_posed_bases()
 	_cache_neutral_gaze()
 	_set_idle_face()
 	set_meta(&"mounted", true)
@@ -160,6 +169,40 @@ func _find_animation_rig() -> void:
 		var parent := vp.get_parent()
 		if parent.has_method(&"mark_dirty"):
 			_sky = parent
+
+
+func _land_seated_pose() -> void:
+	# NB: GDScript lambdas capture locals BY VALUE, so collect through an array
+	# (assigning a local from inside the lambda would silently go nowhere).
+	var players: Array = []
+	_walk(_model, func(node: Node) -> void:
+		if node is AnimationPlayer and players.is_empty():
+			players.append(node)
+	)
+	if players.is_empty():
+		push_warning("Yumeka GLB carries no SeatedPose animation")
+		return
+	var player: AnimationPlayer = players[0]
+	var pick: StringName = &"SeatedPose"
+	var found := false
+	for anim in player.get_animation_list():
+		if String(anim).contains("Seated"):
+			pick = anim
+			found = true
+	if not found and player.get_animation_list().size() > 0:
+		pick = player.get_animation_list()[0]
+	player.play(pick)
+	player.seek(0.0, true)
+	player.pause()
+	player.speed_scale = 0.0
+	if _skeleton != null and not _skeleton.has_meta(&"seat_landed"):
+		_skeleton.set_meta(&"seat_landed", true)
+
+
+func _cache_posed_bases() -> void:
+	for idx in [_head_idx, _neck_idx, _chest_idx, _spine_idx]:
+		if idx >= 0:
+			_posed_bases[idx] = _skeleton.get_bone_global_pose(idx)
 
 
 func _cache_neutral_gaze() -> void:
@@ -320,10 +363,12 @@ func _twist_bone(bone_idx: int, axis_a: Vector3, angle_a: float,
 	var basis := Basis(axis_a.normalized(), angle_a)
 	if axis_b != Vector3.ZERO:
 		basis = Basis(axis_b.normalized(), angle_b) * basis
-	var rest := _skeleton.get_bone_global_rest(bone_idx)
-	var pivot := rest.origin
+	var base: Transform3D = _posed_bases.get(bone_idx, null)
+	if base == null:
+		base = _skeleton.get_bone_global_pose(bone_idx)
+	var pivot := base.origin
 	var pose := Transform3D(Basis(), pivot) * Transform3D(basis, Vector3.ZERO) \
-			* Transform3D(Basis(), -pivot) * rest
+			* Transform3D(Basis(), -pivot) * base
 	_skeleton.set_bone_global_pose(bone_idx, pose)
 
 
@@ -333,6 +378,15 @@ func _twist_bone(bone_idx: int, axis_a: Vector3, angle_a: float,
 
 func debug_eye_close() -> float:
 	return _blink_state
+
+
+func debug_bone_pos(bone: String) -> Vector3:
+	if _skeleton == null:
+		return Vector3.INF
+	var idx := _skeleton.find_bone(bone)
+	if idx < 0:
+		return Vector3.INF
+	return _skeleton.global_transform * _skeleton.get_bone_global_pose(idx).origin
 
 
 func debug_force_blink() -> void:

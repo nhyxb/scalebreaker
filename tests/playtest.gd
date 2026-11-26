@@ -138,6 +138,19 @@ func _bedroom_skybox() -> void:
 				and _count_collisions_in(yumeka) == 0,
 				"seated Yumeka mounts under the anchor with zero colliders")
 		if yumeka != null and yumeka.debug_is_mounted():
+			# Hard seated-pose assertions: the exporter root fix (2026-11-26) sends
+			# the pose as a 1-frame SeatedPose animation, so guard against the GLB
+			# ever regressing to the raw T-pose block-through-chair state.
+			var hm_l: Vector3 = yumeka.debug_bone_pos("Hand_L")
+			var hm_r: Vector3 = yumeka.debug_bone_pos("Hand_R")
+			var eye_l_pos: Vector3 = yumeka.debug_bone_pos("Eye_L")
+			var ft_l: Vector3 = yumeka.debug_bone_pos("Foot_L")
+			var ft_r: Vector3 = yumeka.debug_bone_pos("Foot_R")
+			_check(hm_l.y < eye_l_pos.y - 0.35 and hm_r.y < eye_l_pos.y - 0.35
+					and ft_l.y < 0.25 and ft_r.y < 0.25
+					and ft_l.z < 0.35 and ft_r.z < 0.35
+					and eye_l_pos.y > 1.10 and eye_l_pos.y < 1.30,
+					"SeatedPose lands in Godot: hands below eye level, feet tucked forward-low, eyes at spec (not T-pose)")
 			_check(yumeka.get_morph("eye_nagomi_1") > 0.2
 					and yumeka.get_morph("mouth_smile_1") > 0.1
 					and yumeka.get_morph("eye_close") < 0.01,
