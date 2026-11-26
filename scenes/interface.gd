@@ -113,6 +113,7 @@ var _giant_hp_ratio := 1.0
 var _health_meter: HealthMeter
 var _stamina_gauge: StaminaGauge
 var _evac_compass: EvacCompass
+var _coin_radar: CoinRadar
 var _evac_dist_num: Label
 var _evac_dist_unit: Label
 var _evac_sub: Label
@@ -263,6 +264,7 @@ func _process(delta: float) -> void:
 			_stomp_gauge.tick(dt)
 			if _has_growth_hud(_mode):
 				_evac_compass.tick(dt)
+				_coin_radar.tick(dt)
 
 
 func _input(event: InputEvent) -> void:
@@ -709,6 +711,14 @@ func _update_growth_hud(state: Dictionary) -> void:
 			_evac_dist_num.text = "%.0f" % distance
 			_evac_dist_unit.text = "米"
 		_evac_dist_num.add_theme_color_override("font_color", CRANE_AMBER)
+	# Fuzzy coin radar: growth human stage only. The snapshot carries a ~40°
+	# sector toward the best-value coin — never an exact bearing readout.
+	if state.has("coin_radar"):
+		var radar: Dictionary = state.coin_radar
+		_coin_radar.set_reading(float(radar.get("angle", 0.0)), float(radar.get("span", 0.698)),
+				int(radar.get("tier", 0)), int(radar.get("proximity", 0)))
+	else:
+		_coin_radar.set_no_reading()
 
 
 # ---------------------------------------------------------------------------
@@ -1155,6 +1165,14 @@ func _build_hud() -> void:
 	_evac_panel.offset_top = 24
 	_evac_panel.offset_right = -28
 	_evac_panel.offset_left = -236
+
+	# --- GROWTH HUMAN STAGE: fuzzy coin radar arc at top centre ---
+	_coin_radar = CoinRadar.new()
+	_coin_radar.custom_minimum_size = Vector2(280, 96)
+	_hud.add_child(_coin_radar)
+	_coin_radar.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP)
+	_coin_radar.offset_top = 6
+	_coin_radar.visible = false
 
 	var evac_row := HBoxContainer.new()
 	evac_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -3015,6 +3033,77 @@ class EvacCompass extends Control:
 		var notch := center - fwd * 1.0
 		draw_colored_polygon(PackedVector2Array([tip, wing_l, notch, wing_r]), accent)
 		draw_circle(center, 2.2, Color("#111316"))
+
+
+## Fuzzy growth-mode coin radar: a minimal top-centre arc that points at the
+## best-value coin with a ~40° wide sector and nothing else — no needle, no
+## coordinates, no metre count. The sector colour carries the highest coin
+## tier in that direction and the pulse cadence encodes far/mid/near district
+## distance; the whole widget fades out once a coin is close enough to see.
+class CoinRadar extends Control:
+	var _angle := 0.0
+	var _display_angle := 0.0
+	var _span := 0.698
+	var _tier := 0
+	var _proximity := 0
+	var _fade := 0.0
+	var _pulse := 0.0
+	var _active := false
+	var _tier_colors: Array[Color] = []
+	var _pulse_rates := [5.2, 9.0, 14.5]
+	const HALF_VIEW := 1.30
+
+	func _init() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_tier_colors = [Color("#cbbd93"), Color("#eba930"), Color("#d76ad0")]
+
+	func set_reading(angle: float, span: float, tier: int, proximity: int) -> void:
+		_active = true
+		_angle = angle
+		_span = span
+		_tier = tier
+		_proximity = proximity
+
+	func set_no_reading() -> void:
+		_active = false
+
+	func tick(dt: float) -> void:
+		_fade = move_toward(_fade, 1.0 if _active else 0.0, dt * 2.6)
+		visible = _fade > 0.01
+		if not visible:
+			return
+		_display_angle = lerp_angle(_display_angle, _angle, minf(dt * 9.0, 1.0))
+		_pulse += dt * _pulse_rates[clampi(_proximity, 0, 2)]
+		queue_redraw()
+
+	func _draw() -> void:
+		var center := Vector2(size.x * 0.5, size.y + 14.0)
+		var radius := minf(size.x * 0.44, size.y * 0.92)
+		# The arc hangs below the top edge; forward (angle 0) points straight up.
+		var forward := -PI * 0.5
+		var alpha := _fade * (0.75 + 0.25 * (0.5 + 0.5 * sin(_pulse)))
+		var accent: Color = _tier_colors[clampi(_tier, 0, 2)]
+
+		# Quiet bezel band with a forward notch.
+		draw_arc(center, radius, forward - HALF_VIEW, forward + HALF_VIEW, 48,
+				Color("#efeae0", 0.14 * _fade), 2.2, true)
+		var notch := Vector2(cos(forward), sin(forward))
+		draw_line(center + notch * (radius - 6.0), center + notch * (radius + 1.5),
+				Color("#efeae0", 0.30 * _fade), 1.6, true)
+
+		# The active fuzzy sector: soft outer glow plus a bright core arc.
+		var bearing := forward + _display_angle
+		var half_span := _span * 0.5
+		var breathe := 0.5 + 0.5 * sin(_pulse)
+		draw_arc(center, radius + 4.0, bearing - half_span, bearing + half_span, 20,
+				Color(accent, 0.16 * alpha * (0.6 + 0.4 * breathe)), 8.0, true)
+		draw_arc(center, radius, bearing - half_span, bearing + half_span, 20,
+				Color(accent, 0.92 * alpha), 5.0, true)
+		for edge in [bearing - half_span, bearing + half_span]:
+			var dir := Vector2(cos(edge), sin(edge))
+			draw_line(center + dir * (radius - 9.0), center + dir * (radius + 2.0),
+					Color(accent, 0.55 * alpha), 1.6, true)
+		# No needle, no numbers: the sector is the whole reading.
 
 
 ## 12-segment industrial destruction progress bar scaling cleanly to any city size.

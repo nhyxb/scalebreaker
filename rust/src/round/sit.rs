@@ -139,6 +139,19 @@ impl Giant {
     fn sit_radius(&self) -> f32 {
         SEAT_RADIUS * self.scale
     }
+
+    /// The live drop zone while a sit is telegraphed (turn/drop phases): where
+    /// the pelvis will land and how wide the crush area is. Snapshot into
+    /// `Rival` per frame so other actors can dodge the warning circle.
+    pub(super) fn sit_drop_zone(&self) -> Option<(Vector3, f32)> {
+        let sit = self.sit.as_ref()?;
+        match sit.phase {
+            SitPhase::Turn { .. } | SitPhase::Drop { .. } => {
+                Some((self.sit_center(), self.sit_radius()))
+            }
+            SitPhase::Hold { .. } | SitPhase::Rise { .. } => None,
+        }
+    }
 }
 
 impl HarborRound {

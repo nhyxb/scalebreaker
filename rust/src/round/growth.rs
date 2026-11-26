@@ -9,6 +9,119 @@ const COIN_MIN_SPACING: f32 = 4.0;
 const COIN_BUILDING_CLEARANCE: f32 = MAP_COIN_RADIUS + 0.35;
 const LOCAL_COIN_SEARCH: f32 = 80.0;
 const GIANT_PASS_HEIGHT_RATIO: f32 = 3.0;
+/// Fuzzy coin radar: coins closer than this are visible to the naked eye, so
+/// the compass sector fades out instead of pointing at them.
+const COIN_RADAR_FADE_RANGE: f32 = 110.0;
+/// Fuzzy coin radar distance bands (metres): below/near/far pulse speeds.
+const COIN_RADAR_NEAR: f32 = 250.0;
+const COIN_RADAR_MID: f32 = 550.0;
+/// Combat hotspots feed coin grading; each entry is (position, radius, ttl).
+const HOTSPOT_TTL: f32 = 12.0;
+
+/// Risk-graded map coin. Higher tiers pay more but force the human stage to
+/// stand inside the pickup circle while a collection bar fills.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(super) enum CoinTier {
+    /// Safe/outskirts: 1× value, instant pickup (0 s dwell).
+    Normal,
+    /// Near a large giant's stomping grounds: 2.5× value, ~2.0 s dwell.
+    High,
+    /// At a giant's feet or inside a multi-way combat hotspot: 5× value,
+    /// ~3.5–4.0 s dwell.
+    Extreme,
+}
+
+impl CoinTier {
+    pub fn index(self) -> i32 {
+        match self {
+            Self::Normal => 0,
+            Self::High => 1,
+            Self::Extreme => 2,
+        }
+    }
+
+    /// Reward multiplier of the tier (1× / 2.5× / 5×).
+    pub fn value(self) -> f32 {
+        match self {
+            Self::Normal => 1.0,
+            Self::High => 2.5,
+            Self::Extreme => 5.0,
+        }
+    }
+
+    /// Seconds a human-stage actor must stand inside the pickup circle.
+    /// Giants of any tier collect instantly — the late game never waits.
+    pub fn dwell_seconds(self) -> f32 {
+        match self {
+            Self::Normal => 0.0,
+            Self::High => 2.0,
+            Self::Extreme => 3.75,
+        }
+    }
+
+    /// Fraction of the full collection bar lost per second after leaving the
+    /// circle (requirement: ~25–30 %/s, not an instant reset).
+    const DECAY_FRACTION: f32 = 0.27;
+}
+
+/// One step of the dwell collection bar. `inside` accumulates, leaving decays.
+pub(super) fn advance_dwell(progress: f32, tier: CoinTier, inside: bool, dt: f32) -> f32 {
+    if inside {
+        progress + dt
+    } else {
+        (progress - CoinTier::DECAY_FRACTION * tier.dwell_seconds() * dt).max(0.0)
+    }
+}
+
+/// A human-stage actor's live collection bar on one risk-tiered coin. Progress
+/// is measured in seconds toward the tier's dwell time and follows the actor,
+/// not the coin: leaving the circle decays it instead of resetting it.
+#[derive(Clone, Copy)]
+pub(super) struct CoinDwell {
+    pub coin: InstanceId,
+    pub tier: CoinTier,
+    pub progress: f32,
+}
+
+/// A giant or hotspot that grades map coins.
+#[derive(Clone, Copy)]
+pub(super) struct CoinThreat {
+    pub at: Vector3,
+    /// Stomp reach around the giant's feet: inside it coins are `Extreme`.
+    pub stomp_reach: f32,
+    /// Activity zone radius: inside it coins are at least `High`.
+    pub zone: f32,
+}
+
+/// Pure grading rule: `Extreme` at a giant's feet or the core of a combat
+/// hotspot, `High` inside its activity zone or a hotspot, else `Normal`.
+pub(super) fn coin_threat_tier(
+    point: Vector3,
+    threats: &[CoinThreat],
+    hotspots: &[(Vector3, f32)],
+) -> CoinTier {
+    let mut tier = CoinTier::Normal;
+    for threat in threats {
+        let distance = horizontal(threat.at - point).length();
+        if distance <= threat.stomp_reach {
+            return CoinTier::Extreme;
+        }
+        if distance <= threat.zone {
+            tier = tier.max(CoinTier::High);
+        }
+    }
+    for &(at, radius) in hotspots {
+        let distance = horizontal(at - point).length();
+        if distance <= radius * 0.45 {
+            return CoinTier::Extreme;
+        }
+        if distance <= radius {
+            tier = tier.max(CoinTier::High);
+        }
+    }
+    tier
+}
+
 
 const GIANT_NAMES: &[&str] = &[
     "林晓岚",
@@ -132,6 +245,7 @@ struct Coin {
     position: Vector3,
     radius: f32,
     reward: CoinReward,
+    tier: CoinTier,
 }
 
 #[derive(Clone, Copy)]
@@ -141,11 +255,15 @@ enum CoinReward {
 }
 
 impl Coin {
-    fn spawn(root: &mut Gd<Node3D>, position: Vector3, reward: CoinReward) -> Self {
+    fn spawn(root: &mut Gd<Node3D>, position: Vector3, reward: CoinReward, tier: CoinTier) -> Self {
         let node = root
             .call(
                 "spawn_coin",
-                &[position.to_variant(), MAP_COIN_RADIUS.to_variant()],
+                &[
+                    position.to_variant(),
+                    MAP_COIN_RADIUS.to_variant(),
+                    tier.index().to_variant(),
+                ],
             )
             .to::<Gd<Node3D>>();
         Self {
@@ -153,6 +271,7 @@ impl Coin {
             position,
             radius: MAP_COIN_RADIUS,
             reward,
+            tier,
         }
     }
 }
@@ -171,15 +290,28 @@ pub(super) struct Rival {
     /// Frame-start pose shared by target scanning and threat avoidance.
     pub position: Vector3,
     pub velocity: Vector3,
+    /// Human-stage flag snapshot for cheap stage checks during the actor loop.
+    pub human: bool,
+    /// Active stomp warning ellipse (center, radii) while this rival is in windup.
+    pub windup: Option<(Vector3, Vector2)>,
+    /// Sit-crush drop zone (center, radius) while this rival is turning/dropping.
+    pub sit_drop: Option<(Vector3, f32)>,
 }
 
 impl Rival {
     pub fn from_giant(giant: &Giant) -> Self {
         let body = giant.body.clone();
+        let windup = match &giant.stomp {
+            Stomp::Windup { area, .. } => Some((area.center, area.radii)),
+            _ => None,
+        };
         Self {
             index: giant.index,
             position: body.get_global_position(),
             velocity: body.get_real_velocity(),
+            windup,
+            sit_drop: giant.sit_drop_zone(),
+            human: giant.human,
             body,
             scale: giant.scale,
             health_fraction: giant.health_fraction,
@@ -444,6 +576,20 @@ impl HarborRound {
             entry.set("sit", giant.sit.map_or("", |action| action.phase_key()));
             entry.set("sit_idle", giant.sit.is_some_and(|action| action.idle));
             entry.set("pinned", giant.pinned_by.is_some());
+            entry.set("intent", giant.intent_key());
+            entry.set(
+                "size_tier",
+                giant.size_tier.map_or(0, |(_, tier)| tier.index()),
+            );
+            entry.set("evading", giant.intent == Intent::Evade);
+            let dwell = giant.coin_dwell.map_or(0.0, |dwell| {
+                (dwell.progress / dwell.tier.dwell_seconds().max(0.001)).clamp(0.0, 1.0)
+            });
+            entry.set("dwell", dwell);
+            entry.set(
+                "dwell_tier",
+                giant.coin_dwell.map_or(0, |dwell| dwell.tier.index()),
+            );
             entries.push(&entry);
         }
         entries
@@ -1033,6 +1179,93 @@ impl HarborRound {
         });
     }
 
+    /// Giant-stage actors and combat hotspots that grade map coins, snapshotted
+    /// once per grading pass. Human-stage actors cannot stomp and never grade.
+    pub(super) fn coin_threats(&self) -> (Vec<CoinThreat>, Vec<(Vector3, f32)>) {
+        let threats: Vec<CoinThreat> = self
+            .giants
+            .iter()
+            .filter(|giant| giant.health_fraction > 0.0 && !self.is_human_stage(giant.scale))
+            .map(|giant| {
+                let height = giant.height(self.max_height);
+                let at = giant.body.get_global_position();
+                CoinThreat {
+                    at,
+                    stomp_reach: stomp_center_range(giant.scale)
+                        + FOOT_RADII.y * giant.scale
+                        + GIANT_RADIUS * giant.scale
+                        + (6.0 + height * 0.05),
+                    zone: (sight_range(giant.scale) * 1.4).max(height * 2.2),
+                }
+            })
+            .collect();
+        let hotspots = self
+            .hotspots
+            .iter()
+            .map(|&(at, radius, _)| (at, radius))
+            .collect();
+        (threats, hotspots)
+    }
+
+    /// Ages combat hotspots and re-grades live coins so a wave that spawned in
+    /// a quiet street turns valuable (and slower to grab) once giants move in.
+    fn update_hotspots_and_coin_tiers(&mut self, dt: f32) {
+        self.coin_regrade_in -= dt;
+        if self.coin_regrade_in > 0.0 || self.coins.coins.is_empty() {
+            return;
+        }
+        self.coin_regrade_in = 0.5;
+        let (threats, hotspots) = self.coin_threats();
+        if threats.is_empty() && hotspots.is_empty() {
+            return;
+        }
+        let mut root = self.base().get_node_as::<Node3D>("Coins");
+        let mut restyled: Vec<(Gd<Node3D>, CoinTier)> = Vec::new();
+        for coin in &mut self.coins.coins {
+            let tier = coin_threat_tier(coin.position, &threats, &hotspots);
+            if tier != coin.tier {
+                coin.tier = tier;
+                restyled.push((coin.node.clone(), tier));
+            }
+        }
+        for (node, tier) in restyled {
+            root.call(
+                "set_coin_tier",
+                &[node.to_variant(), tier.index().to_variant()],
+            );
+        }
+    }
+
+    /// Test/debug rows for the live coin wave.
+    pub(super) fn coin_debug_entries(&self) -> Array<VarDictionary> {
+        let mut entries = Array::new();
+        for coin in &self.coins.coins {
+            let mut entry = VarDictionary::new();
+            entry.set("tier", coin.tier.index());
+            entry.set("dwell", coin.tier.dwell_seconds());
+            entry.set("position", coin.position);
+            entries.push(&entry);
+        }
+        entries
+    }
+
+    /// Records a combat hotspot (stomp windup/impact, demolition, kill) that
+    /// grades nearby coins up and keeps foragers away for ~12–15 s.
+    pub(super) fn note_hotspot(&mut self, at: Vector3, radius: f32) {
+        const MAX_HOTSPOTS: usize = 24;
+        let merge_radius_sq = (radius * 0.5).powi(2);
+        for (existing, _, left) in &mut self.hotspots {
+            if horizontal(*existing - at).length_squared() <= merge_radius_sq {
+                *left = HOTSPOT_TTL;
+                return;
+            }
+        }
+        self.hotspots.push((at, radius, HOTSPOT_TTL));
+        if self.hotspots.len() > MAX_HOTSPOTS {
+            self.hotspots.remove(0);
+        }
+    }
+
     pub(super) fn update_coin_wave(&mut self, dt: f32) {
         let rules = self.growth_rules.unwrap();
         if rules.coin_count == 0 {
@@ -1051,6 +1284,7 @@ impl HarborRound {
             for coin in &mut self.coins.coins {
                 coin.position = coin.node.get_position();
             }
+            self.update_hotspots_and_coin_tiers(dt);
             return;
         }
 
@@ -1063,6 +1297,7 @@ impl HarborRound {
             return;
         }
         self.coins.refresh_in = rules.coin_interval;
+        let (coin_threats, coin_hotspots) = self.coin_threats();
         let giant_exclusions: Vec<_> = self
             .giants
             .iter()
@@ -1161,9 +1396,12 @@ impl HarborRound {
                 .as_mut()
                 .and_then(|space| space.intersect_ray(&query).get("position"))
                 .map_or(0.0, |position| position.to::<Vector3>().y);
-            self.coins
-                .coins
-                .push(Coin::spawn(&mut root, point, CoinReward::Wave));
+            self.coins.coins.push(Coin::spawn(
+                &mut root,
+                point,
+                CoinReward::Wave,
+                coin_threat_tier(point, &coin_threats, &coin_hotspots),
+            ));
         }
         let attack_scale = rules.attack_height / GIANT_START_HEIGHT;
         for giant in &mut self.giants {
@@ -1215,12 +1453,15 @@ impl HarborRound {
             })
     }
 
+    /// Growth-mode giants that already demolished their way past the human stage
+    /// sweep coins instantly so the late game never waits on a collection bar;
+    /// the dwell requirement below only applies to the human stage.
     fn can_collect_coins(&self, actor: &Giant) -> bool {
         actor.health_fraction > 0.0
             && if self.mode == Mode::Brawl {
                 actor.scale < self.settings.brawl.coin_height / GIANT_START_HEIGHT
             } else {
-                actor.human
+                self.growth_rules.is_some()
             }
     }
 
@@ -1233,46 +1474,166 @@ impl HarborRound {
             })
     }
 
-    pub(super) fn check_growth_contacts(&mut self, actor: &mut Giant, start: Vector3, _dt: f32) {
-        if self.coins.coins.is_empty() || !self.can_collect_coins(actor) {
-            return;
-        }
+    /// Removes and banks one coin: progress count, tier-scaled growth reward,
+    /// scene cleanup and the pickup sound.
+    fn collect_coin_at(&mut self, actor: &mut Giant, index: usize) {
         let wave_rate = self.combat_rules().coin_growth_rate;
         let max_height = self.max_height;
-        let end = actor.body.get_global_position();
-        let height = actor.height(max_height);
-        let radius = self.actor_radius(actor);
-        let mut root = self.base().get_node_as::<Node3D>("Coins");
-        let mut picked = Vec::new();
-        self.coins.coins.retain_mut(|coin| {
-            let point = coin.position;
-            if (point.y - end.y).abs() <= 0.16_f32.max(height * 0.65)
-                && separation(horizontal(start - point), horizontal(end - point))
-                    <= radius + coin.radius + coin_pickup_margin(height)
-            {
-                actor.progress.collected += 1;
-                picked.push(point);
-                actor.queue_growth(max_height, |base| match coin.reward {
-                    CoinReward::Wave => base * (1.0 + wave_rate),
-                    CoinReward::Height(meters) => base + meters / GIANT_START_HEIGHT,
-                });
-                root.remove_child(&coin.node);
-                coin.node.queue_free();
-                false
-            } else {
-                true
-            }
+        let (mut node, point, reward, tier) = {
+            let coin = &self.coins.coins[index];
+            (coin.node.clone(), coin.position, coin.reward, coin.tier)
+        };
+        actor.progress.collected += 1;
+        actor.queue_growth(max_height, |base| match reward {
+            CoinReward::Wave => base * (1.0 + wave_rate * tier.value()),
+            CoinReward::Height(meters) => base + meters / GIANT_START_HEIGHT,
         });
-        if !picked.is_empty()
-            && let Some(mut audio) = self.audio()
-        {
+        let mut root = self.base().get_node_as::<Node3D>("Coins");
+        root.remove_child(&node);
+        node.queue_free();
+        self.coins.coins.remove(index);
+        if let Some(mut audio) = self.audio() {
             let is_player = actor.index == 0 && self.player == PlayerRole::Giant;
-            for point in picked {
-                audio.call(
-                    "play_coin_pickup",
-                    &[is_player.to_variant(), point.to_variant()],
-                );
+            audio.call(
+                "play_coin_pickup",
+                &[is_player.to_variant(), point.to_variant()],
+            );
+        }
+    }
+
+    pub(super) fn check_growth_contacts(&mut self, actor: &mut Giant, start: Vector3, dt: f32) {
+        if self.coins.coins.is_empty() || !self.can_collect_coins(actor) {
+            actor.coin_dwell = None;
+            return;
+        }
+        let end = actor.body.get_global_position();
+        let height = actor.height(self.max_height);
+        let radius = self.actor_radius(actor);
+        let mut instant: Vec<usize> = Vec::new();
+        // The dwell candidate is tracked by node id, not index: sweeping the
+        // instant coins out first would shift every later index.
+        let mut dwell_id: Option<InstanceId> = None;
+        let mut dwell_distance = f32::INFINITY;
+        for (index, coin) in self.coins.coins.iter().enumerate() {
+            let point = coin.position;
+            let in_reach = (point.y - end.y).abs() <= 0.16_f32.max(height * 0.65)
+                && separation(horizontal(start - point), horizontal(end - point))
+                    <= radius + coin.radius + coin_pickup_margin(height);
+            if !in_reach {
+                continue;
             }
+            if !actor.human || coin.tier.dwell_seconds() <= 0.0 {
+                // Normal coins — and every giant-stage actor sweeping the field —
+                // keep the instant pickup so the late game never waits.
+                instant.push(index);
+            } else {
+                let distance = horizontal(point - end).length();
+                if distance < dwell_distance {
+                    dwell_distance = distance;
+                    dwell_id = Some(coin.node.instance_id());
+                }
+            }
+        }
+        for index in instant.into_iter().rev() {
+            self.collect_coin_at(actor, index);
+        }
+        if actor.coin_dwell.is_some_and(|dwell| {
+            !self
+                .coins
+                .coins
+                .iter()
+                .any(|coin| coin.node.instance_id() == dwell.coin)
+        }) {
+            actor.coin_dwell = None;
+        }
+        let dwell_at = dwell_id
+            .and_then(|id| self.coins.coins.iter().position(|coin| coin.node.instance_id() == id));
+        // Dwell bar: standing inside the circle fills it, leaving decays it at
+        // ~27 %/s (never an instant reset), so a dodge can resume the steal.
+        let mut dwell_show: Option<(Vector3, f32, CoinTier)> = None;
+        if let Some(index) = dwell_at {
+            let (coin_id, tier, position) = {
+                let coin = &self.coins.coins[index];
+                (coin.node.instance_id(), coin.tier, coin.position)
+            };
+            let progress = match actor.coin_dwell {
+                Some(dwell) if dwell.coin == coin_id => {
+                    advance_dwell(dwell.progress, tier, true, dt)
+                }
+                _ => advance_dwell(0.0, tier, true, dt),
+            };
+            if progress >= tier.dwell_seconds() {
+                self.collect_coin_at(actor, index);
+                actor.coin_dwell = None;
+            } else {
+                actor.coin_dwell = Some(CoinDwell {
+                    coin: coin_id,
+                    tier,
+                    progress,
+                });
+                dwell_show = Some((position, progress / tier.dwell_seconds(), tier));
+            }
+        } else if let Some(dwell) = actor.coin_dwell {
+            let progress = advance_dwell(dwell.progress, dwell.tier, false, dt);
+            if progress <= 0.0 {
+                actor.coin_dwell = None;
+            } else {
+                actor.coin_dwell = Some(CoinDwell {
+                    coin: dwell.coin,
+                    tier: dwell.tier,
+                    progress,
+                });
+                if let Some(coin) = self
+                    .coins
+                    .coins
+                    .iter()
+                    .find(|coin| coin.node.instance_id() == dwell.coin)
+                {
+                    dwell_show = Some((
+                        coin.position,
+                        progress / dwell.tier.dwell_seconds(),
+                        dwell.tier,
+                    ));
+                }
+            }
+        }
+        self.update_player_dwell_feedback(actor, dwell_show, dt);
+    }
+
+    /// Ground progress ring + rising audio tick for the player's current dwell
+    /// bar. AI humans obey the same timing rules but get no per-frame visuals.
+    fn update_player_dwell_feedback(
+        &mut self,
+        actor: &Giant,
+        dwell_show: Option<(Vector3, f32, CoinTier)>,
+        dt: f32,
+    ) {
+        let mut root = self.base().get_node_as::<Node3D>("Coins");
+        if actor.index == 0 && self.player == PlayerRole::Giant {
+            if let Some((position, fraction, tier)) = dwell_show {
+                root.call(
+                    "show_dwell",
+                    &[
+                        position.to_variant(),
+                        fraction.to_variant(),
+                        tier.index().to_variant(),
+                    ],
+                );
+                self.dwell_ring_visible = true;
+                self.dwell_tick_in -= dt;
+                if self.dwell_tick_in <= 0.0 {
+                    self.dwell_tick_in = 0.16;
+                    if let Some(mut audio) = self.audio() {
+                        audio.call("play_coin_dwell_tick", &[fraction.to_variant()]);
+                    }
+                }
+            } else if self.dwell_ring_visible {
+                root.call("hide_dwell", &[]);
+                self.dwell_ring_visible = false;
+            }
+        } else if actor.coin_dwell.is_none() && self.dwell_ring_visible {
+            root.call("hide_dwell", &[]);
+            self.dwell_ring_visible = false;
         }
     }
 
@@ -1285,7 +1646,14 @@ impl HarborRound {
         let height = attacker.height(self.max_height);
         let reward = CoinReward::Height(height * rules.coin_reward_rate);
         let mut root = self.base().get_node_as::<Node3D>("Coins");
-        self.coins.coins.push(Coin::spawn(&mut root, position, reward));
+        // Brawl giants collect instantly at any tier, so kills always drop the
+        // baseline coin; the risk-tier system only grades growth-mode waves.
+        self.coins.coins.push(Coin::spawn(
+            &mut root,
+            position,
+            reward,
+            CoinTier::Normal,
+        ));
         if let Some(mut audio) = self.audio() {
             audio.call(
                 "play_coin_drop",
@@ -1378,6 +1746,18 @@ impl HarborRound {
         if is_player_attacker {
             self.player_giant_hits += 1;
         }
+        // Every landed hit marks the spot as a combat hotspot: nearby coins grade
+        // up to High/Extreme and foraging AI remembers to keep away.
+        self.note_hotspot(
+            victim_pos,
+            (attacker.height(self.max_height) * 1.2).max(24.0),
+        );
+        // The victim remembers where the hit came from and holds a grudge
+        // against the attacker for 20–30 s (turn-around + attack boost).
+        rival.memory.note_hit(
+            attacker.body.get_global_position(),
+            attacker.body.instance_id(),
+        );
         if let Some(mut audio) = self.audio() {
             audio.call(
                 "play_combat_hit",
@@ -1390,6 +1770,11 @@ impl HarborRound {
             );
         }
         if self.hurt_giant(rival, damage) {
+            // The kill resolves the hunt: stop searching for a corpse and let
+            // the utility brain move on (demolish/roam) immediately.
+            attacker.memory.last_seen = None;
+            attacker.memory.hit_from = None;
+            attacker.memory.grudge = None;
             if let Some(mut audio) = self.audio() {
                 audio.call(
                     "play_defeat",
@@ -1603,6 +1988,7 @@ impl HarborRound {
         let height = actor.height(self.max_height);
         let radius = self.actor_radius(actor);
         let crush_buildings = self.mode == Mode::Brawl && self.can_crush_buildings(actor);
+        let personality = actor.personality;
         let mut threats = Vec::new();
         // Other humans only hurt this actor when they are at least twice as tall; any giant is
         // dangerous because it can stomp or pick the human up.
@@ -1620,8 +2006,27 @@ impl HarborRound {
                 Some((rival.position, rival.velocity, reach, 0.6))
             },
         ));
+        // Telegraphed stomps and sit-crush drop zones are threats even before the
+        // striking giant's body reach arrives; memory danger zones linger for
+        // 12–15 s after the fight moved on.
+        for rival in &self.rivals {
+            if rival.index == actor.index {
+                continue;
+            }
+            if let Some((center, radii)) = rival.windup {
+                threats.push((center, Vector3::ZERO, radii.x.max(radii.y) + radius + 1.0, 1.2));
+            }
+            if let Some((center, sit_radius)) = rival.sit_drop {
+                threats.push((center, Vector3::ZERO, sit_radius + radius + 1.0, 1.0));
+            }
+        }
+        for &(at, zone_radius, _) in &actor.memory.danger_zones {
+            threats.push((at, Vector3::ZERO, zone_radius, 0.6));
+        }
         threats.retain(|(at, _, reach, _)| horizontal(*at - position).length() < reach + 7.0);
         let contact_weight = 40.0 / speed.max(0.02);
+        // Bold NPCs discount danger; cautious ones amplify it.
+        let risk_weight = 1.5 - personality.risk01();
         let risk = |direction: Vector3, travel: f32| -> f32 {
             threats
                 .iter()
@@ -1634,14 +2039,24 @@ impl HarborRound {
                     let ends_close = (clearance + 0.8 - after.length()).max(0.0);
                     // A short stride must still avoid a predicted collision before chasing a coin.
                     let contact = (radius + reach + 0.03 - distance).max(0.0);
-                    contact * contact_weight + closest * 12.0 + ends_close * 3.0
+                    (contact * contact_weight + closest * 12.0 + ends_close * 3.0) * risk_weight
                 })
                 .sum()
+        };
+        // Threat proximity (0–1) of a map point, used by the coin utility score.
+        let threat_at = |point: Vector3| -> f32 {
+            threats
+                .iter()
+                .map(|&(at, _, reach, _)| {
+                    let window = (reach * 1.5).max(1.0);
+                    ((window - horizontal(at - point).length()) / window).max(0.0)
+                })
+                .fold(0.0_f32, f32::max)
         };
 
         let local_limit_sq = LOCAL_COIN_SEARCH * LOCAL_COIN_SEARCH;
         let mut nearest_coin: Option<(f32, Vector3)> = None;
-        let mut local_coins: Vec<(f32, Vector3)> = Vec::with_capacity(8);
+        let mut local_coins: Vec<(f32, Vector3, CoinTier)> = Vec::with_capacity(8);
         for coin in &self.coins.coins {
             let point = coin.position;
             if (point.y - position.y).abs() > 3.0 {
@@ -1650,38 +2065,58 @@ impl HarborRound {
             let dx = point.x - position.x;
             let dz = point.z - position.z;
             let dist_sq = dx * dx + dz * dz;
-            if nearest_coin.is_none_or(|(best, _)| dist_sq < best) {
-                nearest_coin = Some((dist_sq, point));
+            // Value-weighted utility: rare guarded coins attract growth-hungry,
+            // risk-tolerant foragers instead of only the nearest coin winning.
+            let utility = coin_forage_score(
+                coin.tier.value(),
+                personality.growth01(),
+                dist_sq.sqrt(),
+                coin.tier.dwell_seconds(),
+                threat_at(point),
+                personality.risk01(),
+            );
+            if nearest_coin.is_none_or(|(best, _)| utility > best) {
+                nearest_coin = Some((utility, point));
             }
             if dist_sq <= local_limit_sq {
+                let tier = coin.tier;
                 if local_coins.len() < 8 {
-                    local_coins.push((dist_sq, point));
-                } else if let Some((slot, &(worst, _))) = local_coins
+                    local_coins.push((dist_sq, point, tier));
+                } else if let Some((slot, &(worst, _, _))) = local_coins
                     .iter()
                     .enumerate()
-                    .max_by(|a, b| a.1.0.total_cmp(&b.1.0))
+                    .max_by(|a, b| a.1 .0.total_cmp(&b.1 .0))
                     && dist_sq < worst
                 {
-                    local_coins[slot] = (dist_sq, point);
+                    local_coins[slot] = (dist_sq, point, tier);
                 }
             }
         }
 
         let direct = local_coins
             .into_iter()
-            .filter_map(|(dist_sq, point)| {
+            .filter_map(|(dist_sq, point, tier)| {
                 if !self.clear_ground_path(position, point, radius, crush_buildings) {
                     return None;
                 }
                 let distance = dist_sq.sqrt();
                 let direction = horizontal(point - position).normalized_or_zero();
-                Some((
-                    direction,
-                    distance + risk(direction, (distance / speed.max(0.001)).clamp(0.1, 1.0)),
-                ))
+                let utility = coin_forage_score(
+                    tier.value(),
+                    personality.growth01(),
+                    distance,
+                    tier.dwell_seconds(),
+                    threat_at(point),
+                    personality.risk01(),
+                );
+                Some((direction, utility, distance))
             })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(dir, _)| dir);
+            .filter(|(_, utility, _)| *utility > 4.0)
+            .max_by(|a, b| {
+                a.1.total_cmp(&b.1)
+                    .then_with(|| b.2.total_cmp(&a.2))
+            })
+            .map(|(dir, _, _)| dir);
 
         let seek = if let Some(dir) = direct {
             actor.clear_path();
@@ -1803,17 +2238,54 @@ impl HarborRound {
         if self.mode == Mode::Growth {
             snapshot.set("coin_refresh_in", self.coins.refresh_in.max(0.0));
         }
-        if self.can_collect_coins(actor)
-            && let Some(coin) = self
+        let player_position = actor.body.get_global_position();
+        if self.mode == Mode::Brawl && self.can_collect_coins(actor) {
+            // Brawl keeps the precise nearest-coin compass (giants hunt kill drops).
+            if let Some(coin) = self
                 .coins
                 .coins
                 .iter()
-                .map(|coin| horizontal(coin.position - actor.body.get_global_position()))
+                .map(|coin| horizontal(coin.position - player_position))
                 .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))
-        {
-            let view = coin.rotated(Vector3::UP, -self.yaw);
-            snapshot.set("coin_angle", view.x.atan2(-view.z));
-            snapshot.set("coin_distance", coin.length());
+            {
+                let view = coin.rotated(Vector3::UP, -self.yaw);
+                snapshot.set("coin_angle", view.x.atan2(-view.z));
+                snapshot.set("coin_distance", coin.length());
+            }
+        } else if self.mode == Mode::Growth && actor.human {
+            // Fuzzy coin radar, growth human stage only: a ~40° direction sector
+            // toward the best-value coin beyond naked-eye range. No exact metres
+            // ever leave this snapshot — only tier colour and a 3-band pulse.
+            let mut best: Option<(CoinTier, f32, Vector3)> = None;
+            for coin in &self.coins.coins {
+                let offset = horizontal(coin.position - player_position);
+                let distance = offset.length();
+                if distance <= COIN_RADAR_FADE_RANGE {
+                    continue;
+                }
+                let better = best.is_none_or(|(tier, best_distance, _)| {
+                    coin.tier > tier || (coin.tier == tier && distance < best_distance)
+                });
+                if better {
+                    best = Some((coin.tier, distance, offset));
+                }
+            }
+            if let Some((tier, distance, offset)) = best {
+                let view = offset.rotated(Vector3::UP, -self.yaw);
+                let proximity = if distance < COIN_RADAR_NEAR {
+                    2
+                } else if distance < COIN_RADAR_MID {
+                    1
+                } else {
+                    0
+                };
+                let mut radar = VarDictionary::new();
+                radar.set("angle", view.x.atan2(-view.z));
+                radar.set("span", 40.0_f32.to_radians());
+                radar.set("tier", tier.index());
+                radar.set("proximity", proximity);
+                snapshot.set("coin_radar", &radar);
+            }
         }
     }
 }
@@ -1963,5 +2435,126 @@ mod tests {
             assert!(preferred >= body + MAP_COIN_RADIUS + COIN_GIANT_CLEARANCE - 1e-4);
             assert!(preferred > pickup);
         }
+    }
+
+    #[test]
+    fn coins_grade_by_giant_feet_activity_zones_and_hotspots() {
+        let threats = [CoinThreat {
+            at: Vector3::ZERO,
+            stomp_reach: 25.0,
+            zone: 120.0,
+        }];
+        // At the giant's feet: Extreme.
+        assert_eq!(
+            coin_threat_tier(Vector3::new(10.0, 0.0, 10.0), &threats, &[]),
+            CoinTier::Extreme
+        );
+        // Inside its activity zone: at least High.
+        assert_eq!(
+            coin_threat_tier(Vector3::new(80.0, 0.0, 0.0), &threats, &[]),
+            CoinTier::High
+        );
+        // Safe outskirts: Normal.
+        assert_eq!(
+            coin_threat_tier(Vector3::new(400.0, 0.0, 0.0), &threats, &[]),
+            CoinTier::Normal
+        );
+        // Multi-way combat hotspots grade like a giant: core Extreme, rim High.
+        let hotspots = [(Vector3::new(500.0, 0.0, 0.0), 60.0)];
+        assert_eq!(
+            coin_threat_tier(Vector3::new(525.0, 0.0, 0.0), &threats, &hotspots),
+            CoinTier::Extreme
+        );
+        assert_eq!(
+            coin_threat_tier(Vector3::new(550.0, 0.0, 0.0), &threats, &hotspots),
+            CoinTier::High
+        );
+        assert_eq!(
+            coin_threat_tier(Vector3::new(900.0, 0.0, 0.0), &threats, &hotspots),
+            CoinTier::Normal
+        );
+    }
+
+    #[test]
+    fn dwell_bars_fill_by_tier_and_decay_slowly_instead_of_resetting() {
+        // Normal coins and the giant stage stay instant.
+        assert_eq!(CoinTier::Normal.dwell_seconds(), 0.0);
+        assert!((CoinTier::High.dwell_seconds() - 2.0).abs() < 1e-6);
+        // Extreme tier sits inside the required 3.5–4.0 s band.
+        assert!(CoinTier::Extreme.dwell_seconds() >= 3.5);
+        assert!(CoinTier::Extreme.dwell_seconds() <= 4.0);
+        // Standing inside fills the bar frame by frame.
+        assert!((advance_dwell(0.0, CoinTier::High, true, 0.25) - 0.25).abs() < 1e-6);
+        let mut filled = 0.0;
+        for _ in 0..40 {
+            filled = advance_dwell(filled, CoinTier::Extreme, true, 0.1);
+        }
+        assert!(filled >= CoinTier::Extreme.dwell_seconds() && filled <= 4.5);
+        // Leaving decays the full bar at ~27 %/s: never an instant reset.
+        let half = CoinTier::High.dwell_seconds() * 0.5;
+        let after = advance_dwell(half, CoinTier::High, false, 1.0);
+        let lost = half - after;
+        assert!(lost > 0.2 * CoinTier::High.dwell_seconds());
+        assert!(lost < 0.35 * CoinTier::High.dwell_seconds());
+        assert!(after > 0.0);
+        // A long absence drains to exactly zero, never below.
+        assert_eq!(advance_dwell(0.01, CoinTier::High, false, 10.0), 0.0);
+    }
+
+    #[test]
+    fn coin_reward_multipliers_and_tier_ordering() {
+        assert_eq!(CoinTier::Normal.value(), 1.0);
+        assert_eq!(CoinTier::High.value(), 2.5);
+        assert_eq!(CoinTier::Extreme.value(), 5.0);
+        assert!(CoinTier::Normal < CoinTier::High);
+        assert!(CoinTier::High < CoinTier::Extreme);
+    }
+
+    #[test]
+    fn guarded_coins_attract_bold_foragers_and_scare_cautious_ones() {
+        let bold = coin_forage_score(5.0, 0.5, 30.0, 3.75, 0.8, 0.9);
+        let timid = coin_forage_score(5.0, 0.5, 30.0, 3.75, 0.8, 0.1);
+        assert!(bold > timid, "risk appetite must raise guarded-coin utility");
+        assert_eq!(timid, 0.0, "a cautious forager skips a guarded jackpot");
+        for score in [bold, timid] {
+            assert!((0.0..=100.0).contains(&score));
+        }
+        // Unthreatened coins scale with tier value, and threat always lowers
+        // the score even for a bold collector.
+        let extreme = coin_forage_score(5.0, 0.5, 30.0, 3.75, 0.0, 0.5);
+        let normal = coin_forage_score(1.0, 0.5, 30.0, 0.0, 0.0, 0.5);
+        assert!(extreme > normal);
+        assert!(
+            normal > coin_forage_score(1.0, 0.5, 30.0, 0.0, 0.8, 0.1),
+            "threat lowers the utility of the same coin"
+        );
+        // Growth-hungry foragers prefer the same coin more than lazy ones.
+        assert!(
+            coin_forage_score(2.5, 0.9, 20.0, 2.0, 0.0, 0.5)
+                > coin_forage_score(2.5, 0.1, 20.0, 2.0, 0.0, 0.5)
+        );
+    }
+
+    #[test]
+    fn evasion_and_demolition_utilities_stay_bounded_and_directional() {
+        // Evasion rises with the size gap and a wounded body.
+        assert!(
+            threat_evasion_score(0.9, 0.8, 0.5) > threat_evasion_score(0.4, 0.2, 0.5)
+        );
+        // The will to survive dampens it.
+        assert!(
+            threat_evasion_score(0.9, 0.5, 1.0) >= threat_evasion_score(0.9, 0.5, 0.0)
+        );
+        for score in [
+            threat_evasion_score(1.5, 1.5, 1.5),
+            threat_evasion_score(-1.0, -1.0, -1.0),
+        ] {
+            assert!((0.0..=100.0).contains(&score));
+        }
+        // Demolition follows growth/destruction drive and building density.
+        assert!(
+            demolition_score(0.9, 0.9, 0.8) > demolition_score(0.2, 0.1, 0.1)
+        );
+        assert!((0.0..=100.0).contains(&demolition_score(1.0, 1.0, 1.0)));
     }
 }

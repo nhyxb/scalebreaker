@@ -4,6 +4,49 @@
 
 ---
 
+## 2026-11-27 — 阶段 4：金币风险分级博弈（3 档读条/缓退/模糊雷达）+ 全场 Utility AI（7 档体型矩阵/短期记忆/6 维性格/360° 避墙逃跑）+ 市民三态逃生
+
+备份：`backups/20261127_000524_phase4_coin_risk_ai/{rust/src/round/{round.rs,growth.rs},scenes/{coins.gd,interface.gd,audio_manager.gd},tests/{growth_playtest.gd,playtest.gd},CHANGELOG.md,MEMORY.md}`（本轮新增 `rust/src/round/ai.rs` 无备份副本）。
+回滚：
+
+```sh
+cp -a backups/20261127_000524_phase4_coin_risk_ai/rust/src/round/{round.rs,growth.rs} rust/src/round/
+rm rust/src/round/ai.rs
+git checkout -- rust/src/round/sit.rs
+cp -a backups/20261127_000524_phase4_coin_risk_ai/scenes/{coins.gd,interface.gd,audio_manager.gd} scenes/
+cp -a backups/20261127_000524_phase4_coin_risk_ai/tests/{growth_playtest.gd,playtest.gd} tests/
+cp backups/20261127_000524_phase4_coin_risk_ai/{CHANGELOG.md,MEMORY.md} .
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+```
+
+### 一、成长模式金币风险分级（`rust/src/round/growth.rs`、`scenes/coins.gd`、`scenes/interface.gd`、`scenes/audio_manager.gd`）
+
+- **3 档危险分级**：金币在刷币与每 0.5 s 的重估周期中按威胁定档——普通币（`1×`，安全/外围街区，0 秒瞬拾）、高危币（`2.5×`，进入大型巨人活动区 `max(视距×1.4, 身高×2.2)`，外观更大更亮金 + 地面微环，读条 **2.0 s**）、极危币（`5×`，巨人脚边踩踏射程内或多方交战热区核心，赤金/紫金脉冲光环，读条 **3.75 s**）。交战热区（踩踏预警/命中/拆迁/击杀喂入，12 s TTL，容量 24）随巨人移动实时把安静街区的币重新估高。
+- **停留读条与离开缓退**：人类阶段进入高危/极危币拾取圈后开始读条，脚下地面环形进度条（`coins.gd::show_dwell` 径向着色器环）+ 递增音效（`coin_dwell_tick`，音高随进度上升）；**离开圈不清零**，按约 27 %/s 缓退（躲一脚再冲回去接着偷）；成长为巨人后一切金币恢复瞬拾（后期拆楼不卡节奏）；**AI 人类与玩家共用同一读条/缓退代码路径**（`check_growth_contacts`），禁止 AI 白嫖。
+- **模糊金币雷达（仅成长模式人类阶段）**：顶部居中新增极简弧形罗盘 `CoinRadar`，只显示约 **40°** 宽的方向扇区，扇区颜色 = 目标方向最高档位（沙金/琥珀/紫红），脉冲快慢 3 档表示远/中/近街区；接近 110 m 肉眼可见范围自动淡出；变巨人、非成长模式均不显示。snapshot 从此只发模糊 `coin_radar` 字典，精确 `coin_distance/coin_angle` 仅保留给大乱斗小巨人（精确罗盘在成长人类期被移除——禁止暴露准确米数）。
+
+### 二、全场 AI 升级（新模块 `rust/src/round/ai.rs` + `round.rs`/`growth.rs` 重构）
+
+- **Utility AI 打分器**：5 类意图（紧急闪避/进攻追击/捡币发育/搜索目标/拆楼发育）每 **0.25 s** 重评（按角色索引错峰），当前意图 **+13 惯性**加权防抽搐；身处任何踩踏/坐压预警圈内时直接以 100+ 优先级冲出，不做原地转身（逃避期间豁免站立小碎步转身，否则 4× 速度下 0.13 s 预警窗会被转身耗光）。
+- **7 档相对体型矩阵**（`SizeTier`，档位边界 ±10 % 滞回）：`<0.1×` 顺路踩不追、`0.1–0.5×` 带提前量追击、`0.5–0.8×` 贴脸进攻、`0.8–1.2×` 谨慎侧向走位 + 抓后摇（对方非蓄力期 +10 分）、`1.2–2.0×` 按 `scale×HP` 与冒险倾向决定以小博大偷袭（`ambush_uphill`：大胆 0.44 等效战力即可开打）或拉开、`2.0–5.0×` 主动避让绕开发育、`>5×` 全速逃离对方象限。`rival_ignore_ratio`/`human_ignore_ratio` 仍是硬门槛；撤离/沙盒 AI 对人类/市民目标恒定 100 分进攻（掠食者设计不参与性格竞争）。
+- **360° 避墙逃跑**：替换弱势 `outmatched` 窄扇形后撤为 16 射线评分器 `escape_direction`——按「探针点与威胁的距离增量」给分（顺墙切线能开距、斜穿打击区扣分）、贴墙边界按「进入边界的程度」线性斥力、被墙卡死 0.45 s 无进展的方向进短期拉黑后换切线；**任何输入下都不返回零向量**（原缺陷：被逼墙角罚站致死）。
+- **短期战斗记忆**（全部 TTL 自动衰减，`CombatMemory`）：最后目击点 6 s（搜索意图按目击距离衰减：近距逃逸保持热度、远处逃兵让位给拆楼）、受击方向 2.5 s（背后偷袭立即转身搜人）、攻击者仇恨 20–30 s（复仇倾向加权进攻分）、失败逃跑方向 3–5 s 拉黑、危险区 12–15 s（人类拾币绕行）；击杀结算清空进攻方的搜索记忆（不再搜尸体）。
+- **6 维 NPC 性格**（0–100，`Personality`，走 Godot 随机流→测试种子可复现）：攻击欲望/冒险倾向/求生欲望/成长欲望/复仇倾向/破坏欲望，跨复活保留；破坏欲望 >60 时空闲拆迁偏向最近簇里的高楼（6 m 窗口内取最高，绝不为远塔放弃明确最近楼）。
+- **市民三态逃生**（非成长模式，`update_civilians`）：日常沿街行走 ↔ 感知附近巨人/踩踏预警圈/倒塌震动（0.28 s 节流扫描）恐慌疾跑四散（速度 ×2.4，贴墙沿墙滑行不顶死角、动画切跑步）↍ 尽量朝背离威胁的街角掩体躲避再回到平静。三态经 `round.civilian_debug()` 暴露给测试。
+
+### 三、验证与回归
+
+| 指标 | 口径 | 数据源 | 基准值 | 当前值 |
+|---|---|---|---|---|
+| Rust 单元测试 | `cargo test --locked`（含新增 11 项：金币分级/读条缓退/档位滞回/360°逃跑/记忆 TTL/性格归一/以小博大/工具分有界） | `cargo test` | 41/41 | **52/52** |
+| Godot 回归 | 8 套 `--headless` playtest 断言总数（growth +8、playtest +4 新增；playtest 拆楼断言按高楼倾向更新为"最近簇内"） | `tests/*_playtest.gd` | 689/689 | **701/701** |
+| 帧率 | 未测（本轮逻辑改动，未做性能对比；60 人乱斗路径：意图重评 0.25 s/角色、记忆/热点 tick 与 16 射线评分均为 O(n) 轻量） | — | — | 未测 |
+
+- **8 套 Godot `--headless` 回归全绿**：`playtest` 234（新增市民三态 settle→panic→cover→calm、非成长模式雷达隐藏断言）/ `growth` 200（新增金币分级 Extreme/High/Normal、读条填充/缓退/5× 完成奖励、巨人瞬拾、AI 预警圈 evade 意图+成功脱圈、模糊雷达 40° 扇区与淡出）/ `mode_menu` 45 / `touch` 42 / `sit_crush_gameplay` 44 / `sit_crush` 57 / `brawl` 43 / `audio` 36；启动校验 `--quit-after 5` 仅存量环境音 OGG 退出泄漏告警（与改动无关）。
+- **视觉核验（隔离 `Xvfb`，llvmpipe，800×450，单帧）**：截图 `build/tmp/radar_growth_human.png`。本轮视觉模型后端限流不可用，改用 Godot 无头像素采样做客观核验：顶部弧形罗盘的 **40° 琥珀色扇区**清晰落位（y16–21 行采样到 ~38 px 宽暖金扇区像素，位于弧顶右侧，指向最近的一枚档位 1 金币，与 Rust 日志 `RADAR_VISIBLE true tier=1 prox=2 fade=1.0` 一致），扇区无文字/数字输出；玩家脚下街区采样到 ~360 px 暖金像素（高危币地面微环 + 读条进度环）；未见 UI 错位遮挡。**逐目美学检视未完成**（视觉后端限流），风格观感以实机为准；未跑帧率基准（llvmpipe 数字无参考价值）。
+
+---
+
 ## 2026-11-26 — 坐姿超巨 Yumeka 十公里级压迫感升级（A 前倾趴桌收臂微屈指 + B 精准眼球锁视 + C 城内遮天阴影与背景空气透视）
 
 备份：`backups/20261126_212507_yumeka_looming_presence/{scripts/export_yumeka_seated.py,scenes/{city_night_lights,day_night_cycle,district,district_expansion,harbor_skybox,skybox_bedroom,yumeka_ultra_giant}.gd,scenes/main.tscn,tests/playtest.gd,CHANGELOG.md,MEMORY.md}`。

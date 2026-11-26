@@ -30,6 +30,8 @@ func _run() -> void:
 	await _respawn_keeps_the_district()
 	await _foraging_ai()
 	await _avoidance_ai()
+	await _coin_tiers_and_dwell()
+	await _ai_evades_warning_circles()
 	await _demolition_ai()
 	await _walk_tempo_and_own_shake()
 	await _human_speed_multiplier()
@@ -260,10 +262,17 @@ func _mapwide_coins() -> void:
 	await process_frame
 	state = match_round.snapshot()
 	var ui := _game.get_node("Interface")
-	var dist_label: Label = ui.get("_evac_dist_num")
-	_check(state.has("coin_distance") and state.coin_distance > 170.0
-			and ui.get("_evac_panel").visible and not dist_label.text.contains("."),
-			"The nearest-coin compass still guides the player to coins beyond 35 m with compact distance text")
+	var radar: Control = ui.get("_coin_radar")
+	_check(state.has("coin_radar") and not state.has("coin_distance")
+			and absf(float(state.coin_radar.span) - 0.698) < 0.001
+			and absf(angle_difference(0.0, float(state.coin_radar.angle))) < 0.2
+			and int(state.coin_radar.proximity) >= 1 and radar.visible,
+			"The fuzzy radar shows only a ~40° sector toward a distant coin, never exact metres")
+	lone_coin.position = _giant().position + Vector3.FORWARD * 40.0
+	await _ticks(45)
+	state = match_round.snapshot()
+	_check(not state.has("coin_radar") and not ui.get("_coin_radar").visible,
+			"The radar fades out once the coin is within naked-eye range")
 	_game.show_menu()
 
 
@@ -622,6 +631,130 @@ func _respawn_keeps_the_district() -> void:
 			"Respawn resets life progress and preserves the ruin and round demolition count")
 	_check(rival.position.distance_to(death_at) < 12.0,
 			"The rival stays near the fight when the player respawns far away")
+	_game.show_menu()
+
+
+func _tier_of(match_round: Node, coin: Node3D) -> int:
+	if not is_instance_valid(coin):
+		return -1
+	for entry in match_round.coin_debug():
+		if (entry.position as Vector3).distance_to(coin.position) < 0.01:
+			return int(entry.tier)
+	return -1
+
+
+func _coin_tiers_and_dwell() -> void:
+	seed(91231)
+	_start({"giant_count": 3, "giant_height": 1.8, "giant_max_height": 60.0,
+			"coin_count": 5, "coin_interval": 60.0})
+	var match_round := _round()
+	await _ticks(4)
+	# Turn the rival into a 60 m giant pinned on the north street. At its
+	# height cap it only wanders, so the pinned spot is perfectly safe, while
+	# coins at its feet / in its zone / far away grade Extreme / High / Normal.
+	match_round.debug_resize_giant(1, 60.0)
+	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
+	var anchor := OPEN_STREET + Vector3.FORWARD * 60.0
+	var coins := match_round.get_node("Coins")
+	var near_coin: Node3D = coins.get_child(0)
+	var zone_coin: Node3D = coins.get_child(1)
+	var far_coin: Node3D = coins.get_child(2)
+	var player := _giant()
+	for frame in 45:
+		rival.position = anchor
+		near_coin.position = anchor + Vector3.BACK * 16.0
+		zone_coin.position = anchor + Vector3.BACK * 150.0
+		far_coin.position = anchor + Vector3.FORWARD * 420.0
+		player.position = OPEN_STREET + Vector3.RIGHT * 200.0
+		await physics_frame
+	var tiers := {}
+	for entry in match_round.coin_debug():
+		tiers[int(entry.tier)] = true
+	_check(tiers.get(2) == true and tiers.get(1) == true and tiers.get(0) == true
+			and _tier_of(match_round, near_coin) == 2 and _tier_of(match_round, zone_coin) == 1
+			and _tier_of(match_round, far_coin) == 0,
+			"Coins grade by threat: at a giant's feet Extreme, in its zone High, far away Normal")
+
+	# Human-stage dwell: standing on the Extreme coin fills the bar slowly.
+	player.position = near_coin.position + Vector3.UP * 0.01
+	for frame in 30:
+		rival.position = anchor
+		await physics_frame
+	var actors: Array = match_round.growth_actors()
+	var dwell_while_inside := float(actors[0].dwell)
+	_check(dwell_while_inside > 0.05 and dwell_while_inside < 0.35
+			and int(actors[0].dwell_tier) == 2,
+			"Standing on an Extreme coin fills the dwell bar instead of an instant pickup")
+
+	# Leaving the circle decays the bar gradually (~27 %/s), never snapping to zero.
+	player.position = near_coin.position + Vector3.RIGHT * 3.0
+	for frame in 20:
+		rival.position = anchor
+		await physics_frame
+	actors = match_round.growth_actors()
+	var dwell_after_leave := float(actors[0].dwell)
+	_check(dwell_after_leave > 0.0 and dwell_after_leave < dwell_while_inside,
+			"Leaving the circle decays the dwell bar slowly instead of resetting it")
+
+	# Step back on and let it complete: a 5x coin pays five times the growth.
+	player.position = near_coin.position + Vector3.UP * 0.01
+	var collected := 0
+	for frame in 280:
+		rival.position = anchor
+		if match_round.snapshot().coins_collected > 0:
+			collected = frame
+			break
+		await physics_frame
+	await _ticks(45)
+	var state: Dictionary = match_round.snapshot()
+	_check(collected > 60 and state.coins_collected == 1
+			and is_equal_approx(state.giant_height, 2.7),
+			"An Extreme coin only completes after the full dwell and pays the 5x growth reward")
+
+	# Growing into the giant stage restores instant pickup on every tier.
+	var zone_tier := _tier_of(match_round, zone_coin)
+	match_round.debug_resize_giant(0, 4.0)
+	player.position = zone_coin.position + Vector3.UP * 0.01
+	await _ticks(12)
+	actors = match_round.growth_actors()
+	state = match_round.snapshot()
+	_check(zone_tier == 1 and state.coins_collected == 2
+			and float(actors[0].dwell) == 0.0 and not is_instance_valid(zone_coin),
+			"A giant-stage actor sweeps even a High-tier coin instantly with no dwell bar")
+	_game.show_menu()
+
+
+func _ai_evades_warning_circles() -> void:
+	seed(77331)
+	_start({"giant_height": 25.2, "giant_count": 2, "giant_max_height": 25.2,
+			"coin_count": 0, "base_attack": 1.0, "respawn_delay": 60.0})
+	var match_round := _round()
+	await _ticks(4)
+	var player := _giant()
+	player.position = OPEN_STREET
+	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
+	match_round.debug_resize_giant(1, 25.2)
+	# Park the rival 4 m beyond the player's left-foot landing spot: inside
+	# the warning ellipse, but ~11 m from the player — outside its own stomp
+	# reach, so only the player's windup can freeze the scene.
+	var center := OPEN_STREET + FOOT_OFFSET
+	rival.position = center + Vector3.FORWARD * 4.0
+	await _ticks(2)
+	var evading := false
+	var escaped := false
+	_press_stomp()
+	for frame in 42:
+		await physics_frame
+		var actors: Array = match_round.growth_actors()
+		if String(actors[1].intent) == "evade":
+			evading = true
+		if rival.position.distance_to(center) > 5.0:
+			escaped = true
+	Input.action_release("stomp")
+	_check(evading,
+			"An AI caught inside a telegraphed stomp circle switches to the evade intent immediately")
+	_check(escaped,
+			"The warned rival escapes the landing ellipse before the foot comes down")
 	_game.show_menu()
 
 

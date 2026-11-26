@@ -40,6 +40,7 @@ func _run() -> void:
 	await _speed_and_ignore_settings()
 	await _ai_leads_a_sprinting_human()
 	await _visibility_and_civilians()
+	await _civilian_three_states()
 	await _ai_demolition()
 	await _walking_attack()
 	await _finish_walking_step()
@@ -751,6 +752,60 @@ func _visibility_and_civilians() -> void:
 	_game.show_menu()
 
 
+func _civilian_three_states() -> void:
+	_game.start_mode(true)
+	var current := _round()
+	await _ticks(6)
+	var giant := current.get_node("Giant") as CharacterBody3D
+	var crowd := current.get_node("Civilians")
+	_park_civilians(current)
+	var npc := crowd.get_child(0) as CharacterBody3D
+	var ui := _game.get_node("Interface")
+	_check(not ui.get("_coin_radar").visible,
+			"The fuzzy coin radar stays hidden outside growth mode")
+	# Parked far from the giant, the spawn panic ebbs and the pedestrian
+	# settles back into its calm daily stroll.
+	giant.position = Vector3(0.0, 0.02, -600.0)
+	var settled := false
+	for frame in 900:
+		await physics_frame
+		if String(current.civilian_debug()[0].state) == "calm":
+			settled = true
+			break
+	_check(settled, "An unthreatened pedestrian settles back into the calm state")
+
+	# A nearby giant breaks the stroll into a panic sprint away from the threat.
+	giant.position = Vector3(612.0, 0.02, 545.0)
+	var start := npc.position
+	var fled := false
+	var panicked := false
+	var state := ""
+	for frame in 72:
+		await physics_frame
+		state = String(current.civilian_debug()[0].state)
+		if state == "panic":
+			panicked = true
+		if npc.position.distance_to(start) > 4.0:
+			fled = true
+	_check(panicked and fled,
+			"Sensing a giant switches the pedestrian to a panic sprint away from it")
+
+	# With the threat far away the panic ebbs into sheltering and then calm.
+	giant.position = Vector3(0.0, 0.02, -600.0)
+	var saw_cover := false
+	var calm := false
+	for frame in 900:
+		await physics_frame
+		state = String(current.civilian_debug()[0].state)
+		saw_cover = saw_cover or state == "cover"
+		if state == "calm":
+			calm = true
+			break
+	_check(saw_cover and calm,
+			"After the threat passes the pedestrian shelters and then calms back down")
+	_game.show_menu()
+
+
 func _ai_demolition() -> void:
 	_game.start_mode(false)
 	var current := _round()
@@ -784,8 +839,22 @@ func _ai_demolition() -> void:
 			break
 		await physics_frame
 	var count: int = current.snapshot().destroyed
-	_check(count > 0 and nearest.get_node("BlockingBody").collision_layer == 0,
-			"After losing its target the AI destroys the closest standing building")
+	# A destructive personality may swap the flat nearest block for the tall
+	# landmark right next to it (挑高楼倾向); either way the pick must come
+	# from the nearest cluster of standing buildings.
+	var ruined_distance := INF
+	for target: Node3D in current.get_node("District/Targets").get_children():
+		if target.kind != "building":
+			continue
+		if target.get_node("BlockingBody").collision_layer != 0:
+			continue
+		var local := target.to_local(giant.position)
+		var half: Vector3 = target.footprint * 0.5
+		var wall := Vector2(maxf(absf(local.x) - half.x, 0.0),
+				maxf(absf(local.z) - half.z, 0.0)).length()
+		ruined_distance = minf(ruined_distance, wall)
+	_check(count > 0 and ruined_distance <= sqrt(distance) + 7.0,
+			"After losing its target the AI destroys a building from the nearest cluster")
 	await _wait_growth(current, count)
 	_check(count > 0 and _giant_has_scale(giant, pow(GROWTH_PER_BUILDING, count)),
 			"AI grows once per demolished building")

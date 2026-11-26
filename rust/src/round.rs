@@ -14,10 +14,15 @@ use crate::route::{self, Footprint};
 use crate::rules::*;
 use crate::settings::{GameSettings, GrowthSettings};
 
+mod ai;
 mod growth;
 mod hands;
 mod sit;
-use growth::{CoinField, DefeatMethod, GiantStrike, GrowthDefeat, Rival, ignores_rival};
+use ai::{
+    CombatMemory, Intent, Personality, SizeTier, INTENT_INERTIA, UTILITY_INTERVAL,
+    coin_forage_score, demolition_score, escape_direction, threat_evasion_score,
+};
+use growth::{CoinDwell, CoinField, DefeatMethod, GiantStrike, GrowthDefeat, Rival, ignores_rival};
 use hands::{HandAttack, HandMove};
 use sit::SitAction;
 
@@ -218,6 +223,36 @@ struct Civilian {
     remove_in: Option<f32>,
     grabbed: bool,
     health_fraction: f32,
+    /// Three-state escape behavior (see update_civilians).
+    state: CivilianState,
+    /// How much longer panic keeps running after the last sensed threat.
+    panic_left: f32,
+    /// Cadence of the (cheap) threat sense, staggered per pedestrian.
+    sense_in: f32,
+    /// Where the current threat was last sensed (position, radius).
+    threat: Option<(Vector3, f32)>,
+    /// Cover point the shelter-seeking state walks toward.
+    cover_goal: Option<Vector3>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CivilianState {
+    /// Daily stroll along the streets.
+    Calm,
+    /// Sprinting away from a nearby giant, collapse or warning circle.
+    Panic,
+    /// Walking to a sheltered corner away from the last threat.
+    Cover,
+}
+
+impl CivilianState {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Calm => "calm",
+            Self::Panic => "panic",
+            Self::Cover => "cover",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -486,6 +521,25 @@ struct Giant {
     /// while those frames pass.
     visual_wait: u8,
     visual_dt: f32,
+    /// Utility-AI brain (see round/ai.rs): rolled once, kept across respawns.
+    personality: Personality,
+    /// Intent the utility scorer last picked; re-scored every ~0.25 s.
+    intent: Intent,
+    intent_in: f32,
+    /// Relative-size tier versus the currently tracked enemy, kept with ±10 %
+    /// boundary hysteresis so edge ratios do not flicker between behaviors.
+    size_tier: Option<(InstanceId, SizeTier)>,
+    /// 360° escape bookkeeping: chosen heading, start point and how long it has
+    /// made no progress (blacklists the heading when stuck against a wall).
+    escape_yaw: Option<f32>,
+    escape_origin: Vector3,
+    escape_elapsed: f32,
+    /// Short-term combat memory with TTL-decayed rows (see round/ai.rs).
+    memory: CombatMemory,
+    /// Throttle for recording danger zones during prolonged danger exposure.
+    danger_note_in: f32,
+    /// Human-stage dwell bar for risk-tiered coins (see round/growth.rs).
+    coin_dwell: Option<CoinDwell>,
 }
 
 enum AnimateStep {
@@ -563,6 +617,16 @@ impl Giant {
             pin_tick: 0.0,
             visual_wait: 0,
             visual_dt: 0.0,
+            personality: Personality::roll(),
+            intent: Intent::default(),
+            intent_in: 0.0,
+            size_tier: None,
+            escape_yaw: None,
+            escape_origin: Vector3::ZERO,
+            escape_elapsed: 0.0,
+            memory: CombatMemory::default(),
+            danger_note_in: 0.0,
+            coin_dwell: None,
         }
     }
 
@@ -578,8 +642,11 @@ impl Giant {
         body.set_collision_mask(31);
         body.call("show_respawn", &[]);
         let kills = self.match_kills;
+        // The personality survives death: the same character keeps its traits.
+        let personality = self.personality;
         *self = Self::new_life(body, self.index, self.model_scale);
         self.match_kills = kills;
+        self.personality = personality;
         self.resize(starting_scale, max_height);
     }
 
@@ -599,6 +666,17 @@ impl Giant {
             Stomp::Windup { .. } => "windup",
             Stomp::Recover { .. } => "impact",
             Stomp::Cooldown(_) => "cooldown",
+        }
+    }
+
+    /// Debug/test key of the current utility intent.
+    fn intent_key(&self) -> &'static str {
+        match self.intent {
+            Intent::Evade => "evade",
+            Intent::Attack => "attack",
+            Intent::Forage => "forage",
+            Intent::Search => "search",
+            Intent::Demolish => "demolish",
         }
     }
 
@@ -867,6 +945,16 @@ pub struct HarborRound {
     giant_strikes: Vec<GiantStrike>,
     growth_defeats: VecDeque<GrowthDefeat>,
     player_giant_hits: u32,
+    /// Combat hotspots (position, radius, ttl) fed by stomps/sits/demolitions;
+    /// they grade map coins up and fade after ~12 s.
+    hotspots: Vec<(Vector3, f32, f32)>,
+    /// Cadence of the live coin re-grading pass.
+    coin_regrade_in: f32,
+    /// Cooldown of the player's rising dwell audio tick.
+    dwell_tick_in: f32,
+    /// Whether the ground dwell ring is currently shown (avoids per-frame
+    /// GDScript hide calls when nothing changed).
+    dwell_ring_visible: bool,
 }
 
 #[godot_api]
@@ -934,6 +1022,10 @@ impl INode3D for HarborRound {
             giant_strikes: Vec::new(),
             growth_defeats: VecDeque::new(),
             player_giant_hits: 0,
+            hotspots: Vec::new(),
+            coin_regrade_in: 0.0,
+            dwell_tick_in: 0.0,
+            dwell_ring_visible: false,
         }
     }
 
@@ -1221,6 +1313,13 @@ impl INode3D for HarborRound {
                 self.update_coin_wave(dt);
             }
             self.advance_giant_growth(dt);
+            for giant in &mut self.giants {
+                giant.memory.tick(dt);
+            }
+            self.hotspots.retain_mut(|(_, _, left)| {
+                *left -= dt;
+                *left > 0.0
+            });
             self.rivals.clear();
             self.rivals.extend(
                 self.giants
@@ -1606,6 +1705,12 @@ impl HarborRound {
             } else if yaw_diff <= STAND_PIVOT_EXIT_ANGLE {
                 actor.standing_pivot_active = false;
             }
+            // Evasion outranks the in-place pivot: a giant caught inside a
+            // warning circle must spend its escape window running (the walk
+            // turn already steers the body along an arc), not pivoting.
+            if !player && actor.intent == Intent::Evade {
+                actor.standing_pivot_active = false;
+            }
             if actor.standing_pivot_active
                 && taking_step
                 && actor.pending_stomp_aim.is_none()
@@ -1895,6 +2000,26 @@ impl HarborRound {
     #[func]
     fn growth_actors(&self) -> Array<VarDictionary> {
         self.actor_debug()
+    }
+
+    /// Test/debug view of the live coin field: tier, dwell requirement and
+    /// ground position of every coin in the wave.
+    #[func]
+    fn coin_debug(&self) -> Array<VarDictionary> {
+        self.coin_debug_entries()
+    }
+
+    /// Test/debug view of the civilian crowd states (calm/panic/cover).
+    #[func]
+    fn civilian_debug(&self) -> Array<VarDictionary> {
+        let mut entries = Array::new();
+        for npc in &self.civilians {
+            let mut entry = VarDictionary::new();
+            entry.set("state", npc.state.key());
+            entry.set("position", npc.body.get_global_position());
+            entries.push(&entry);
+        }
+        entries
     }
 
     #[func]
@@ -2792,9 +2917,19 @@ impl HarborRound {
             remove_in: None,
             grabbed: false,
             health_fraction: 1.0,
+            state: CivilianState::Calm,
+            panic_left: 0.0,
+            sense_in: random_range(0.0, 0.3),
+            threat: None,
+            cover_goal: None,
         });
     }
 
+    /// Civilian crowd update with the three-state escape behavior: a daily
+    /// stroll that breaks into panic sprinting when a giant, collapse shake or
+    /// warning circle is sensed nearby, then a sheltering walk toward a corner
+    /// away from the threat before calming back down. One cheap sense pass per
+    /// pedestrian every ~0.3 s keeps the whole crowd light.
     fn update_civilians(&mut self, dt: f32) {
         if self.growth_rules.is_some() {
             return;
@@ -2802,6 +2937,32 @@ impl HarborRound {
         let giant = self.giants[0].body.get_global_position();
         let observer = self.observer_position();
         let growth = self.growth_rules.is_some();
+        // Danger sources for the sense pass, snapshotted once per frame.
+        let mut dangers: Vec<(Vector3, f32)> = Vec::new();
+        for actor in &self.giants {
+            if actor.health_fraction <= 0.0 {
+                continue;
+            }
+            let height = actor.height(self.max_height);
+            if !actor.human {
+                // A giant's stride is dangerous across its whole reach.
+                let reach = (stomp_center_range(actor.scale) + FOOT_RADII.y * actor.scale)
+                    .max(height * 1.2);
+                dangers.push((actor.body.get_global_position(), reach + 55.0));
+            }
+            if let Stomp::Windup { area, .. } = &actor.stomp {
+                dangers.push((area.center, area.radii.x.max(area.radii.y) + 20.0));
+            }
+            if let Some((center, radius)) = actor.sit_drop_zone() {
+                dangers.push((center, radius + 20.0));
+            }
+        }
+        for impact in &self.camera_impacts {
+            // Collapses and stomps shake the ground: felt even through walls.
+            if matches!(impact.kind, GroundImpact::Stomp | GroundImpact::Demolition) {
+                dangers.push((impact.at, 24.0));
+            }
+        }
         self.civilians.retain_mut(|npc| {
             if growth && npc.remove_in.is_none() {
                 npc.size = BodySize::from_capsule(&npc.collision);
@@ -2823,17 +2984,132 @@ impl HarborRound {
             if visible != npc.body.is_visible() {
                 npc.body.call("set_render_active", &[visible.to_variant()]);
             }
-            npc.turn_in -= dt;
-            if npc.turn_in <= 0.0 || npc.body.is_on_wall() {
-                npc.turn_in = random_range(1.3, 4.0);
-                npc.direction = random_heading();
+
+            // --- Sense pass (staggered, ~0.3 s per pedestrian). ---
+            npc.sense_in -= dt;
+            if npc.sense_in <= 0.0 {
+                npc.sense_in = 0.28 + random_range(0.0, 0.08);
+                let mut sensed: Option<(Vector3, f32)> = None;
+                for &(danger_at, radius) in &dangers {
+                    if horizontal(danger_at - at).length() <= radius {
+                        sensed = match sensed {
+                            None => Some((danger_at, radius)),
+                            Some((best, best_radius)) => {
+                                if horizontal(danger_at - at).length()
+                                    < horizontal(best - at).length()
+                                {
+                                    Some((danger_at, radius))
+                                } else {
+                                    Some((best, best_radius))
+                                }
+                            }
+                        };
+                    }
+                }
+                if let Some(threat) = sensed {
+                    npc.threat = Some(threat);
+                    npc.panic_left = 3.6 + random_range(0.0, 2.2);
+                    if npc.state == CivilianState::Calm {
+                        npc.state = CivilianState::Panic;
+                        npc.turn_in = 0.0;
+                        npc.cover_goal = None;
+                    }
+                }
             }
-            drive(&mut npc.body, npc.direction, npc.speed, dt, 11.0);
+
+            let sprinting = npc.state == CivilianState::Panic;
+            let speed = if sprinting {
+                npc.speed * 2.4
+            } else if npc.state == CivilianState::Cover {
+                npc.speed * 1.35
+            } else {
+                npc.speed
+            };
+            npc.turn_in -= dt;
+            match npc.state {
+                CivilianState::Calm => {
+                    if npc.turn_in <= 0.0 || npc.body.is_on_wall() {
+                        npc.turn_in = random_range(1.3, 4.0);
+                        npc.direction = random_heading();
+                    }
+                }
+                CivilianState::Panic => {
+                    npc.panic_left -= dt;
+                    let away = npc
+                        .threat
+                        .map(|(threat_at, _)| horizontal(npc.position - threat_at))
+                        .unwrap_or_else(|| horizontal(-npc.position));
+                    let away_dir = if away.length_squared() > 1e-4 {
+                        away.normalized_or_zero()
+                    } else {
+                        npc.direction
+                    };
+                    // Sprint away from the threat with a jitter; on a wall,
+                    // slide along it instead of grinding into the corner.
+                    let desired = if npc.body.is_on_wall() {
+                        let slide = if away_dir.x + away_dir.z >= 0.0 {
+                            1.35
+                        } else {
+                            -1.35
+                        };
+                        away_dir.rotated(Vector3::UP, slide)
+                    } else {
+                        away_dir.rotated(Vector3::UP, random_range(-0.4, 0.4))
+                    };
+                    if npc.direction.dot(desired) < 0.7 || npc.turn_in <= 0.0 {
+                        npc.direction = desired;
+                        npc.turn_in = random_range(0.35, 0.8);
+                    }
+                    if npc.panic_left <= 0.0 {
+                        // Catch a breath: head for a sheltered point away from
+                        // the last threat, biased along the street grid.
+                        npc.state = CivilianState::Cover;
+                        let base = npc
+                            .threat
+                            .map(|(threat_at, _)| horizontal(npc.position - threat_at))
+                            .unwrap_or(npc.direction);
+                        let away = if base.length_squared() > 1e-4 {
+                            base.normalized_or_zero()
+                        } else {
+                            random_heading()
+                        };
+                        let limit = (self.world_limit - 6.0).max(4.0);
+                        let distance = random_range(14.0, 30.0);
+                        let mut goal = npc.position + away * distance;
+                        if away.x.abs() > away.z.abs() {
+                            goal.z = npc.position.z + random_range(-4.0, 4.0);
+                        } else {
+                            goal.x = npc.position.x + random_range(-4.0, 4.0);
+                        }
+                        goal.x = goal.x.clamp(-limit, limit);
+                        goal.z = goal.z.clamp(-limit, limit);
+                        npc.cover_goal = Some(goal);
+                    }
+                }
+                CivilianState::Cover => {
+                    if let Some(goal) = npc.cover_goal {
+                        let offset = horizontal(goal - npc.position);
+                        if offset.length() < 1.6 {
+                            npc.cover_goal = None;
+                            npc.state = CivilianState::Calm;
+                            npc.turn_in = random_range(0.8, 2.0);
+                            npc.direction = random_heading();
+                        } else if npc.turn_in <= 0.0 || npc.body.is_on_wall() {
+                            npc.turn_in = random_range(0.8, 1.6);
+                            npc.direction = offset.normalized_or_zero();
+                        }
+                    } else {
+                        npc.state = CivilianState::Calm;
+                    }
+                }
+            }
+            drive(&mut npc.body, npc.direction, speed, dt, 11.0);
             if visible {
                 let speed = ground_speed(&npc.body);
-                let footfall = npc
-                    .body
-                    .call("show_motion", &[speed.to_variant(), false.to_variant()]);
+                let footfall = npc.body.call(
+                    "show_motion",
+                    &[speed.to_variant(), sprinting.to_variant()],
+                );
                 if growth && footfall.to::<bool>() {
                     self.camera_impacts.push(CameraImpact {
                         at: npc.body.get_global_position(),
@@ -2957,6 +3233,10 @@ impl HarborRound {
                 if ignores_rival(scale, actor.scale, self.settings.rival_ignore_ratio) {
                     continue;
                 }
+                // Seven-step relative-size engagement matrix. The ignore ratio
+                // above stays the hard gate; the tier decides whether this
+                // actor reaches for the rival at all and how far.
+                let tier = SizeTier::from_ratio(scale / actor.scale);
                 let enemy_reach = stomp_center_range(scale) + GIANT_RADIUS * actor.scale;
                 let hits = scale * health * rules.base_health / (actor.scale * rules.base_attack);
                 let outmatched = scale * health > 1.5 * actor.scale * actor.health_fraction;
@@ -2965,10 +3245,32 @@ impl HarborRound {
                         continue;
                     }
                     reach * if hits <= 1.0 { 3.0 } else { 1.7 }
-                } else if outmatched {
-                    enemy_reach + 1.5
                 } else {
-                    rival_engage_range(reach, speed, actor.scale)
+                    match tier {
+                        // Incidental stomp in passing only — never a chase.
+                        SizeTier::Trivial => reach,
+                        // Ambush the uphill rival only while scale×HP + boldness say so.
+                        SizeTier::Uphill
+                            if !ambush_uphill(
+                                actor.scale,
+                                actor.health_fraction,
+                                scale,
+                                health,
+                                actor.personality.risk01(),
+                            ) =>
+                        {
+                            continue;
+                        }
+                        // Fleeing a danger/overwhelming rival is pursue's job.
+                        SizeTier::Danger | SizeTier::Overwhelming => continue,
+                        SizeTier::Uphill | SizeTier::Prey | SizeTier::Pushover | SizeTier::Peer => {
+                            if outmatched {
+                                enemy_reach + 1.5
+                            } else {
+                                rival_engage_range(reach, speed, actor.scale)
+                            }
+                        }
+                    }
                 };
                 if distance > attack_range
                     && (outmatched || tracked != Some(target.body.instance_id()))
@@ -3000,6 +3302,9 @@ impl HarborRound {
             tracked == Some(target.body.instance_id())
                 || sight.sees_at(target.position, target.size.height)
         })?;
+        // Every confirmed sighting refreshes the short-term memory the search
+        // intent later walks back to.
+        actor.memory.note_seen(target.position);
         Some((target, true, sight))
     }
 
@@ -3016,9 +3321,43 @@ impl HarborRound {
         actor.ai_holding_stomp = false;
         actor.ai_aim_yaw = None;
         if actor.human {
-            // Humans only forage for coins. They cannot start a fight, so they never chase one.
+            // Humans only forage for coins. They cannot start a fight, so they never chase one,
+            // but a telegraphed stomp underfoot still outranks any coin.
             actor.chase_target = None;
             actor.building_target = None;
+            let position = actor.body.get_global_position();
+            let radius = self.actor_radius(actor);
+            let mut warnings: Vec<(Vector3, f32)> = Vec::new();
+            let mut immediate = false;
+            for rival in &self.rivals {
+                if rival.index == actor.index {
+                    continue;
+                }
+                if let Some((center, radii)) = rival.windup {
+                    let reach = radii.x.max(radii.y) + radius;
+                    warnings.push((center, reach + 0.6));
+                    if horizontal(center - position).length() <= reach {
+                        immediate = true;
+                    }
+                }
+                if let Some((center, sit_radius)) = rival.sit_drop {
+                    let reach = sit_radius + radius;
+                    warnings.push((center, reach + 0.6));
+                    if horizontal(center - position).length() <= reach {
+                        immediate = true;
+                    }
+                }
+            }
+            if immediate {
+                actor.danger_note_in -= dt;
+                if actor.danger_note_in <= 0.0
+                    && let Some(&(center, reach)) = warnings.first()
+                {
+                    actor.danger_note_in = 1.0;
+                    actor.memory.note_danger(center, reach);
+                }
+                return self.drive_escape(actor, position, &warnings, false, dt);
+            }
             return self.forage(actor, speed, dt);
         }
         let position = actor.body.get_global_position();
@@ -3027,6 +3366,45 @@ impl HarborRound {
         let attacks_scenery = self.ai_attacks_scenery(actor);
         let crush_buildings = self.can_crush_buildings(actor);
         let roam_crush = !attacks_scenery && crush_buildings;
+        let my_height = actor.height(self.max_height);
+        let radius = GIANT_RADIUS * scale;
+
+        // Telegraphed danger first: standing inside any stomp windup or sit
+        // drop warning circle overrides every scored intent (utility 100+).
+        let mut warnings: Vec<(Vector3, f32)> = Vec::new();
+        let mut immediate = false;
+        for rival in &self.rivals {
+            if rival.index == actor.index {
+                continue;
+            }
+            if let Some((center, radii)) = rival.windup {
+                let reach = radii.x.max(radii.y) + radius;
+                warnings.push((center, reach + 1.0));
+                if horizontal(center - position).length() <= reach {
+                    immediate = true;
+                }
+            }
+            if let Some((center, sit_radius)) = rival.sit_drop {
+                let reach = sit_radius + radius;
+                warnings.push((center, reach + 1.0));
+                if horizontal(center - position).length() <= reach {
+                    immediate = true;
+                }
+            }
+        }
+        if immediate {
+            // The first frame of a fresh escape records the danger zone so the
+            // actor keeps clear of this fight for the next ~13 s.
+            if actor.escape_yaw.is_none()
+                && let Some(&(center, reach)) = warnings.first()
+            {
+                actor.memory.note_danger(center, reach);
+            }
+            actor.intent = Intent::Evade;
+            actor.intent_in = UTILITY_INTERVAL;
+            return self.drive_escape(actor, position, &warnings, roam_crush, dt);
+        }
+
         let target = self.combat_target(actor, speed, dt);
         let chosen = target
             .as_ref()
@@ -3038,16 +3416,97 @@ impl HarborRound {
             actor.replan_in = 0.0;
             actor.clear_path();
         }
+        // Relative-size tier versus the tracked enemy. The ±10 % hysteresis in
+        // `from_ratio_with_hysteresis` keeps edge ratios from flickering between
+        // two behaviors every time the pair breathes across a boundary.
+        let tier = match (&target, chosen) {
+            (Some((target, _, _)), Some(id)) => {
+                let ratio = target.size.height / my_height;
+                let previous = actor
+                    .size_tier
+                    .filter(|&(previous_id, _)| previous_id == id)
+                    .map(|(_, tier)| tier);
+                let tier = SizeTier::from_ratio_with_hysteresis(ratio, previous);
+                actor.size_tier = Some((id, tier));
+                tier
+            }
+            _ => {
+                actor.size_tier = None;
+                SizeTier::Peer
+            }
+        };
+
+        // Threats that steer the 360° escape: warning circles plus every rival
+        // the size matrix says to keep away from.
+        let mut threats = warnings.clone();
+        for rival in &self.rivals {
+            if rival.index == actor.index || rival.human {
+                continue;
+            }
+            let ratio = rival.scale / scale;
+            let reach = stomp_center_range(rival.scale) + FOOT_RADII.y * rival.scale + radius + 2.0;
+            if horizontal(rival.position - position).length() > reach * 1.6 {
+                continue;
+            }
+            let keep_away = match SizeTier::from_ratio(ratio) {
+                SizeTier::Danger | SizeTier::Overwhelming => true,
+                SizeTier::Uphill => !ambush_uphill(
+                    scale,
+                    actor.health_fraction,
+                    rival.scale,
+                    rival.health_fraction,
+                    actor.personality.risk01(),
+                ),
+                // A badly wounded equal peer is still a fight to walk away from.
+                SizeTier::Peer => {
+                    rival.scale * rival.health_fraction > scale * actor.health_fraction * 1.5
+                }
+                _ => false,
+            };
+            if keep_away {
+                threats.push((rival.position, reach));
+            }
+        }
+
         let forage_for_coin = chosen.is_none()
             && self.mode == Mode::Brawl
             && self.has_nearby_brawl_coin(actor, position);
-        if chosen.is_some() || !attacks_scenery {
+
+        // Utility re-evaluation every ~0.25 s. Between ticks the current intent
+        // keeps executing; the +13 inertia bonus inside the scorer damps flicker.
+        actor.intent_in -= dt;
+        if actor.intent_in <= 0.0 {
+            actor.intent_in = UTILITY_INTERVAL + 0.04 * ((actor.index % 7) as f32);
+            let visible = target
+                .as_ref()
+                .map(|(_, visible, _)| *visible)
+                .unwrap_or(false);
+            actor.intent = self.score_intents(
+                actor,
+                position,
+                target.as_ref().map(|(target, _, _)| target),
+                visible,
+                tier,
+                chosen,
+                &threats,
+            );
+        }
+        if actor.intent == Intent::Evade {
+            actor.building_target = None;
+            return self.drive_escape(actor, position, &threats, roam_crush, dt);
+        }
+        if chosen.is_some() || !attacks_scenery || actor.intent != Intent::Demolish {
             actor.building_target = None;
             if !attacks_scenery {
                 actor.blocking_target = None;
             }
         } else {
-            self.choose_building(actor, position);
+            // Destructive personalities prefer the tall landmarks.
+            self.choose_building(
+                actor,
+                position,
+                actor.personality.destructiveness01() > 0.6,
+            );
         }
         if !matches!(actor.stomp, Stomp::Ready | Stomp::Cooldown(_)) {
             return Vector3::ZERO;
@@ -3060,34 +3519,6 @@ impl HarborRound {
             let windup = WINDUP * self.stomp_pace(actor);
             let reach = stomp_center_range(scale);
             let target_radius = target.size.radius;
-            if let Some((enemy_scale, health)) = target.rival {
-                let dangerous = enemy_scale >= scale * 0.75;
-                let outmatched = enemy_scale * health > scale * actor.health_fraction * 1.5;
-                let threatened =
-                    offset.length() < stomp_center_range(enemy_scale) + GIANT_RADIUS * scale + 1.5;
-                // Only give ground when the rival is genuinely stronger. Backing off just
-                // because our own stomp is cooling down made equal giants orbit each other.
-                if visible && can_demolish && dangerous && threatened && outmatched {
-                    let back = -offset.normalized_or_zero();
-                    let side = if actor.index % 2 == 0 { 0.9 } else { -0.9 };
-                    let radius = GIANT_RADIUS * scale;
-                    return [
-                        back.rotated(Vector3::UP, side),
-                        back,
-                        back.rotated(Vector3::UP, -side),
-                    ]
-                    .into_iter()
-                    .find(|&dir| {
-                        self.clear_ground_path(
-                            position,
-                            position + dir * (radius + 0.6),
-                            radius,
-                            roam_crush,
-                        )
-                    })
-                    .unwrap_or(Vector3::ZERO);
-                }
-            }
             let lead_range =
                 reach + target_radius + target.body.get_real_velocity().length() * windup;
             let lead_cap = stomp_lead_cap(
@@ -3131,7 +3562,20 @@ impl HarborRound {
             if visible && offset.length() < reach.max(GIANT_RADIUS * scale + target_radius) * 0.85 {
                 return -offset.normalized_or_zero();
             }
-            chase_goal = Some(predicted);
+            // Only the tiers the matrix says to chase get a pursuit goal; the
+            // trivial tier still stomps in passing above without ever walking
+            // after the target. Human/civilian targets are always pursued.
+            let may_chase = tier.chases() || target.rival.is_none();
+            if actor.intent == Intent::Attack && may_chase {
+                chase_goal = Some(predicted);
+            } else if actor.intent == Intent::Attack && tier == SizeTier::Peer
+                && target.rival.is_some()
+            {
+                // Cautious peer engagement: close in with a side-step bias so the
+                // approach is not a straight line into the rival's foot.
+                let side = if actor.index % 2 == 0 { 0.45 } else { -0.45 };
+                chase_goal = Some(predicted + offset.normalized_or_zero().rotated(Vector3::UP, side) * offset.length().min(18.0));
+            }
         }
         if forage_for_coin || (!can_demolish && chase_goal.is_none()) {
             return self.forage(actor, speed, dt);
@@ -3177,6 +3621,17 @@ impl HarborRound {
         }
 
         let goal = if let Some(goal) = chase_goal {
+            actor.roam_goal = None;
+            goal
+        } else if actor.intent == Intent::Search
+            && let Some(goal) = actor
+                .memory
+                .hit_from
+                .map(|(at, _)| at)
+                .or(actor.memory.last_seen.map(|(at, _)| at))
+        {
+            // Search the last sighting locally for the remaining memory TTL
+            // (4–8 s). Sight checks still apply during the walk — no wall-hack.
             actor.roam_goal = None;
             goal
         } else if let Some(footprint) = building {
@@ -3225,6 +3680,234 @@ impl HarborRound {
             [] => goal,
         };
         horizontal(next - position).normalized_or_zero()
+    }
+
+    /// Scores the five intents 0–100 and keeps the current one with a +13
+    /// inertia bonus so re-evaluations every ~0.25 s do not twitch the body.
+    #[allow(clippy::too_many_arguments)]
+    fn score_intents(
+        &self,
+        actor: &Giant,
+        position: Vector3,
+        target: Option<&CombatTarget>,
+        target_visible: bool,
+        tier: SizeTier,
+        chosen: Option<InstanceId>,
+        threats: &[(Vector3, f32)],
+    ) -> Intent {
+        let personality = actor.personality;
+        let attacks_scenery = self.ai_attacks_scenery(actor);
+        let can_demolish = self.can_demolish(actor);
+
+        // --- Evade: size pressure from rivals the matrix says to keep away from,
+        // scaled by the survival drive and the remaining health. ---
+        let mut size_pressure: f32 = 0.0;
+        for rival in &self.rivals {
+            if rival.index == actor.index || rival.human {
+                continue;
+            }
+            let ratio = rival.scale / actor.scale;
+            let reach = stomp_center_range(rival.scale)
+                + FOOT_RADII.y * rival.scale
+                + GIANT_RADIUS * actor.scale
+                + 2.0;
+            if horizontal(rival.position - position).length() > reach {
+                continue;
+            }
+            let pressure = match SizeTier::from_ratio(ratio) {
+                SizeTier::Overwhelming => 1.0,
+                SizeTier::Danger => 0.7,
+                SizeTier::Uphill => {
+                    if ambush_uphill(
+                        actor.scale,
+                        actor.health_fraction,
+                        rival.scale,
+                        rival.health_fraction,
+                        personality.risk01(),
+                    ) {
+                        continue;
+                    }
+                    0.45
+                }
+                SizeTier::Peer
+                    if rival.scale * rival.health_fraction
+                        > actor.scale * actor.health_fraction * 1.5 =>
+                {
+                    0.4
+                }
+                _ => continue,
+            };
+            size_pressure = size_pressure.max(pressure * ((ratio - 1.0) / 4.0).clamp(0.3, 1.0));
+        }
+        let near_warning = threats
+            .iter()
+            .any(|&(at, reach)| horizontal(at - position).length() <= reach * 1.5);
+        let mut evade = threat_evasion_score(
+            size_pressure,
+            1.0 - actor.health_fraction,
+            personality.survival01(),
+        );
+        if near_warning {
+            evade = (evade + 35.0).min(100.0);
+        }
+
+        // --- Attack: tier base score shaped by aggression, grudges and wounds. ---
+        let grudge = actor.memory.grudge.map(|(id, _)| id);
+        let mut attack = 0.0;
+        if target_visible && let Some(target) = target {
+            let base = if target.rival.is_none() {
+                // Humans and pedestrians are prey by design once they pass the
+                // human-ignore gate: hunting them always outranks demolishing.
+                100.0
+            } else {
+                match tier {
+                    SizeTier::Trivial => 12.0,
+                    SizeTier::Prey => 55.0,
+                    SizeTier::Pushover => 65.0,
+                    SizeTier::Peer => 48.0,
+                    SizeTier::Uphill => 34.0,
+                    SizeTier::Danger | SizeTier::Overwhelming => 0.0,
+                }
+            };
+            if base > 0.0 {
+                attack = base * (0.45 + 0.55 * personality.aggression01());
+                if chosen.is_some_and(|id| grudge == Some(id)) {
+                    attack += personality.vengeance01() * 22.0;
+                }
+                if let Some((_, enemy_health)) = target.rival {
+                    attack += (1.0 - enemy_health) * 18.0;
+                }
+                // Punish recovery: an enemy not mid-windup is a window.
+                let winding_up = chosen.is_some_and(|id| {
+                    self.rivals
+                        .iter()
+                        .any(|rival| rival.body.instance_id() == id && rival.windup.is_some())
+                });
+                if !winding_up {
+                    attack += 10.0;
+                }
+                attack = attack.min(100.0);
+            }
+        }
+
+        // --- Forage: only brawl giants actively hunt dropped coins. ---
+        let mut forage = 0.0;
+        if self.mode == Mode::Brawl && self.has_nearby_brawl_coin(actor, position) {
+            forage = 42.0 * (0.5 + 0.5 * personality.growth01());
+        }
+
+        // --- Search: the enemy is out of sight but still inside short-term
+        // memory. A distant last-sighting is barely worth the walk, so the
+        // score falls off with the distance to it — a far deserter yields to
+        // nearby development, a close escape stays hot. ---
+        let mut search = 0.0;
+        if chosen.is_none()
+            && let Some(goal) = actor
+                .memory
+                .hit_from
+                .map(|(at, _)| at)
+                .or(actor.memory.last_seen.map(|(at, _)| at))
+        {
+            let reach = horizontal(goal - position).length();
+            let falloff = 60.0 / (60.0 + reach);
+            search = 40.0 * (0.45 + 0.55 * personality.aggression01()) * falloff;
+        }
+
+        // --- Demolish: development drive against nearby building density. ---
+        let mut demolish = 0.0;
+        if attacks_scenery && can_demolish {
+            demolish = demolition_score(
+                personality.growth01(),
+                personality.destructiveness01(),
+                self.demolishable_density(position),
+            );
+        }
+
+        let score_of = |intent: Intent| match intent {
+            Intent::Evade => evade,
+            Intent::Attack => attack,
+            Intent::Forage => forage,
+            Intent::Search => search,
+            Intent::Demolish => demolish,
+        };
+        [
+            Intent::Evade,
+            Intent::Demolish,
+            Intent::Forage,
+            Intent::Search,
+            Intent::Attack,
+        ]
+        .into_iter()
+        .map(|intent| {
+            (
+                intent,
+                score_of(intent)
+                    + if intent == actor.intent {
+                        INTENT_INERTIA
+                    } else {
+                        0.0
+                    },
+            )
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(intent, _)| intent)
+        .unwrap_or(Intent::Demolish)
+    }
+
+    /// Standing demolishable buildings within 120 m, normalized to 0–1.
+    fn demolishable_density(&self, position: Vector3) -> f32 {
+        let count = self
+            .target_grid
+            .near(position, 120.0)
+            .filter(|&index| {
+                let target = &self.targets[index];
+                target.footprint.building && target.integrity.blocks()
+            })
+            .count();
+        (count as f32 / 6.0).min(1.0)
+    }
+
+    /// Scores 16 candidate headings and returns the best escape direction. A
+    /// heading that makes no progress for ~0.45 s is blacklisted for 3–5 s so
+    /// the scorer rotates to a fresh tangent instead of grinding into the wall.
+    fn drive_escape(
+        &mut self,
+        actor: &mut Giant,
+        position: Vector3,
+        threats: &[(Vector3, f32)],
+        roam_crush: bool,
+        dt: f32,
+    ) -> Vector3 {
+        let radius = self.actor_radius(actor);
+        let heading = actor.body.get_rotation().y;
+        let blocked = |probe: Vector3| !self.clear_ground_path(position, probe, radius, roam_crush);
+        let direction = escape_direction(
+            position,
+            radius,
+            threats,
+            self.world_limit,
+            heading,
+            blocked,
+            |yaw| actor.memory.escape_blocked(yaw),
+        );
+        let yaw = (-direction.x).atan2(-direction.z);
+        let same_heading = actor
+            .escape_yaw
+            .is_some_and(|previous| ai::yaw_difference(yaw, previous).abs() < 0.4);
+        if same_heading {
+            actor.escape_elapsed += dt;
+            let moved = horizontal(position - actor.escape_origin).length();
+            if actor.escape_elapsed > 0.45 && moved < radius.max(1.0) * 0.4 {
+                actor.memory.note_failed_escape(yaw);
+                actor.escape_yaw = None;
+                actor.escape_elapsed = 0.0;
+            }
+        } else {
+            actor.escape_yaw = Some(yaw);
+            actor.escape_origin = position;
+            actor.escape_elapsed = 0.0;
+        }
+        direction
     }
 
     /// Draws the blocking footprints for one route and plans it. Kept separate from the
@@ -3323,7 +4006,7 @@ impl HarborRound {
         }
     }
 
-    fn choose_building(&self, actor: &mut Giant, position: Vector3) {
+    fn choose_building(&self, actor: &mut Giant, position: Vector3, prefer_tall: bool) {
         if actor.building_target.is_some() {
             return;
         }
@@ -3335,18 +4018,45 @@ impl HarborRound {
             let target = &self.targets[index];
             target.footprint.building && target.integrity.blocks()
         };
-        let nearest = |a: &usize, b: &usize| distance(*a).total_cmp(&distance(*b)).then(a.cmp(b));
+        // Everyone picks the nearest standing block; destructive personalities
+        // break toward the tallest landmark, but only within a short walk of
+        // the nearest building so the pick never turns into a cross-city hike.
+        let height = |index: usize| self.targets[index].footprint.size.y;
+        let pick = |pool: &[usize]| -> Option<usize> {
+            let nearest = pool.iter().map(|&i| distance(i)).fold(f32::INFINITY, f32::min);
+            if prefer_tall {
+                // Destructive personalities lean toward the tallest nearby
+                // landmark, but only among buildings that are effectively
+                // side by side with the nearest one — a clear nearest pick is
+                // never traded for a distant tower.
+                pool.iter()
+                    .filter(|&&i| distance(i).sqrt() <= nearest.sqrt() + 6.0)
+                    .filter(|&&i| height(i) >= pool.iter().map(|&j| height(j)).fold(0.0_f32, f32::max) - 1e-4)
+                    .max_by(|&&a, &&b| {
+                        height(a)
+                            .total_cmp(&height(b))
+                            .then_with(|| distance(a).total_cmp(&distance(b)))
+                    })
+                    .copied()
+            } else {
+                pool.iter()
+                    .min_by(|&&a, &&b| {
+                        distance(a).total_cmp(&distance(b)).then(a.cmp(&b))
+                    })
+                    .copied()
+            }
+        };
         let local_range = 48.0;
-        actor.building_target = self
+        let local_pool: Vec<usize> = self
             .target_grid
             .near(position, local_range)
             .filter(|&i| standing(i) && distance(i) <= local_range * local_range)
-            .min_by(nearest)
-            .or_else(|| {
-                (0..self.targets.len())
-                    .filter(|&i| standing(i))
-                    .min_by(nearest)
-            });
+            .collect();
+        let global_pool: Vec<usize> = (0..self.targets.len())
+            .filter(|&i| standing(i))
+            .collect();
+        actor.building_target =
+            pick(&local_pool).or_else(|| pick(&global_pool));
         if actor.building_target.is_some() {
             actor.replan_in = 0.0;
         }
@@ -3469,6 +4179,14 @@ impl HarborRound {
             area.center.y += position.to::<Vector3>().y;
         }
         actor.stomp = Stomp::Windup { area, elapsed: 0.0 };
+        // Telegraphed stomps mark a combat hotspot: nearby coins grade up and
+        // foragers remember to keep clear of the landing zone.
+        self.note_hotspot(
+            area.center,
+            (area.radii.x.max(area.radii.y) * 2.5)
+                .max(18.0)
+                + actor.height(self.max_height) * 0.2,
+        );
         self.effects.as_mut().unwrap().call(
             "warn",
             &[
@@ -3540,6 +4258,15 @@ impl HarborRound {
     fn impact(&mut self, actor: &mut Giant, area: StompArea, method: DefeatMethod) {
         let stomp = method != DefeatMethod::Step;
         let height = actor.height(self.max_height);
+        // Every landed impact refreshes the combat hotspot around it.
+        if stomp {
+            self.note_hotspot(
+                area.center,
+                (area.radii.x.max(area.radii.y) * 2.0)
+                    .max(16.0)
+                    .max(height * 0.6),
+            );
+        }
         if let Some(mut audio) = self.audio() {
             audio.call(
                 "play_giant_step",
@@ -3793,6 +4520,19 @@ impl HarborRound {
 /// Maximum sustained speed used to extrapolate a stomp target. Rival giants can move
 /// several times faster than a sprinting human once the giant speed multiplier is applied,
 /// so their lead must not be capped by `HUMAN_SPRINT`.
+/// Whether the smaller side takes the uphill fight anyway: its `scale × HP`
+/// must approach the enemy's, and bold personalities need far less parity
+/// (`1.2–2.0×` tier of the seven-step size matrix).
+fn ambush_uphill(
+    own_scale: f32,
+    own_health: f32,
+    enemy_scale: f32,
+    enemy_health: f32,
+    risk01: f32,
+) -> bool {
+    own_scale * own_health >= enemy_scale * enemy_health * (0.85 - risk01 * 0.45)
+}
+
 fn stomp_lead_cap(rival_scale: Option<f32>, human_speed: f32, giant_speed: f32) -> f32 {
     match rival_scale {
         Some(scale) => GIANT_WALK * giant_speed * scale.min(1.0),
@@ -3973,9 +4713,9 @@ fn at_current_growth_cap(scale: f32, max_height: f32, growth_limit: f32) -> bool
 #[cfg(test)]
 mod tests {
     use super::{
-        FOOT_RADII, GIANT_RADIUS, GIANT_START_HEIGHT, GroundImpact, SIGHT_RANGE,
-        at_current_growth_cap, ignores_human, rival_engage_range, sight_range, stomp_center_range,
-        stomp_lead_cap,
+        FOOT_RADII, GIANT_RADIUS, GIANT_START_HEIGHT, GroundImpact, InstanceId, PI, SIGHT_RANGE,
+        Vector3, ambush_uphill, at_current_growth_cap, horizontal, ignores_human,
+        rival_engage_range, sight_range, stomp_center_range, stomp_lead_cap,
     };
     use crate::rules::HUMAN_SPRINT;
 
@@ -4062,6 +4802,236 @@ mod tests {
         let giant = GroundImpact::Step;
         assert!(giant.relative_shake(2.0, 2.0, 0.5) > giant.relative_shake(2.0, 1.0, 0.5));
         assert_eq!(giant.relative_shake(12.0, 1.0, 0.5), 0.0);
+    }
+
+    #[test]
+    fn size_tiers_split_the_seven_matrix_bands() {
+        use super::ai::SizeTier;
+        let tier = |ratio: f32| SizeTier::from_ratio(ratio);
+        assert_eq!(tier(0.05), SizeTier::Trivial);
+        assert_eq!(tier(0.1), SizeTier::Prey);
+        assert_eq!(tier(0.49), SizeTier::Prey);
+        assert_eq!(tier(0.5), SizeTier::Pushover);
+        assert_eq!(tier(0.79), SizeTier::Pushover);
+        assert_eq!(tier(0.8), SizeTier::Peer);
+        assert_eq!(tier(1.19), SizeTier::Peer);
+        assert_eq!(tier(1.2), SizeTier::Uphill);
+        assert_eq!(tier(1.99), SizeTier::Uphill);
+        assert_eq!(tier(2.0), SizeTier::Danger);
+        assert_eq!(tier(4.9), SizeTier::Danger);
+        assert_eq!(tier(5.0), SizeTier::Overwhelming);
+        assert_eq!(tier(50.0), SizeTier::Overwhelming);
+        // Only the middle tiers chase; trivial is incidental and the top two flee.
+        assert!(SizeTier::Prey.chases());
+        assert!(SizeTier::Pushover.chases());
+        assert!(SizeTier::Peer.chases());
+        assert!(SizeTier::Uphill.chases());
+        assert!(!SizeTier::Trivial.chases());
+        assert!(!SizeTier::Danger.chases());
+        assert!(!SizeTier::Overwhelming.chases());
+    }
+
+    #[test]
+    fn size_tier_boundaries_keep_ten_percent_hysteresis() {
+        use super::ai::SizeTier;
+        // A fresh 0.5 ratio classifies as Pushover; a Prey actor keeps its old
+        // tier up to 0.55 (0.5 x 1.1) before flipping.
+        assert_eq!(
+            SizeTier::from_ratio_with_hysteresis(0.52, Some(SizeTier::Prey)),
+            SizeTier::Prey
+        );
+        assert_eq!(
+            SizeTier::from_ratio_with_hysteresis(0.56, Some(SizeTier::Prey)),
+            SizeTier::Pushover
+        );
+        // And a Pushover actor hangs on down to 0.45 (0.5 x 0.9).
+        assert_eq!(
+            SizeTier::from_ratio_with_hysteresis(0.46, Some(SizeTier::Pushover)),
+            SizeTier::Pushover
+        );
+        assert_eq!(
+            SizeTier::from_ratio_with_hysteresis(0.44, Some(SizeTier::Pushover)),
+            SizeTier::Prey
+        );
+        // The same holds at the 1.2 and 2.0 edges.
+        assert_eq!(
+            SizeTier::from_ratio_with_hysteresis(1.25, Some(SizeTier::Peer)),
+            SizeTier::Peer
+        );
+        assert_eq!(
+            SizeTier::from_ratio_with_hysteresis(2.1, Some(SizeTier::Uphill)),
+            SizeTier::Uphill
+        );
+        assert_eq!(
+            SizeTier::from_ratio_with_hysteresis(1.35, Some(SizeTier::Peer)),
+            SizeTier::Uphill
+        );
+        // Fresh classification ignores the sticky window entirely.
+        assert_eq!(
+            SizeTier::from_ratio_with_hysteresis(0.52, None),
+            SizeTier::Pushover
+        );
+    }
+
+    #[test]
+    fn escape_near_a_corner_returns_a_wall_tangent_not_a_zero_vector() {
+        use super::ai::escape_direction;
+        // Cornered against the north-east sea wall with the threat deeper in
+        // the corner: the escape must open distance without leaving the map.
+        let position = Vector3::new(690.0, 0.0, 690.0);
+        let threats = [(Vector3::new(685.0, 0.0, 685.0), 10.0)];
+        let dir = escape_direction(
+            position,
+            3.0,
+            &threats,
+            704.0,
+            0.0,
+            |_| false,
+            |_| false,
+        );
+        assert!(dir.length_squared() > 0.9, "escape must never idle at zero");
+        let probe = position + dir * 12.0;
+        assert!(
+            probe.x.abs().max(probe.z.abs()) < 704.0,
+            "escape probe must stay inside the sea wall"
+        );
+        let before = horizontal(position - threats[0].0).length();
+        let after = horizontal(probe - threats[0].0).length();
+        assert!(
+            after > before + 2.0,
+            "escape must open distance from the threat, not just align with it"
+        );
+
+        // A threat pushing the actor straight into the wall: the straight
+        // heading is rejected outright and the escape leaves along the wall.
+        let dir = escape_direction(
+            Vector3::new(690.0, 0.0, 0.0),
+            3.0,
+            &[(Vector3::new(660.0, 0.0, 0.0), 60.0)],
+            704.0,
+            0.0,
+            |_| false,
+            |_| false,
+        );
+        assert!(dir.length_squared() > 0.9);
+        assert!(
+            dir.x < 0.95,
+            "escape must not run straight into the sea wall"
+        );
+        let probe = Vector3::new(690.0, 0.0, 0.0) + dir * 12.0;
+        assert!(probe.x.abs().max(probe.z.abs()) < 704.0);
+
+        // Fully blocked: every probe hits geometry. The scorer still returns a
+        // usable direction (the old narrow-cone retreat returned ZERO and the
+        // AI stood in the corner until it died).
+        let dir = escape_direction(
+            position,
+            3.0,
+            &threats,
+            704.0,
+            0.0,
+            |_| true,
+            |_| false,
+        );
+        assert!(dir.length_squared() > 0.9, "blocked escapes still move");
+
+        // Blacklisted headings lose to their free neighbours.
+        // The best escape here is straight +Z (yaw = PI); blacklisting it must
+        // push the scorer to the neighbouring free rays, not back to the threat.
+        let dir = escape_direction(
+            Vector3::new(0.0, 0.0, 0.0),
+            3.0,
+            &[(Vector3::new(0.0, 0.0, -40.0), 30.0)],
+            704.0,
+            0.0,
+            |_| false,
+            |yaw| (yaw - PI).abs() < 0.55,
+        );
+        let yaw = (-dir.x).atan2(-dir.z);
+        assert!((yaw - PI).abs() > 0.55, "blacklisted headings must lose");
+        assert!(dir.z > 0.0, "escape still drifts away from the threat");
+    }
+
+    #[test]
+    fn combat_memory_expires_by_ttl_and_records_grudges() {
+        use super::ai::CombatMemory;
+        let mut memory = CombatMemory::default();
+        // Sighting memory lives ~6 s then drops out.
+        memory.note_seen(Vector3::new(10.0, 0.0, 10.0));
+        memory.tick(3.0);
+        assert!(memory.last_seen.is_some());
+        memory.tick(3.2);
+        assert!(memory.last_seen.is_none());
+        // A landed hit records both the direction it came from and a grudge
+        // against the attacker that boosts the attack score for 20-30 s.
+        let attacker = InstanceId::from_i64(42);
+        memory.note_hit(Vector3::new(-8.0, 0.0, 2.0), attacker);
+        assert_eq!(memory.hit_from.map(|(at, _)| at), Some(Vector3::new(-8.0, 0.0, 2.0)));
+        assert_eq!(memory.grudge.map(|(id, _)| id), Some(attacker));
+        memory.tick(25.0);
+        assert!(memory.hit_from.is_none(), "hit direction expires quickly");
+        memory.tick(1.0);
+        assert!(
+            memory.grudge.is_none(),
+            "grudges expire inside the 20-30 s band"
+        );
+        // Failed escape headings stay blacklisted for 3-5 s, then free again.
+        memory.note_failed_escape(1.2);
+        assert!(memory.escape_blocked(1.3));
+        assert!(!memory.escape_blocked(-1.5));
+        memory.tick(4.2);
+        assert!(!memory.escape_blocked(1.3), "escape blacklist expires");
+        // Danger zones live 12-15 s and merge when refreshed.
+        memory.note_danger(Vector3::new(5.0, 0.0, 5.0), 12.0);
+        memory.note_danger(Vector3::new(5.4, 0.0, 5.2), 14.0);
+        assert_eq!(memory.danger_zones.len(), 1);
+        memory.tick(13.5);
+        assert!(memory.danger_zones.is_empty(), "danger zones expire");
+    }
+
+    #[test]
+    fn personality_traits_normalize_into_unit_scores() {
+        use super::ai::Personality;
+        let personality = Personality {
+            aggression: 100.0,
+            risk_appetite: 50.0,
+            survival_drive: 0.0,
+            growth_drive: 75.0,
+            vengeance: 12.5,
+            destructiveness: 200.0,
+        };
+        assert_eq!(personality.aggression01(), 1.0);
+        assert_eq!(personality.risk01(), 0.5);
+        assert_eq!(personality.survival01(), 0.0);
+        assert_eq!(personality.growth01(), 0.75);
+        assert_eq!(personality.vengeance01(), 0.125);
+        // Out-of-range traits clamp instead of amplifying scores.
+        assert_eq!(personality.destructiveness01(), 1.0);
+        let zero = Personality {
+            aggression: 0.0,
+            risk_appetite: 0.0,
+            survival_drive: 0.0,
+            growth_drive: 0.0,
+            vengeance: 0.0,
+            destructiveness: 0.0,
+        };
+        assert_eq!(zero.aggression01(), 0.0);
+        assert_eq!(zero.destructiveness01(), 0.0);
+    }
+
+    #[test]
+    fn uphill_ambush_follows_scale_health_and_boldness() {
+        use super::ambush_uphill;
+        // A bold actor (risk 0.9) takes a 1.6:1 fight at 80 % health...
+        assert!(ambush_uphill(1.0, 0.8, 1.6, 1.0, 0.9));
+        // ...while a timid one (risk 0.1) wants near-parity before committing.
+        assert!(!ambush_uphill(1.0, 0.8, 1.6, 1.0, 0.1));
+        // Below roughly a third of the enemy's strength nobody ambushes.
+        assert!(!ambush_uphill(1.0, 0.5, 1.6, 1.0, 0.9));
+        // Nobody ambushes into a fivefold gap...
+        assert!(!ambush_uphill(1.0, 1.0, 5.0, 1.0, 0.9));
+        // ...but a healthy bold actor takes a modest uphill swing.
+        assert!(ambush_uphill(1.0, 1.0, 1.3, 0.6, 0.5));
     }
 
     #[test]

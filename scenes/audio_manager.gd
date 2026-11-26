@@ -47,6 +47,7 @@ const STREAM_PATHS := {
 	&"bedroom_climb": ["res://assets/audio/bedroom_climb.wav"],
 	&"bedroom_mantle": ["res://assets/audio/bedroom_mantle.wav"],
 	&"coin_pickup": ["res://assets/audio/coin_pickup.wav"],
+	&"coin_dwell_tick": ["res://assets/audio/coin_pickup.wav"],
 	&"coin_drop": ["res://assets/audio/coin_drop.wav"],
 	&"growth_surge": ["res://assets/audio/growth_surge.wav"],
 	&"transform_giant": ["res://assets/audio/transform_giant.wav"],
@@ -89,6 +90,7 @@ const COOLDOWNS := {
 	&"bedroom_climb": 0.24,
 	&"bedroom_mantle": 0.16,
 	&"coin_pickup": 0.045,
+	&"coin_dwell_tick": 0.14,
 	&"coin_drop": 0.09,
 	&"growth_surge": 0.22,
 	&"hit_confirm": 0.04,
@@ -509,6 +511,13 @@ func play_coin_pickup(is_player: bool, position: Vector3 = Vector3.ZERO) -> bool
 		var pitch := 1.0 + float(_coin_streak) * 0.04
 		return play_2d(&"coin_pickup", -3.5, pitch, 0.02)
 	return play_3d(&"coin_pickup", position, -12.0, 0.96, 6.0, 48.0, 0.04)
+
+
+## Rising tick while the player's dwell bar fills on a risk-tiered coin.
+## Pitch climbs with the collection progress so the last second feels earned.
+func play_coin_dwell_tick(progress: float) -> bool:
+	var pitch := 0.82 + clampf(progress, 0.0, 1.0) * 0.55
+	return play_2d(&"coin_dwell_tick", -15.0, pitch, 0.06)
 
 
 func play_coin_drop(position: Vector3, height: float = 50.0) -> bool:
