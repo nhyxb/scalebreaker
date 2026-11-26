@@ -61,6 +61,16 @@ godot --headless --path . --import   # 移除 assets/textures/polyhaven/ 亦可
 
 ---
 
+## 2026-11-26 — GitHub 公开仓库：nhyxb/scalebreaker（首次 git 化）
+
+- `git init` + `gh repo create scalebreaker --public --source . --push`：**https://github.com/nhyxb/scalebreaker**（main 分支，初始提交 `4f7f0f2`，本地一次推送完成）。提交身份 `nhyxb <nhyxb@users.noreply.github.com>`（仓库本地配置，不动全局）。
+- **上传内容口径**（回应"排查哪些没必要上传"）：源码全量（`rust/src`、`scenes`、`tests`、`scripts`、`prototypes`、`project.godot`、`export_presets.cfg`、`default_bus_layout.tres`、文档四件）**加 `assets/` 全量**（238M / 732 文件，最大单文件 <40M；Kenney 与 Poly Haven 均 CC0，VRoid 样例已按新许可重打包）。
+- **不上传**（进 `.gitignore`，均已在排除清单验证零泄漏）：`rust/target/`（4.0G）、`build/`（719M，含 APK）、`backups/`（1.8G）、`.godot/`（430M 导入缓存）、`gba_source_20251125.tar.gz`（159M，`*.tar.gz` 通配）、`native/*.so`（桌面 113M + 安卓 6M 二进制，保留 `harbor.gdextension` 清单）、本机工具目录 `.aws/.codex/.agents/.dsh`。
+- 安排查：`export_presets.cfg` 无 keystore 口令（签名配置在 Godot 编辑器本机设置）；源码 secret 扫描（token/key/password 模式）只命中 `coins.gd` 的游戏内"token"变量名，无凭据；`.aws/.codex/.agents` 均为空目录。
+- 推送后 `gh repo view` 确认：PUBLIC、main 已推、origin 指向 github.com/nhyxb/scalebreaker。
+
+---
+
 ## 2026-11-26 — 项目更名为 Scalebreaker（中文名待定）
 
 - 玩家可见名称：`project.godot` 的 `application/config/name`（同时是窗口标题与桌面应用名）、主菜单大标题（`scenes/interface.gd::_menu_title`，原本显示“选择模式”）、首页入口（`HarborEntry` 的标签，原“港区警报”改为“港区模式”）、港区分页标题、`export_presets.cfg` 的 Android `package/name`，全部改为 **Scalebreaker**。
