@@ -1326,6 +1326,23 @@ static func _spawn_historic_building(targets: Node3D, node_name: String, pos: Ve
 	node.set_script(DAMAGEABLE_SCRIPT)
 	node.kind = "building"
 	node.historic_style = style
+	# The same Kenney kits the central twelve wear in scenes/district.tscn, so the outer
+	# wards batch into the real models instead of falling back to HistoricBuildings.unit_mesh()
+	# boxes. `_fit_kit_intact()` still clamps the kit AABB by the `footprint` slot below and
+	# rewrites the runtime footprint, so collision, rubble and routing follow the real model
+	# exactly like the core lots; `batch_spec()` shares the MultiMesh with the central copies.
+	match style:
+		&"dockpress":
+			node.intact_scene = kit("commercial/building-e")
+			node.kit_scale = 6.16
+		&"tidewater":
+			node.intact_scene = kit("commercial/building-m")
+			node.kit_scale = 5.08
+		&"marineworks":
+			node.intact_scene = kit("industrial/building-s")
+			node.kit_scale = 6.55
+		_:
+			push_error("historic style %s has no Kenney kit mapping" % style)
 	node.ruin_floor = ruin_floor
 	node.footprint = footprint
 	node.batched = true

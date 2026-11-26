@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-11-26 — 外围历史街区旧程序化方块楼全部切到 Kenney GLB
+
+备份：`backups/20261126_150831_historic_kenney_kits/{scenes/district_expansion.gd,CHANGELOG.md,MEMORY.md}`（改动前副本）。
+回滚：
+
+```sh
+cp backups/20261126_150831_historic_kenney_kits/scenes/district_expansion.gd scenes/district_expansion.gd
+```
+
+### 一、改动（`scenes/district_expansion.gd::_spawn_historic_building()`）
+
+- 按 `historic_style` 补上与 `scenes/district.tscn` 中央 12 栋完全一致的 `intact_scene` + `kit_scale`：`&"dockpress"` → `commercial/building-e`、`6.16`；`&"tidewater"` → `commercial/building-m`、`5.08`；`&"marineworks"` → `industrial/building-s`、`6.55`（`district.tscn` 的 KenneyDockPress/Tidewater/MarineWorks 同一 GLB 路径）。
+- `historic_style`、`ruin_floor`（高度图废墟层不变）、`footprint` 槽位与 `batched = true` 全部保留；未映射的 style 会 `push_error`（杜绝再静默回退 `HistoricBuildings.unit_mesh()` 旧方块楼）。
+- 几何语义沿既有机制：`damageable.gd::_fit_kit_intact()` 用传入的 footprint 槽位钳制 kit AABB 并把运行时 `footprint` 重写为 kit 实值（碰撞/瓦砾/寻路一致）；`batch_spec()` 键为 GLB 资源路径且不含 `kit_scale`，外围楼与中央同型楼共享同一 MultiMesh，零批次膨胀。
+
+### 二、验证
+
+- 运行时探针（`build/tmp/historic_kit_probe.gd`，headless 实测）：外围历史楼 **154/154 全部带 `intact_scene`**（`without_kit=[]`）；`BATCH_SPECS` 全部键到三个 GLB 路径（building-m 54 / building-e 54 / building-s 46）与中央共批；样本 `DockPressExt_17` 运行时 footprint `(10.1, 5.50, 6.21)`，与中央 DockPress 实值 (10.1×5.5×6.2) 一致；`batched=true`、`historic_style` 保留。
+- 合批账单（`scripts/district_stats.gd`，同口径前后对比）：近层 `building/Near_` 由 50 → 48 批次节点（`historic/dockpress`、`historic/tidewater` 两个专属近层键消失、并入 building-e/building-m kit 键），近层 tris 326,407 → 373,871（kit 细节替换单方块细节，仅 +14.5%）；远层与代理层不变。
+- 回归：`cargo build/test` **40/40**；8 套 Godot headless **673 项全绿**（playtest 214 / growth 192 / brawl 43 / mode_menu 45 / touch 42 / audio 36 / sit_crush_gameplay 44 / sit_crush 57）；启动校验 `--quit-after 5` 零错误（无 missing Kenney、无未映射 style 报错）。
+- 同前一轮收口：真核显旋转帧率按用户指示**跳过、未测（不估算）**；沙盘悬浮修复经用户目视验收「画面正常」。
+
+---
+
 ## 2026-11-26 — 修复实机录屏「沙盘悬空/不在桌子上」投影错位：卧室背景 TextureRect 溢出、相机属性同步、变化驱动刷新与接触影增强
 
 备份：`backups/20261126_140922_skybox_float_fix/{scenes/{harbor_skybox.gd,skybox_bedroom.gd},tests/playtest.gd,CHANGELOG.md,MEMORY.md}`（改动前副本）。
@@ -41,8 +65,10 @@ cp backups/20261126_140922_skybox_float_fix/tests/playtest.gd tests/playtest.gd
   - **06 卧室直出（1:1 桌面近景）**：VLM 判读「无托盘本体、桌心一块柔边深棕矩形」——与场景结构吻合：卧室世界**只含家具+接触影贴片**（城市/木框在主世界不进此渲染），该「深 1–2 档、柔边、居中」矩形即 0.42 的 `SandboxContactShadow`（0.18 时代同贴片在 979×551 图判读为「似有似无」，现为清晰可辨的落地压暗）——**接触影增强验收通过**。
   - **01 东墙仰视**：下缘框沿不可见系沙盘内低仰角的正常构图（近缘在视锥外）；VLM 对地标方位的「疑点」经机位几何复核（实际朝 +X 正东、仰 24°、北窗在 45° 侧向不入画）判定为提问措辞预设误差，非画面异常——**无实锤待修项**。
   - 如实声明：VLM 对像素级小目标存在判读波动（同图两次成对判读中框脚位置读数不一），**最终目视验收以用户在呈现图像上的确认为准**；发现异常随时按 skill 列待修。
+  - **用户验收（2026-11-26）：「画面正常」——全部呈现截图目视验收通过，本条目视觉核验收口。**
 - 动态旋转帧率（真核显）按项目显示规范须由**用户在真实桌面**运行（llvmpipe 下长基准被禁止、数据无意义）：`build/tmp/rotation_bench.gd` 已备好（`ab_probe` 同口径：420 帧预热 + 60 帧采样、vsync 关；1280×720 与 1920×1080 两窗口 ABBA 交叉；headless 冒烟 8 段通过）。命令：
   `MESA_LOADER_DRIVER_OVERRIDE=radeonsi timeout 300 godot --path . --resolution 1916x1077 --script res://build/tmp/rotation_bench.gd`
+- **用户裁决（2026-11-26）：跳过旋转帧率测试——该项标记「未测（按用户指示跳过，禁止估算）」；`build/tmp/rotation_bench.gd` 与命令保留，日后可随时实机复测。**
 - 顺带勘误 MEMORY：`ab_probe.gd` 为 60 帧采样（非 60 秒）。
 
 ---
