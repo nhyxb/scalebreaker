@@ -2372,7 +2372,10 @@ impl HarborRound {
                     .max((height * 0.005).min(3.0))
             } else {
                 // Near plane scales with the arm so a 500 m pull-back never clips the world.
-                (length * 0.005).clamp(0.09, 5.0)
+                // 0.018 (was 0.005) pulls the plane 4-5x closer to the body: the 24-bit
+                // depth buffer keeps the 1,418 m lot pads and the sunken ground plate apart
+                // at grazing angles, and near stays far below the camera-to-body distance.
+                (length * 0.018).clamp(0.09, 8.0)
             });
         }
         if changed {
@@ -2399,7 +2402,8 @@ impl HarborRound {
         if let Some(camera) = &mut self.camera {
             if !self.first_person {
                 camera.set_position(Vector3::BACK * length);
-                camera.set_near((length * 0.005).clamp(0.09, 5.0));
+                // Mirrors the giant-scale near plane (see update_giant_camera_scale).
+                camera.set_near((length * 0.018).clamp(0.09, 8.0));
             }
         }
     }

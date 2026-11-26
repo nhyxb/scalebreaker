@@ -4,6 +4,35 @@
 
 ---
 
+## 2026-11-26 — 修复地块垫板与大底板 Z-fighting 闪烁：视觉底板下沉 7 cm + 16×16 细分 + 大巨人近裁剪面提升 ~3.6×
+
+备份：`backups/20261126_152552_zfight_ground_near/{scenes/{district.tscn,district.gd,district_expansion.gd},rust/round.rs,CHANGELOG.md,MEMORY.md}`（改动前副本）。
+回滚：
+
+```sh
+cp backups/20261126_152552_zfight_ground_near/scenes/district.tscn scenes/district.tscn
+cp backups/20261126_152552_zfight_ground_near/rust/round.rs rust/src/round.rs
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+```
+
+### 一、视觉底板与物理分离（`scenes/district.tscn`，物理零改动）
+
+- `Ground/Surface` 相对 `Ground` 下移 `position = (0, -0.07, 0)`：顶面 `y = 0.000 → -0.070`，与 Lots 顶面（+0.01）/ Roads 顶面（+0.017）拉开 **8.0 / 8.7 cm**；`Ground/Collision` 原位不动，物理地面严格保持 `y = 0.000`，角色与金币接触高度不变。
+- `GroundMesh` 增加 `subdivide_width = 16 / subdivide_depth = 16`：消除 1,418 m 单一大三角形的深度插值误差；`district.gd::_resize_land()` 经 `mesh.duplicate()` 保留细分字段，任意 `map_side` 一致生效。
+- 垫板复核（不悬空露缝）：tscn `Lot1–4` 中心 `y=-0.06`、厚 0.14 → span `-0.13..+0.01`；expansion `_add_lot_pad` 中心 `-0.055` → span `-0.125..+0.015`——底面均深埋 `-0.070` 视觉底板之下；`SandboxFrame` 内沿 rails 覆盖 `y ∈ [-base_depth(-32 m), +lip_h(≈+7.8 m)]`，`-0.07` 平面深藏框体覆盖范围，内沿不露缝。`micro_ground` 的 `surface.position.y = -0.012` 覆盖分支为**死路径**（全仓库无任何赋值点，恒 false），不构成覆盖风险。
+
+### 二、大巨人近裁剪面（`rust/src/round.rs`，两处）
+
+- `update_giant_camera_scale` 与 `sync_camera_arm` 的非第一人称分支：`(length * 0.005).clamp(0.09, 5.0)` → **`(length * 0.018).clamp(0.09, 8.0)`**——24-bit 深度缓冲对 1,418 m 级底板/垫板的区分精度提升 ~3.6×，且 near 仍远小于相机到角色距离，不裁切角色；第一人称分支（0.001–3.0 小 near）与微缩/全景 orbit 相机（0.002–0.09）保持原值不动。
+
+### 三、验证
+
+- headless 数值探针（`build/tmp/zfight_probe.gd`）：`surface_top=-0.070`、`collision_top=+0.000`、细分 `16×16`、`lot1_top=+0.010`、间距 `0.080/0.087`；near 实测 **500 m → 8.000**（650×0.018=11.7 → clamp 8.0）、**100 m → 2.340**、**15 m → 0.351**（与期望逐位吻合），第一人称 500 m 保持 **2.5000**，切回第三人称恢复 **8.000**。附带记录：`debug_resize_giant` 静态改身高不触发相机重设（既有测试姿态行为）；真实成长/缩放路径由 `set_camera_view`/zoom 驱动，与 growth 测试同款驱动已被探针证实。
+- `cargo build --locked` 零警告、`cargo test --locked` **40/40**；8 套 Godot headless 回归 **673 项全绿**（playtest 214 / growth 192 / brawl 43 / mode_menu 45 / touch 42 / audio 36 / sit_crush_gameplay 44 / sit_crush 57），含「Third person keeps … a zoom-scaled near plane」与第一人称裁剪面断言原样通过。
+- 视觉层最终效果属真机掠射目视范畴；按既有约定（用户真核显复测/录屏由用户掌握），本轮未做截图，全参数由探针直接证实。
+
+---
+
 ## 2026-11-26 — 外围历史街区旧程序化方块楼全部切到 Kenney GLB
 
 备份：`backups/20261126_150831_historic_kenney_kits/{scenes/district_expansion.gd,CHANGELOG.md,MEMORY.md}`（改动前副本）。
