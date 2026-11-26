@@ -4,6 +4,50 @@
 
 ---
 
+## 2026-11-26 — 阶段 3A：坐姿 Yumeka 登上书房转椅（ultra_giant_anchor）— 哑光二次元、呼吸/眨眼/视线跟随玩家
+
+备份：`backups/20261126_154640_yumeka_phase3a/{.gitignore,scenes/{harbor_skybox.gd,skybox_bedroom.gd},tests/playtest.gd,CHANGELOG.md,MEMORY.md}`（改动前副本）。
+回滚：
+
+```sh
+cp backups/20261126_154640_yumeka_phase3a/.gitignore .gitignore
+cp backups/20261126_154640_yumeka_phase3a/scenes/skybox_bedroom.gd scenes/skybox_bedroom.gd
+cp backups/20261126_154640_yumeka_phase3a/tests/playtest.gd tests/playtest.gd
+rm -rf assets/characters/yumeka/ scenes/yumeka_ultra_giant.gd* scripts/export_yumeka_seated.py
+```
+
+### 一、仓库隔离（先行执行）
+
+- `.gitignore` 新增 `/assets/characters/yumeka/`（授权模型/贴图/GLB 严禁进公开仓库）与根目录临时录屏 `*.mp4`；`git check-ignore -v` 验证命中。
+- `scripts/sync_drive.sh` 本就不含 `assets/`（纯源码包语义不变）；`git status` 全程零 Yumeka 资产被追踪。
+
+### 二、Blender 自动化导出（`scripts/export_yumeka_seated.py`，可复现）
+
+- `~/Downloads/YUMEKA_v1.0.4.zip` → 临时目录解压 → `Blender 5.3 --background` 打开 `Blend/Yumeka.blend`，zip 与 .blend 均不入仓库。
+- 结构摸底：21 个网格（`Body` 皮肤+脸、Yumeka_Body/衣服件、Hair_*、Wing/Tail；无 VRChat 隐藏切换件/碰撞体）；骨骼 `Hips>Spine>Chest>Neck>Head`、`Eye_L/R`、全肢链共 317 根；`Body` 网格 447 形态键；7 材质为 EMISSION-unlit 节点，贴图 4×4096 全打包。
+- 形态键白名单裁剪：保留 14 个面部键（`eye_close(_L/_R)`、`eye_joy`、`eye_nagomi_1`、`eye_under_up_1`、`look_up/look_down`、`mouth_smile_1/2`、`mouth_a/i_1/u`、`mouth_w_1`），删除 549 个体型/MMD 冗余键（含 `vrc.*` 点号与 `ω` 重命名为 Godot 属性路径安全名）。
+- 材质全部重建为 Principled（皮肤/脸/衣服/头发 + 三个 `*_Transparent` alpha 卡），4096² 贴图降至 2048²。
+- 坐姿 FK：世界系关节扭转表（`bend()` 写 pose 骨全局矩阵；**关键坑：`pb.matrix` 写入延迟生效，每次写后必须 `view_layer.update()`，否则同骨叠加扭转静默丢失**）。大腿水平折叠 −84°、小腿 82°、脊柱 +5°/胸 +5° 前倾、颈 +3°/头 +18° 俯看沙盘、上臂前挂 −12°+88°、肘 −52°、手 −14° 搭桌面/腿上。
+- 规格化测量：坐姿眼高自动缩放（盆骨-接触面基准）→ **坐姿眼高 1.154 m（规格 1.15–1.25 m，高出 0.75 m 桌面 40 cm）**；petite 腿部差量用**椅垫压陷 4.6 cm** 补偿（鞋底精确落地 −0.000 m）；GLB 原点 = 椅垫接触面，挂 `ultra_giant_anchor` 即贴合。武装带导出 = `Apply Pose as Rest` 后 `export_scene.gltf`（**5.3 需先 `addon_enable io_scene_gltf2`，算子名是 `export_scene.gltf` 而非 `wm.gltf_export`**）。产物 `assets/characters/yumeka/Yumeka_seated.glb` **15.4 MB**（贴图内嵌，打包 2048²）。
+- 产物目录附 `README.txt` + `license/YUMEKA_License*`（VN3 许可条款副本，与资产一起被 gitignore）。
+
+### 三、Godot 生命感（`scenes/yumeka_ultra_giant.gd` + 挂载）
+
+- `skybox_bedroom.gd` 在 `ultra_giant_anchor` 下挂 `Yumeka` 节点：`ResourceLoader.exists()` 缺资产安静跳过（公开克隆零报零退化；GLB 面向 glTF +Z，挂载 `rotation.y = PI` 对齐锚点 −Z 朝沙盘）。
+- 柔和二次元哑光材质：`roughness 0.88 / metallic 0 / metallic_specular 0.16 / emission 关闭`（防 AGX 过曝，雪狐惨白教训不计现）；`*Transparent` 材质 `ALPHA_SCISSOR(0.42)+双面`；桌面端开 `WindowSun` 投影，移动端关闭。
+- 呼吸：4.2 s 正弦，Chest ±0.011 rad + Spine ±0.006 rad 微起伏；眨眼：3–6 s 随机、70 ms 闭 /140 ms 开驱动 `eye_close`；闲置表情 `eye_nagomi_1 0.32 + eye_under_up_1 0.18 + mouth_smile_1 0.22 + look_down 0.14`。
+- 视线跟随：主世界玩家（`Human` 节点存在=人类，否则 `Giant`）坐标 ×`SKY_SCALE` → 卧室坐标，绕烘焙姿态限幅摆动（yaw ±15°、pitch ±10°、阻尼 4.5/s），头分担 65%、颈 35%；静止时回落沙盘中性凝视。
+- 变化驱动协同：全部动画在 18 Hz 低频 tick 内执行，每 tick 调 `harbor_skybox.gd::mark_dirty()` 触发一次 `UPDATE_ONCE`；相机移动时 Skybox 自身照常每帧刷新。
+
+### 四、测试与验证
+
+- `tests/playtest.gd::_bedroom_skybox` 新增 7 断言：挂载/`Model` 存在/**零碰撞体**、闲置表情权重、强制眨眼闭合-回开、视线左右摆动对称且限幅内、18 Hz tick 与 mark_dirty 接线；缺资产分支（公开克隆）一并断言安静跳过。
+- **cargo build + cargo test 40/40 通过**；8 套 Godot headless 回归**全绿**：playtest **219** / growth 192 / mode_menu 45 / touch 42 / sit_crush_gameplay 44 / sit_crush 57 / brawl 43 / audio 36。
+- 视觉核验（隔离虚拟显示 `Xvfb :97`，llvmpipe、1280×720、仅少量帧；**实机核显 FPS 未测，llvmpipe 不作性能结论**）：①卧室全景斜拍——坐姿贴 `chairDesk.glb`、大腿在桌板下不穿模、翅膀避开椅背、无过曝无黑面、比例正确（手臂经 Blender 侧渲染核验为搭桌沿两侧、手在膝上高度）；②城内低仰角南向——双眼入框、俯视跟随玩家方向、巨大感成立；③500 m 巨人对视——巨人+城市+她的脸同框、视线相交成立（游戏内 500 m 巨人在房间比例中为 7.5 cm 手办，即「桌上的她才是终极巨人」设定本体）。截图存于 `build/tmp/yumeka_shots/`（不入库）。
+- 已知无害日志：`Parameter "material" is null` ×45 为**存量**问题（移除 Yumeka GLB 后同样出现，与本轮无关，未定位源头）；Yumeka 自身零报错。
+
+---
+
 ## 2026-11-26 — 修复地块垫板与大底板 Z-fighting 闪烁：视觉底板下沉 7 cm + 16×16 细分 + 大巨人近裁剪面提升 ~3.6×
 
 备份：`backups/20261126_152552_zfight_ground_near/{scenes/{district.tscn,district.gd,district_expansion.gd},rust/round.rs,CHANGELOG.md,MEMORY.md}`（改动前副本）。

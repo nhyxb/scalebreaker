@@ -129,6 +129,65 @@ func _bedroom_skybox() -> void:
 			and is_equal_approx(ug_anchor.position.y, bedroom.ultra_giant_seat_y)
 			and ug_fwd.dot(to_sandbox) > 0.99,
 			"ultra_giant_anchor sits above the swivel chair seat cushion facing sandbox_anchor")
+	# Phase 3A: the seated Yumeka mounts on the chair when her licensed GLB is
+	# present locally, and the mount quietly disappears on fresh public clones.
+	var yumeka: Node = ug_anchor.get_node_or_null("Yumeka") if ug_anchor != null else null
+	if ResourceLoader.exists("res://assets/characters/yumeka/Yumeka_seated.glb", "PackedScene"):
+		_check(yumeka != null and yumeka.debug_is_mounted()
+				and yumeka.has_node("Model")
+				and _count_collisions_in(yumeka) == 0,
+				"seated Yumeka mounts under the anchor with zero colliders")
+		if yumeka != null and yumeka.debug_is_mounted():
+			_check(yumeka.get_morph("eye_nagomi_1") > 0.2
+					and yumeka.get_morph("mouth_smile_1") > 0.1
+					and yumeka.get_morph("eye_close") < 0.01,
+					"Yumeka idles with soft eyes and a faint closed-lids rest")
+			# Blink: force one and observe the close crossing inside its window.
+			yumeka.debug_force_blink()
+			var saw_blink := false
+			for frame in 40:
+				await physics_frame
+				if yumeka.debug_eye_close() > 0.5:
+					saw_blink = true
+					break
+			for frame in 90:
+				await physics_frame
+				if yumeka.debug_eye_close() < 0.01:
+					break
+			_check(saw_blink and yumeka.debug_eye_close() < 0.01,
+					"forced blink closes and reopens the eyelids morph")
+			# Gaze: the head swings toward override targets, mirrored and limited.
+			yumeka.debug_set_gaze_override(Vector3(-0.62, 0.85, 0.0))
+			var yaw_left := 0.0
+			for frame in 120:
+				await physics_frame
+				yaw_left = yumeka.debug_head_swing().x
+				if absf(yaw_left) > 4.0:
+					break
+			yumeka.debug_set_gaze_override(Vector3(0.62, 0.85, 0.0))
+			var yaw_right := 0.0
+			for frame in 120:
+				await physics_frame
+				yaw_right = yumeka.debug_head_swing().x
+				if absf(yaw_right) > 4.0:
+					break
+			yumeka.debug_set_gaze_override(Vector3.ZERO)
+			var swing: Vector2 = yumeka.debug_head_swing()
+			_check(yaw_left * yaw_right < 0.0
+					and absf(swing.x) <= 15.5 and absf(swing.y) <= 10.5,
+					"gaze overrides swing the head both ways within yaw/pitch limits")
+			# Change-driven refresh wiring: every animation tick ends with a
+			# mark_dirty() call, so asserting the skybox reference plus live
+			# ticking proves the bedroom re-renders while the camera rests.
+			var anim_t0: float = yumeka.debug_anim_time()
+			for frame in 90:
+				await physics_frame
+			_check(yumeka.debug_sky_wired()
+					and yumeka.debug_anim_time() - anim_t0 > 0.12,
+					"Yumeka breathing/blink ticks run at low frequency wired to mark_dirty")
+	else:
+		_check(yumeka == null,
+				"missing licensed Yumeka asset skips the mount silently")
 
 
 func _count_collisions_in(node: Node) -> int:

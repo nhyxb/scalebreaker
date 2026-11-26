@@ -4,10 +4,13 @@ extends Node3D
 ## (assets/kenney/furniture/, visual-only, zero physics collision), an airtight CSG room
 ## shell with baseboards and a recessed sunlit two-pane window, a 21.27 cm desktop harbour
 ## sandbox centred at (0, DESK_TOP, 0), and an exported `ultra_giant_anchor` above the swivel
-## chair cushion ready for Phase 3 seated anime Yumeka.
+## chair cushion where the Phase 3 seated anime Yumeka (scenes/yumeka_ultra_giant.gd)
+## quietly mounts when her licensed GLB is present locally.
 
 const FLOOR_WOOD_DIFF := "res://assets/textures/polyhaven/floor_wood_diff.jpg"
 const FURNITURE_DIR := "res://assets/kenney/furniture/"
+const YUMEKA_GLB := "res://assets/characters/yumeka/Yumeka_seated.glb"
+const YumekaSeated := preload("res://scenes/yumeka_ultra_giant.gd")
 ## 1 m of harbour ↔ 0.15 mm of bedroom (1:6667). Kept in one place with the skybox sync.
 const SKY_SCALE := 1.0 / 6666.67
 ## Inner tray side for the default 1418 m harbour, in metres.
@@ -388,6 +391,15 @@ func _build_furniture() -> void:
 		Vector3(sandbox_anchor.position.x, ultra_giant_seat_y, sandbox_anchor.position.z),
 		Vector3.UP,
 	)
+
+	# Phase 3A: mount the seated Yumeka on the swivel chair. The model GLB is a
+	# licensed asset kept out of the public repo (gitignored); on fresh public
+	# clones ResourceLoader.exists() fails, mounting quietly skips, and nothing
+	# downstream changes - no errors, no placeholder, regressions stay green.
+	if ResourceLoader.exists(YUMEKA_GLB, "PackedScene"):
+		var seated: Node3D = YumekaSeated.new()
+		seated.name = "Yumeka"
+		ultra_giant_anchor.add_child(seated)
 
 	# --- 2. Desktop landmarks pulled 15-26 cm clear of the 21.27 cm sandbox ---
 	# Left flank (monitor shifted well left so the sunlit north window stays open behind the city).

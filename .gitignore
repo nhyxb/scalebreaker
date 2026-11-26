@@ -16,3 +16,7 @@ __pycache__/
 /.wtest
 .DS_Store
 .dsh-vision-router/
+# Yumeka model/textures are licensed assets: never push to the public repo.
+/assets/characters/yumeka/
+# Casual local screen recordings.
+*.mp4
