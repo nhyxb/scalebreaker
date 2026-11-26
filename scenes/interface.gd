@@ -154,9 +154,11 @@ var _display_draft: Dictionary = {}
 var _audio_draft: Dictionary = {}
 var _settings_fields: Dictionary[String, SpinBox] = {}
 var _settings_flags: Dictionary[String, CheckButton] = {}
+var _settings_choices: Dictionary[String, OptionButton] = {}
 var _settings_tabs: Array[Button] = []
 var _settings_respawn: CheckButton
 var _settings_audio_muted: CheckButton
+var _saved_time_of_day := "day"
 var _growth_settings_rows: Control
 var _settings_scroll: ScrollContainer
 var _settings_center: CenterContainer
@@ -1696,8 +1698,11 @@ func _build_settings_option(host: VBoxContainer, option: Dictionary) -> void:
 	)
 	row.add_child(hint_button)
 	row.add_child(_settings_badge(String(option.get("apply", SettingsSchema.APPLY_LIVE))))
-	if String(option.get("kind", "number")) == "toggle":
+	var kind: String = String(option.get("kind", "number"))
+	if kind == "toggle":
 		_add_setting_toggle(row, option)
+	elif kind == "choice":
+		_add_choice_setting(row, option)
 	else:
 		_add_number_setting(row, option)
 	var hint := _label(String(option.get("hint", "")), 13, WARM_GRAY, _font_regular)
@@ -1776,6 +1781,66 @@ func _add_setting_toggle(row: HBoxContainer, option: Dictionary) -> void:
 		_settings_audio_muted = button
 
 
+func _add_choice_setting(row: HBoxContainer, option: Dictionary) -> void:
+	var key: String = String(option["key"])
+	var select := OptionButton.new()
+	select.name = SettingsSchema.node_name(option)
+	select.custom_minimum_size = Vector2(188, 50) if _touch_enabled else Vector2(168, 34)
+	select.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	select.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	select.add_theme_font_override("font", _font_medium)
+	select.add_theme_font_size_override("font_size", 15 if _touch_enabled else 14)
+	select.add_theme_color_override("font_color", PAPER)
+	select.add_theme_color_override("font_hover_color", HOT_WHITE)
+	select.add_theme_color_override("font_pressed_color", HOT_WHITE)
+	select.add_theme_stylebox_override("normal", _settings_style(IRON, SLATE))
+	select.add_theme_stylebox_override("hover", _settings_style(SLATE, WARM_GRAY))
+	select.add_theme_stylebox_override("pressed", _settings_style(IRON, CRANE_AMBER))
+	select.add_theme_stylebox_override("focus", _settings_style(IRON, CRANE_AMBER))
+	var choices: Array = option.get("choices", [])
+	for idx in choices.size():
+		var item: Dictionary = choices[idx]
+		select.add_item(String(item.get("label", item.get("value", ""))), idx)
+		select.set_item_metadata(idx, String(item.get("value", "")))
+	select.item_selected.connect(func(_index: int):
+		_play_ui(&"ui_click")
+		if key == "time_of_day":
+			_preview_time_of_day()
+	)
+	row.add_child(select)
+	_settings_choices[key] = select
+
+
+func _choice_value(key: String, fallback: String) -> String:
+	if not _settings_choices.has(key):
+		return fallback
+	var select: OptionButton = _settings_choices[key]
+	if select.selected < 0 or select.selected >= select.item_count:
+		return fallback
+	var meta: Variant = select.get_item_metadata(select.selected)
+	return String(meta) if meta != null else fallback
+
+
+func _set_choice_value(key: String, value: String) -> void:
+	if not _settings_choices.has(key):
+		return
+	var select: OptionButton = _settings_choices[key]
+	for idx in select.item_count:
+		if String(select.get_item_metadata(idx)) == value:
+			select.select(idx)
+			return
+	if select.item_count > 0:
+		select.select(0)
+
+
+func _preview_time_of_day() -> void:
+	if _game == null or _settings_panel == null or not _settings_panel.visible:
+		return
+	var dn: Node = _game.get_node_or_null("DayNight")
+	if dn != null and dn.has_method(&"set_mode"):
+		dn.call(&"set_mode", _choice_value("time_of_day", "day"))
+
+
 func _add_number_setting(row: HBoxContainer, option: Dictionary) -> void:
 	var key: String = String(option["key"])
 	var integer: bool = bool(option.get("integer", false))
@@ -1849,10 +1914,12 @@ func _open_settings(opener: Control) -> void:
 	_settings_mode = GROWTH_MODE if _screen == "menu" and _menu_page == MenuPage.GROWTH else _mode
 	var source: Dictionary = _settings_drafts[_settings_mode]
 	var defaults: Dictionary = _game.call("default_mode_settings", _settings_mode)
+	_saved_time_of_day = String(source.get("time_of_day", defaults.get("time_of_day", "day")))
 	_display_draft = {
 		"view_distance": float(source.get("view_distance", defaults.get("view_distance", 300.0))),
 		"shake_strength": float(source.get("shake_strength", defaults.get("shake_strength", 1.0))),
 		"own_camera_shake": bool(source.get("own_camera_shake", true)),
+		"time_of_day": _saved_time_of_day,
 	}
 	_settings_page = SettingsSchema.PAGE_GAMEPLAY
 	_show_settings_page(_settings_page)
@@ -1877,6 +1944,10 @@ func dismiss_settings(play_back := false) -> bool:
 		if audio != null:
 			audio.call("apply_audio_settings", float(_saved_audio_settings.sfx_volume),
 					float(_saved_audio_settings.ambience_volume), bool(_saved_audio_settings.audio_muted))
+		if _game != null:
+			var dn: Node = _game.get_node_or_null("DayNight")
+			if dn != null and dn.has_method(&"set_mode"):
+				dn.call(&"set_mode", _saved_time_of_day)
 	_settings_panel.hide()
 	if _touch_enabled and DisplayServer.has_feature(DisplayServer.FEATURE_VIRTUAL_KEYBOARD):
 		DisplayServer.virtual_keyboard_hide()
@@ -2050,6 +2121,8 @@ func _load_display_fields(values: Dictionary) -> void:
 		var enabled: bool = bool(values["own_camera_shake"])
 		_settings_flags["own_camera_shake"].set_pressed_no_signal(enabled)
 		_settings_flags["own_camera_shake"].text = "开启" if enabled else "关闭"
+	if _settings_choices.has("time_of_day") and values.has("time_of_day"):
+		_set_choice_value("time_of_day", String(values["time_of_day"]))
 	_refresh_settings_visibility()
 
 
@@ -2129,6 +2202,7 @@ func _capture_display_fields() -> Dictionary:
 		"view_distance": _settings_fields["view_distance"].value,
 		"shake_strength": _settings_fields["shake_strength"].value / 100.0,
 		"own_camera_shake": _settings_flags["own_camera_shake"].button_pressed,
+		"time_of_day": _choice_value("time_of_day", "day"),
 	}
 
 
@@ -2161,6 +2235,7 @@ func _reset_settings_page() -> void:
 		_load_audio_fields(_audio_draft)
 		_load_display_fields(_display_draft)
 		_preview_audio_settings()
+		_preview_time_of_day()
 		return
 	_settings_drafts[_settings_mode] = _game.call("default_mode_settings", _settings_mode)
 	_load_settings_fields(_settings_drafts[_settings_mode])
@@ -2172,6 +2247,7 @@ func _default_display_settings() -> Dictionary:
 		"view_distance": float(defaults.get("view_distance", 300.0)),
 		"shake_strength": float(defaults.get("shake_strength", 1.0)),
 		"own_camera_shake": bool(defaults.get("own_camera_shake", true)),
+		"time_of_day": String(defaults.get("time_of_day", "day")),
 	}
 
 

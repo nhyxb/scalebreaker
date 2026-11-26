@@ -8,6 +8,36 @@ const DEFAULT_MAP_SIDE: i32 = 1418;
 const DEFAULT_SFX_VOLUME: f32 = 0.85;
 const DEFAULT_AMBIENCE_VOLUME: f32 = 0.60;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimeOfDay {
+    Auto,
+    #[default]
+    Day,
+    Dusk,
+    Night,
+}
+
+impl TimeOfDay {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Day => "day",
+            Self::Dusk => "dusk",
+            Self::Night => "night",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "day" => Some(Self::Day),
+            "dusk" => Some(Self::Dusk),
+            "night" => Some(Self::Night),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AudioSettings {
     pub sfx_volume: f32,
@@ -195,6 +225,7 @@ pub struct GameSettings {
     pub view_distance: f32,
     pub shake_strength: f32,
     pub own_camera_shake: bool,
+    pub time_of_day: TimeOfDay,
     /// First person: turning the view also turns the giant's shoulders (bounded by the
     /// ±75° head cone). Off keeps the head free while the body only turns to walk.
     pub first_person_steer: bool,
@@ -224,6 +255,7 @@ impl Default for GameSettings {
             },
             shake_strength: 1.0,
             own_camera_shake: true,
+            time_of_day: TimeOfDay::default(),
             first_person_steer: true,
             growth: GrowthSettings::default(),
             brawl: BrawlSettings::default(),
@@ -271,6 +303,17 @@ impl GameSettings {
                 .unwrap_or(fallback)
         };
         let mut invalid = None;
+        let time_of_day = match values.get("time_of_day") {
+            None => default.time_of_day,
+            Some(value) => value
+                .try_to::<GString>()
+                .ok()
+                .and_then(|raw| TimeOfDay::parse(&raw.to_string()))
+                .unwrap_or_else(|| {
+                    invalid.get_or_insert("time_of_day");
+                    default.time_of_day
+                }),
+        };
         let mut read = |key: &'static str, fallback: f64, valid: fn(f64) -> bool| {
             let Some(value) = values.get(key) else {
                 return fallback;
@@ -312,6 +355,7 @@ impl GameSettings {
             shake_strength: read("shake_strength", default.shake_strength.into(), nonnegative)
                 as f32,
             own_camera_shake: flag("own_camera_shake", default.own_camera_shake),
+            time_of_day,
             first_person_steer: flag("first_person_steer", default.first_person_steer),
             growth: GrowthSettings {
                 random_start: mode.has_growth() && flag("random_start", growth.random_start),
@@ -402,6 +446,7 @@ impl GameSettings {
         values.set("shake_strength", setting_value(self.shake_strength));
         // Display options are set once and mirrored into every mode profile.
         values.set("own_camera_shake", self.own_camera_shake);
+        values.set("time_of_day", self.time_of_day.as_str());
         values.set("first_person_steer", self.first_person_steer);
         if mode.has_growth() {
             values.set("random_start", self.growth.random_start);
@@ -603,5 +648,23 @@ mod tests {
         assert!(nonnegative(1.5));
         assert!(!nonnegative(-0.01));
         assert!(!nonnegative(f64::NAN));
+    }
+
+    #[test]
+    fn time_of_day_defaults_and_parser() {
+        assert_eq!(GameSettings::default().time_of_day, TimeOfDay::Day);
+        for mode in Mode::ALL {
+            assert_eq!(GameSettings::for_mode(mode).time_of_day, TimeOfDay::Day);
+        }
+        assert_eq!(TimeOfDay::parse("auto"), Some(TimeOfDay::Auto));
+        assert_eq!(TimeOfDay::parse("DAY"), Some(TimeOfDay::Day));
+        assert_eq!(TimeOfDay::parse(" dusk "), Some(TimeOfDay::Dusk));
+        assert_eq!(TimeOfDay::parse("night"), Some(TimeOfDay::Night));
+        assert_eq!(TimeOfDay::parse("midnight"), None);
+        assert_eq!(TimeOfDay::parse(""), None);
+        assert_eq!(TimeOfDay::Auto.as_str(), "auto");
+        assert_eq!(TimeOfDay::Day.as_str(), "day");
+        assert_eq!(TimeOfDay::Dusk.as_str(), "dusk");
+        assert_eq!(TimeOfDay::Night.as_str(), "night");
     }
 }

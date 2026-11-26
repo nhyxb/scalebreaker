@@ -24,6 +24,7 @@ extends RefCounted
 ## `Scenery` are still culled by `render_chunk()`.
 
 const DAMAGEABLE_SCRIPT := preload("res://scenes/damageable.gd")
+const CityNightLights := preload("res://scenes/city_night_lights.gd")
 
 const ROAD_STRAIGHT := preload("res://assets/district/roads/RoadStraight.glb")
 const ROAD_CROSS := preload("res://assets/district/roads/RoadCross.glb")
@@ -1419,8 +1420,18 @@ static func _build_lamp_multimesh(scenery: Node3D, transforms: Array[Transform3D
 			curved.append(scaled)
 		else:
 			square.append(scaled)
-	_batch_kit(scenery, STREET_LIGHTS[0], curved)
-	_batch_kit(scenery, STREET_LIGHTS[1], square)
+	for pair in [[STREET_LIGHTS[0], curved], [STREET_LIGHTS[1], square]]:
+		var spec: String = pair[0]
+		var poses: Array[Transform3D] = pair[1]
+		if poses.is_empty():
+			continue
+		var mesh := _kit_merged_mesh(spec)
+		if mesh == null:
+			continue
+		_batch_mesh(scenery, mesh, poses, spec)
+		var node := scenery.get_child(scenery.get_child_count() - 1) as MultiMeshInstance3D
+		if node != null and mesh.get_surface_count() > 0:
+			node.material_override = CityNightLights.streetlamp_material(mesh.surface_get_material(0))
 
 
 static func _build_car_multimesh(scenery: Node3D, cars: Dictionary[String, Array]) -> void:

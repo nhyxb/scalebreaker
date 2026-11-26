@@ -4,13 +4,14 @@
 
 [ext_resource type="PackedScene" path="res://scenes/round.tscn" id="Round"]
 [ext_resource type="Script" path="res://scenes/harbor_skybox.gd" id="Skybox"]
+[ext_resource type="Script" path="res://scenes/day_night_cycle.gd" id="DayNight"]
 [ext_resource type="Script" path="res://scenes/interface.gd" id="UI"]
 
 [sub_resource type="ProceduralSkyMaterial" id="SkyMaterial"]
-sky_top_color = Color(0.56, 0.72, 0.85, 1)
-sky_horizon_color = Color(0.88, 0.86, 0.82, 1)
-ground_bottom_color = Color(0.84, 0.82, 0.78, 1)
-ground_horizon_color = Color(0.88, 0.86, 0.82, 1)
+sky_top_color = Color(0.4, 0.65, 0.92, 1)
+sky_horizon_color = Color(0.86, 0.89, 0.92, 1)
+ground_bottom_color = Color(0.46, 0.44, 0.4, 1)
+ground_horizon_color = Color(0.76, 0.74, 0.69, 1)
 sun_angle_max = 12.0
 sun_curve = 0.15
 
@@ -22,12 +23,14 @@ resource_local_to_scene = true
 background_mode = 3
 sky = SubResource("Sky")
 ambient_light_source = 3
-ambient_light_color = Color(0.75, 0.80, 0.84, 1)
-ambient_light_energy = 0.50
-tonemap_mode = 2
+ambient_light_color = Color(0.66, 0.78, 0.94, 1)
+ambient_light_sky_contribution = 0.68
+ambient_light_energy = 0.44
+tonemap_mode = 4
+tonemap_exposure = 0.96
 fog_enabled = true
 fog_mode = 1
-fog_light_color = Color(0.88, 0.85, 0.80, 1)
+fog_light_color = Color(0.86, 0.88, 0.9, 1)
 fog_light_energy = 0.95
 fog_sun_scatter = 0.04
 fog_density = 0.0
@@ -53,11 +56,15 @@ environment = SubResource("Coast")
 [node name="Skybox" type="Node3D" parent="."]
 script = ExtResource("Skybox")
 
+[node name="DayNight" type="Node" parent="."]
+script = ExtResource("DayNight")
+
 [node name="Sun" type="DirectionalLight3D" parent="."]
-rotation_degrees = Vector3(-37, -37, 0)
-light_color = Color(1, 0.80, 0.62, 1)
-light_energy = 1.03
+rotation_degrees = Vector3(-42, -36, 0)
+light_color = Color(1, 0.94, 0.85, 1)
+light_energy = 0.98
 shadow_enabled = true
+shadow_opacity = 0.68
 directional_shadow_mode = 1
 directional_shadow_max_distance = 180.0
 

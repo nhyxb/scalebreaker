@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-11-26 — 画面质感与昼夜氛围精装升级：卧室精装、角色防过曝 AGX 光照、零新增光源万家灯火与暖黄台灯联动
+
+备份：`backups/20261126_175630_visual_polish_daynight/{scenes,rust/src,tests,scripts,project.godot,CHANGELOG.md,MEMORY.md}`。
+回滚：
+
+```sh
+cp -a backups/20261126_175630_visual_polish_daynight/{scenes,tests,scripts,project.godot,CHANGELOG.md,MEMORY.md} .
+cp -a backups/20261126_175630_visual_polish_daynight/rust/src/. rust/src/
+rm -f scenes/city_night_lights.gd scenes/day_night_cycle.gd
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+```
+
+### 一、卧室“毛坯房”精装（`scenes/skybox_bedroom.gd`、`scenes/harbor_skybox.gd`）
+
+- **北窗动态天空**：`BedroomEnvironment` 由纯色 `BG_COLOR` 改为自定义 `BG_SKY` 天空着色器（`gl_compatibility` 兼容），带天顶-地平线柔和渐变、淡云、太阳/落日/月晕与星夜闪烁繁星，并随昼夜权重平滑切换。
+- **半透褶皱纱帘与原木窗杆**：北窗两侧新增程序生成褶皱半透浅奶油/杏粉纱帘（`DIFFUSE_LAMBERT_WRAP` 防台灯近照硬条纹）、浅原木窗杆+端头+支架与绑带，中央 1.38 m 保持完全敞开不挡采光与城内仰视。
+- **墙面软装与桌面微细节（全视觉、零碰撞）**：南/西/东墙加挂 6 幅程序生成柔和风景/植物木框挂画、西北墙软木备忘板（带粉彩便签与图钉）、南墙 Yumeka 身后悬浮木搁板（粉彩小书/陶瓷多肉/迷你相框）；桌面键盘鼠标下方新增浅燕麦色毛毡桌垫，右侧补一只陶瓷马克杯与木杯垫（与 21.27 cm 沙盘及 Yumeka 双手 `x=±0.135, z=0.303` 保持净空零穿模）。
+- **显示器真实桌面画面**：在 `ComputerScreen` 屏幕倾斜平面贴合 `MonitorDisplay`，换上程序生成的海港黄昏壁纸 + 双悬浮小窗口 + 磨砂任务栏纹理，带昼夜自适应自发光。
+
+### 二、城内光照质感升级与 4 套角色皮肤防过曝（`scenes/main.tscn`、`scenes/giant_skin.gd`、`scenes/snow_fox_skin.gd`、`scenes/hina_skin.gd`、`scenes/chibi_catgirl_skin.gd`、`scenes/giant_visual.gd`）
+
+- **主世界 AGX 色调与微缩立体感**：`scenes/main.tscn` 切换 `tonemap_mode = 4`（AGX）、`tonemap_exposure = 0.96`，启用天空半球环境光（`ambient_light_sky_contribution = 0.68`）与冷天蓝阴影基调，柔化太阳色温与对比度。
+- **全皮肤统一防过曝柔和哑光 PBR**：定位 4 套皮肤原均含 `KHR_materials_unlit`（`kawaii`/`hina`/`chibi_catgirl` 完全无光影、`snow_fox` 的 `DIFFUSE_TOON` 导致向阳面扁平过曝）；新增共享 `GiantSkin.shade_anime_materials()` 统一转为 `PER_PIXEL + DIFFUSE_BURLEY`（`roughness = 0.89`、`specular = 0.16`、`emission = false`，亮白反照率收束至 `0.84–0.90` 区间），白天五官/发丝/白裙折痕清晰可读且自然响应黄昏与夜景光照。
+
+### 三、昼夜循环、零额外动态灯万家灯火与卧室台灯联动（`rust/src/settings.rs`、`rust/src/game.rs`、`scenes/settings_schema.gd`、`scenes/interface.gd`、`scenes/day_night_cycle.gd`、`scenes/city_night_lights.gd`）
+
+- **持久化时间模式设置**：新增 `time_of_day`（`auto` 自动昼夜循环 / `day` 固定白天 / `dusk` 固定黄昏 / `night` 固定夜晚，默认 `day`，写入 `user://gameplay.cfg` 并跨 4 模式镜像，旧档静默回落 `day`）；「画面与声音」页新增触屏友好 4 档下拉选择（带实时预览与取消回滚）；局内按 `F7` 一键轮切白天/黄昏/夜晚。
+- **零新增动态光源 / 零额外 Draw Call 夜景**：`city_night_lights.gd` 在运行时对 `commercial` / `industrial` / `suburban` / `roads` 的 `colormap.png` 做像素分析，生成 `filter_nearest` 窗户玻璃与路灯灯头二值掩码（覆盖率精准 ~3.1%，数学上杜绝墙壁/屋顶/灯杆误发光），配合轻量空间着色器在近景 48 批次+核心 12 栋与远景 5 批次垂直立面上平滑点亮暖金/暖白/淡蓝混合色温万家灯火，路灯灯头同步暖金发亮。
+- **卧室 Skybox 昼夜绝杀联动**：黄昏时北窗转金橘落日，低斜阳穿过窗洞照亮 Yumeka 侧脸与沙盘；夜晚转深蓝星夜，`WindowSun` 降至清冷月光，书桌 `LampRoundTable` 内单盏局部 `DeskLampLight`（无阴影、白天关闭）与暖金灯罩自发光自动亮起，温柔照亮坐姿 Yumeka 脸部、双肩与发光微缩城市。
+
+### 四、同口径几何/合批对比与测试验证
+
+| 指标 | 口径 | 数据源 | 基准值 | 当前值 |
+|---|---|---|---|---|
+| 城内 MultiMesh 批次 | 全图（Roads+Lots+Batches+BuildingBatches） | `scripts/district_stats.gd`（headless） | 76（48 近 + 5 远 + 1 废墟） | 76（48 近 + 5 远 + 1 废墟） |
+| 城内几何总面数 | 三角面 tris（含 MultiMesh 实例展开） | `scripts/district_stats.gd`（headless） | 3,571,462 | 3,571,462 |
+| 城内动态点/聚光源 | `MapSlot/District` 内 `OmniLight3D`+`SpotLight3D` | `tests/playtest.gd` | 0 | 0 |
+| 实机核显 FPS | 真实桌面 radeonsi | 未测（本轮仅隔离 `Xvfb`/`llvmpipe` 截图核验，不做性能结论） | — | 未测 |
+
+- **Rust**：`cargo build --locked` + `cargo test --locked` **41/41 通过**（含 `time_of_day_defaults_and_parser`）。
+- **Godot 8 套 `--headless` 回归全绿（687/687）**：`playtest` **228**（新增 8 项：卧室软装与 `BG_SKY`、AGX、`time_of_day` 持久化/重载/非法值拦截、`F7` 轮切、昼/昏/夜灯光与台灯联动、窗户/路灯掩码精度与零城内动态灯）/ `growth` 192 / `mode_menu` 45 / `touch` 42 / `sit_crush_gameplay` 44 / `sit_crush` 57 / `brawl` 43 / `audio` 36；启动校验 `--quit-after 5` 零报错。
+- **视觉核验（隔离 `Xvfb :97`，`llvmpipe`，1280×720 少量帧）**：逐张审查白天卧室全景/南西墙软装、`snow_fox` 正面阳光近景、黄昏城内仰视 Yumeka、夜晚 500 m 巨人俯瞰全城万家灯火+暖黄台灯照亮 Yumeka、夜晚街景窗户/路灯近景、夜晚卧室星窗/显示器/台灯，并完成二轮精修与绑带复拍；截图存于 `build/tmp/visual_polish_shots/`（不入库）。
+
+---
+
 ## 2026-11-26 — 阶段 3A 修复：坐姿改走 1 帧 SeatedPose 动画（Apply-Pose-as-Rest 在带形态键网格上会让 glTF 弹回 T-pose）
 
 用户目视 `04_side_profile.png` 定案：导出的模型在 Godot 里是**站立 T-pose**（双臂水平、双腿笔直穿入椅子底座）。

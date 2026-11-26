@@ -464,6 +464,7 @@ func _ready() -> void:
 	for child in _skeleton.get_children():
 		if child is MeshInstance3D:
 			_kawaii_meshes.append(child)
+	GiantSkin.shade_anime_materials(_kawaii_meshes)
 	_model_base_yaw = _model.rotation.y
 
 	for key in CORE_BONES:

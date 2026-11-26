@@ -94,6 +94,7 @@ impl INode3D for HarborGame {
         self.settings = GameSettings::load(&self.settings_path);
         self.audio_settings = AudioSettings::load(&self.settings_path);
         self.apply_audio_settings();
+        self.apply_time_of_day(Mode::Human);
         if cfg!(target_os = "android") {
             self.base()
                 .get_node_as::<DirectionalLight3D>("Sun")
@@ -222,6 +223,7 @@ impl HarborGame {
             slot.add_child(&round);
         }
         self.round = Some(round);
+        self.apply_time_of_day(mode);
         self.present("playing");
         if cfg!(target_os = "android") {
             godot_print!(
@@ -397,6 +399,11 @@ impl HarborGame {
         self.settings = settings;
         self.audio_settings = decoded_audio;
         self.apply_audio_settings();
+        let active_mode = self
+            .round
+            .as_ref()
+            .map_or(Mode::Human, |round| round.bind().mode);
+        self.apply_time_of_day(active_mode);
         if let Some(round) = &mut self.round {
             let mut round = round.bind_mut();
             let options = settings[round.mode as usize];
@@ -423,6 +430,22 @@ impl HarborGame {
                     self.audio_settings.muted.to_variant(),
                 ],
             );
+        }
+    }
+
+    #[func]
+    fn get_time_of_day(&self) -> GString {
+        let mode = self
+            .round
+            .as_ref()
+            .map_or(Mode::Human, |round| round.bind().mode);
+        self.settings[mode as usize].time_of_day.as_str().into()
+    }
+
+    fn apply_time_of_day(&self, mode: Mode) {
+        if let Some(mut controller) = self.base().get_node_or_null("DayNight") {
+            let value = self.settings[mode as usize].time_of_day.as_str();
+            controller.call("set_mode", &[GString::from(value).to_variant()]);
         }
     }
 

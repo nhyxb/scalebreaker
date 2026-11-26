@@ -33,6 +33,7 @@ func _run() -> void:
 	await process_frame
 	_check(_game.get_screen() == "menu", "main menu opens")
 	await _bedroom_skybox()
+	await _day_night_and_settings()
 	await _human_controls()
 	await _human_evacuates()
 	await _human_vs_ai()
@@ -113,6 +114,25 @@ func _bedroom_skybox() -> void:
 			and district.get_node_or_null("SandboxFrame") != null
 	_check(all_present and diorama_ok and _count_collisions_in(bedroom) == 0,
 			"all Kenney furniture landmarks load without BearDesk/Water, with SandboxFrame and zero collisions")
+	# Soft interior decor + true north-window sky + real desktop monitor display (zero collisions).
+	var decor := bedroom.get_node_or_null("Decor")
+	var monitor_disp := furniture.get_node_or_null("ComputerScreen/MonitorDisplay") as MeshInstance3D if furniture != null else null
+	var monitor_mat := monitor_disp.material_override as StandardMaterial3D if monitor_disp != null else null
+	var bedroom_env: Environment = bedroom.call("get_environment") if bedroom.has_method(&"get_environment") else null
+	var decor_ok := decor != null \
+			and decor.get_node_or_null("Curtains/CurtainLeft") != null \
+			and decor.get_node_or_null("Curtains/CurtainRight") != null \
+			and decor.get_node_or_null("Curtains/CurtainRod") != null \
+			and decor.get_node_or_null("CorkBoard") != null \
+			and decor.get_node_or_null("WallShelfSouth") != null \
+			and decor.get_node_or_null("ArtSouthHarbor") != null \
+			and decor.get_node_or_null("ArtWestMisty") != null \
+			and decor.get_node_or_null("ArtEastLandscape") != null \
+			and decor.get_node_or_null("DeskMat") != null \
+			and decor.get_node_or_null("DeskMug") != null
+	_check(decor_ok and monitor_mat != null and monitor_mat.albedo_texture != null and monitor_mat.emission_enabled
+			and bedroom_env != null and bedroom_env.background_mode == Environment.BG_SKY,
+			"bedroom upgrades add dynamic sky, sheer curtains, framed art, corkboard, shelf, desk accents and real monitor screen")
 	var sandbox_anchor: Node3D = bedroom.sandbox_anchor
 	var ug_anchor: Node3D = bedroom.ultra_giant_anchor
 	var to_sandbox := Vector3.ZERO
@@ -208,6 +228,127 @@ func _count_collisions_in(node: Node) -> int:
 	for child in node.get_children():
 		total += _count_collisions_in(child)
 	return total
+
+
+func _count_city_dynamic_lights(node: Node) -> int:
+	var total := 1 if (node is OmniLight3D or node is SpotLight3D) else 0
+	for child in node.get_children():
+		total += _count_city_dynamic_lights(child)
+	return total
+
+
+func _day_night_and_settings() -> void:
+	const CityNightLights := preload("res://scenes/city_night_lights.gd")
+	var dn: Node = _game.get_node_or_null("DayNight")
+	var sun: DirectionalLight3D = _game.get_node_or_null("Sun") as DirectionalLight3D
+	var atmo: WorldEnvironment = _game.get_node_or_null("Atmosphere") as WorldEnvironment
+	var bedroom: Node3D = _game.get_node_or_null("Skybox/BedroomViewport/Bedroom") as Node3D
+	var desk_lamp: OmniLight3D = bedroom.call("get_desk_lamp_light") if bedroom != null else null
+	_check(dn != null and sun != null and atmo != null and atmo.environment != null
+			and atmo.environment.tonemap_mode == Environment.TONE_MAPPER_AGX
+			and desk_lamp != null,
+			"DayNight controller, AGX main environment, and bedroom DeskLampLight initialize")
+	if dn == null or sun == null or desk_lamp == null:
+		return
+
+	# Default time_of_day setting is "day" in all 4 modes; invalid values are rejected.
+	var all_default_day := true
+	for mode in 4:
+		if String(_game.default_mode_settings(mode).get("time_of_day", "")) != "day":
+			all_default_day = false
+	var bad_opts: Dictionary = _game.default_mode_settings(0)
+	bad_opts["time_of_day"] = "midnight"
+	var rejected: bool = not _game.save_all_mode_settings(
+			bad_opts, _game.default_mode_settings(1),
+			_game.default_mode_settings(2), _game.default_mode_settings(3))
+	_check(all_default_day and rejected and String(_game.invalid_setting()) == "time_of_day",
+			"time_of_day defaults to day across modes and rejects unknown values")
+
+	# Graphics settings UI exposes time_of_day with 4 choices and persists across reloads.
+	var ui := _game.get_node("Interface")
+	(ui.find_child("MenuSettings", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var panel: Control = ui.find_child("GameplaySettings", true, false)
+	(panel.find_child("SettingsPageGraphics", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var selector := panel.find_child("time_of_day", true, false) as OptionButton
+	_check(selector != null and selector.item_count == 4 and selector.is_visible_in_tree(),
+			"Graphics settings expose the 4-choice time_of_day OptionButton")
+	if selector != null:
+		# Pick "night" (index 3), save, and verify config + fresh HarborGame reload.
+		selector.select(3)
+		selector.item_selected.emit(3)
+		await process_frame
+		(panel.find_child("SaveSettings", true, false) as BaseButton).pressed.emit()
+		await process_frame
+		var cfg := ConfigFile.new()
+		var loaded_ok := cfg.load(_game.settings_path) == OK
+		var human_saved: Dictionary = cfg.get_value("settings", "human", {})
+		var brawl_saved: Dictionary = cfg.get_value("settings", "brawl", {})
+		var reloaded: Node = (load("res://scenes/main.tscn") as PackedScene).instantiate()
+		reloaded.settings_path = _game.settings_path
+		root.add_child(reloaded)
+		await process_frame
+		var reloaded_val := String(reloaded.get_mode_settings(1).get("time_of_day", ""))
+		reloaded.queue_free()
+		await process_frame
+		_check(loaded_ok and String(human_saved.get("time_of_day", "")) == "night"
+				and String(brawl_saved.get("time_of_day", "")) == "night"
+				and reloaded_val == "night"
+				and String(dn.call("get_mode")) == "night",
+				"time_of_day persists to gameplay.cfg across all modes and restores on reload")
+
+	# Verify day / dusk / night transitions, city emission mask precision, F7 shortcut, and zero city dynamic lights.
+	dn.call("set_mode", "day")
+	await process_frame
+	var day_ok: bool = is_zero_approx(float(dn.call("get_night_glow"))) \
+			and not desk_lamp.visible and sun.light_energy > 0.85
+	dn.call("set_mode", "dusk")
+	await process_frame
+	var dusk_glow: float = float(dn.call("get_night_glow"))
+	var dusk_ok: bool = dusk_glow > 0.25 and dusk_glow < 0.65 \
+			and desk_lamp.visible and sun.light_color.r > sun.light_color.b + 0.35
+	dn.call("set_mode", "night")
+	await process_frame
+	var night_ok: bool = float(dn.call("get_night_glow")) > 0.95 \
+			and desk_lamp.visible and desk_lamp.light_energy > 1.0 \
+			and sun.light_color.b > sun.light_color.r + 0.25
+	_check(day_ok and dusk_ok and night_ok,
+			"day, dusk, and night presets synchronize Sun, city night glow, and bedroom DeskLampLight")
+
+	# F7 debug shortcut cycles day -> dusk -> night -> day cleanly.
+	dn.call("set_mode", "day")
+	_key(KEY_F7)
+	await process_frame
+	var after_f7_1 := String(dn.call("get_mode"))
+	_key(KEY_F7)
+	await process_frame
+	var after_f7_2 := String(dn.call("get_mode"))
+	_key(KEY_F7)
+	await process_frame
+	var after_f7_3 := String(dn.call("get_mode"))
+	_check(after_f7_1 == "dusk" and after_f7_2 == "night" and after_f7_3 == "day",
+			"F7 cycles day -> dusk -> night -> day in-place without errors")
+
+	# Verify auto cycle advances smoothly when unpaused, window emission mask stays strictly
+	# confined to the single glass swatch (~1/32 = 3.125%), and city has zero dynamic lights.
+	dn.call("set_mode", "auto")
+	var p0: float = float(dn.call("get_phase"))
+	await _ticks(12)
+	var p1: float = float(dn.call("get_phase"))
+	var district := _game.get_node_or_null("MapSlot/District")
+	var comm_cov: float = CityNightLights.debug_mask_coverage("commercial")
+	var lamp_cov: float = CityNightLights.debug_mask_coverage("roads_lamp")
+	_check(p1 != p0 and district != null and _count_city_dynamic_lights(district) == 0
+			and comm_cov > 0.01 and comm_cov < 0.05
+			and lamp_cov > 0.01 and lamp_cov < 0.05,
+			"auto day-night advances, window/lamp masks cover only target swatches, and zero city dynamic lights exist")
+
+	# Restore default daytime setting cleanly before gameplay tests.
+	_game.save_all_mode_settings(
+			_game.default_mode_settings(0), _game.default_mode_settings(1),
+			_game.default_mode_settings(2), _game.default_mode_settings(3))
+	await process_frame
 
 
 func _human_controls() -> void:

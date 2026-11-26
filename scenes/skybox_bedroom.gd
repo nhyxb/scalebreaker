@@ -2,10 +2,11 @@ extends Node3D
 ## 1:1 soft Japanese cream & light natural-wood bedroom rendered inside the harbour skybox
 ## SubViewport (scenes/harbor_skybox.gd). Uses real Kenney Furniture Kit GLB assets
 ## (assets/kenney/furniture/, visual-only, zero physics collision), an airtight CSG room
-## shell with baseboards and a recessed sunlit two-pane window, a 21.27 cm desktop harbour
-## sandbox centred at (0, DESK_TOP, 0), and an exported `ultra_giant_anchor` above the swivel
-## chair cushion where the Phase 3 seated anime Yumeka (scenes/yumeka_ultra_giant.gd)
-## quietly mounts when her licensed GLB is present locally.
+## shell with baseboards and a recessed sunlit two-pane window framed by sheer curtains,
+## procedural wall art / corkboard / floating shelf / live desktop monitor texture, a
+## 21.27 cm desktop harbour sandbox centred at (0, DESK_TOP, 0), dynamic day/dusk/night
+## outdoor sky + automatic warm desk-lamp linkage, and an exported `ultra_giant_anchor`
+## above the swivel chair cushion where the Phase 3 seated anime Yumeka mounts.
 
 const FLOOR_WOOD_DIFF := "res://assets/textures/polyhaven/floor_wood_diff.jpg"
 const FURNITURE_DIR := "res://assets/kenney/furniture/"
@@ -27,6 +28,7 @@ const ROOM_Z_MAX := ROOM_Z_MIN + ROOM.z
 const ROOM_Z_CENTER := (ROOM_Z_MIN + ROOM_Z_MAX) * 0.5
 const WALL := 0.14
 const DESK_TOP := 0.75
+const DESK_MAT_THICKNESS := 0.0024
 
 ## Two-pane north window centred behind the desk.
 const WIN_CENTER_X := -0.05
@@ -46,7 +48,18 @@ var _mat_wood_trim: StandardMaterial3D
 var _mat_sash: StandardMaterial3D
 var _mat_door: StandardMaterial3D
 var _mat_metal: StandardMaterial3D
+var _window_glass_mat: StandardMaterial3D
+var _desk_lamp_shade_mat: StandardMaterial3D
+var _ceiling_lamp_shade_mat: StandardMaterial3D
+var _monitor_mat: StandardMaterial3D
+var _curtain_mat: StandardMaterial3D
+var _sky_mat: ShaderMaterial
+var _bedroom_env: Environment
+
 var _window_sun: DirectionalLight3D
+var _interior_bounce: DirectionalLight3D
+var _ceiling_fill: OmniLight3D
+var _desk_lamp_light: OmniLight3D
 
 var sandbox_anchor: Node3D
 ## Anchor perched directly above the chairDesk.glb cushion, facing `sandbox_anchor`, for
@@ -60,8 +73,10 @@ func _ready() -> void:
 	_build_shell()
 	_build_sandbox()
 	_build_furniture()
+	_build_decor()
 	_build_lights()
 	_build_environment()
+	apply_day_night(1.0, 0.0, 0.0, 0.0)
 
 
 func _is_mobile_platform() -> bool:
@@ -71,6 +86,18 @@ func _is_mobile_platform() -> bool:
 func set_shadows_enabled(enabled: bool) -> void:
 	if _window_sun != null:
 		_window_sun.shadow_enabled = enabled
+
+
+func get_desk_lamp_light() -> OmniLight3D:
+	return _desk_lamp_light
+
+
+func get_window_sun() -> DirectionalLight3D:
+	return _window_sun
+
+
+func get_environment() -> Environment:
+	return _bedroom_env
 
 
 func _build_materials() -> void:
@@ -189,12 +216,10 @@ func _build_shell() -> void:
 	var frame_d := WALL + 0.036
 	var frame_z := north_z + 0.012
 	var ov := 0.015
-	# Top & bottom outer frame (flush corners with jambs)
 	_box(shell, Vector3(WIN_WIDTH + frame_t * 2.0 - ov * 2.0, frame_t, frame_d),
 		Vector3(WIN_CENTER_X, win_top + frame_t * 0.5 - ov, frame_z), _mat_wood_trim)
 	_box(shell, Vector3(WIN_WIDTH + frame_t * 2.0 - ov * 2.0, frame_t, frame_d),
 		Vector3(WIN_CENTER_X, WIN_SILL_Y - frame_t * 0.5 + ov, frame_z), _mat_wood_trim)
-	# Left & right outer jambs (exact span between top and bottom frame bars)
 	_box(shell, Vector3(frame_t, WIN_HEIGHT - ov * 2.0 + 0.004, frame_d),
 		Vector3(win_left - frame_t * 0.5 + ov, win_mid_y, frame_z), _mat_wood_trim)
 	_box(shell, Vector3(frame_t, WIN_HEIGHT - ov * 2.0 + 0.004, frame_d),
@@ -226,29 +251,26 @@ func _build_shell() -> void:
 	glass_mesh.size = Vector3(WIN_WIDTH - 0.04, WIN_HEIGHT - 0.04, 0.008)
 	glass.mesh = glass_mesh
 	glass.position = Vector3(WIN_CENTER_X, win_mid_y, north_z)
-	var glass_mat := StandardMaterial3D.new()
-	glass_mat.albedo_color = Color(0.92, 0.96, 1.0, 0.14)
-	glass_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	glass_mat.roughness = 0.06
-	glass_mat.metallic = 0.05
-	glass_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	glass.material_override = glass_mat
+	_window_glass_mat = StandardMaterial3D.new()
+	_window_glass_mat.albedo_color = Color(0.92, 0.96, 1.0, 0.11)
+	_window_glass_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_window_glass_mat.roughness = 0.06
+	_window_glass_mat.metallic = 0.05
+	_window_glass_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	glass.material_override = _window_glass_mat
 	glass.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(glass)
 
-	# Minimalist pale-wood baseboards (踢脚线) sealing every wall/floor corner cleanly.
+	# Minimalist pale-wood baseboards sealing every wall/floor corner cleanly.
 	var base_h := 0.08
 	var base_t := 0.022
-	var base_y := base_h * 0.5 - 0.005  # embedded 5 mm into floor
-	# North & South baseboards
+	var base_y := base_h * 0.5 - 0.005
 	_box(shell, Vector3(ROOM.x + 0.02, base_h, base_t),
 		Vector3(0.0, base_y, ROOM_Z_MIN + base_t * 0.5 - 0.004), _mat_wood_trim)
 	_box(shell, Vector3(ROOM.x + 0.02, base_h, base_t),
 		Vector3(0.0, base_y, ROOM_Z_MAX - base_t * 0.5 + 0.004), _mat_wood_trim)
-	# West baseboard
 	_box(shell, Vector3(base_t, base_h, ROOM.z + 0.02),
 		Vector3(-half_x + base_t * 0.5 - 0.004, base_y, ROOM_Z_CENTER), _mat_wood_trim)
-	# East baseboard split around the bedroom door
 	var door_z := 1.78
 	var door_w := 0.84
 	var door_h := 2.02
@@ -279,10 +301,6 @@ func _build_sandbox() -> void:
 	var sandbox := Node3D.new()
 	sandbox.name = "Sandbox"
 	add_child(sandbox)
-	# The wooden diorama frame is rendered in the main world (`District/SandboxFrame`) so the
-	# city edge and tray frame share depth and never duplicate or Z-fight. Here we only place a
-	# soft desk contact shadow underneath the 22.6 cm outer wood tray and align `sandbox_anchor`
-	# to `DESK_TOP + SANDBOX_BASE_THICKNESS` so the tray base rests dead flush on the desk.
 	var shadow_pad := MeshInstance3D.new()
 	shadow_pad.name = "SandboxContactShadow"
 	var quad := PlaneMesh.new()
@@ -306,8 +324,6 @@ void fragment() {
 	smat.shader = sh
 	shadow_pad.material_override = smat
 	sandbox.add_child(shadow_pad)
-	# The anchor the skybox camera extrapolates from: port origin (0,0,0) lands here, matching
-	# `District/SandboxFrame` bottom (-32 m * SKY_SCALE = -4.8 mm) exactly onto DESK_TOP.
 	sandbox_anchor = Node3D.new()
 	sandbox_anchor.name = "SandboxAnchor"
 	sandbox_anchor.position = Vector3(0.0, DESK_TOP + SANDBOX_BASE_THICKNESS, 0.0)
@@ -319,8 +335,6 @@ func _build_furniture() -> void:
 	furniture.name = "Furniture"
 	add_child(furniture)
 
-	# Soft Japanese cream / milk-tea / dusty-rose material harmonies for Kenney's saturated
-	# coral `carpet` surfaces, keeping natural warm wood rich under direct sunlight.
 	var mat_wood_soft := {"wood": {"color": Color(0.84, 0.70, 0.55), "roughness": 0.78}}
 	var mat_chair := {
 		"carpet": {"color": Color(0.76, 0.65, 0.57), "roughness": 0.88},
@@ -339,21 +353,16 @@ func _build_furniture() -> void:
 	}
 	var mat_lamp := {
 		"lamp": {
-			"color": Color(1.0, 0.95, 0.82),
-			"roughness": 0.72,
-			"emission": Color(1.0, 0.93, 0.75),
-			"emission_energy": 0.48,
+			"color": Color(0.98, 0.94, 0.84),
+			"roughness": 0.76,
+			"emission": Color(1.0, 0.82, 0.46),
+			"emission_energy": 0.14,
 		},
 		"metal": {"color": Color(0.86, 0.84, 0.80), "roughness": 0.45},
 	}
 	var mat_screen := {
-		"metalDark": {"color": Color(0.32, 0.34, 0.37), "roughness": 0.55},
-		"metal": {
-			"color": Color(0.82, 0.89, 0.94),
-			"roughness": 0.25,
-			"emission": Color(0.76, 0.86, 0.95),
-			"emission_energy": 0.22,
-		},
+		"metalDark": {"color": Color(0.28, 0.30, 0.34), "roughness": 0.52},
+		"metal": {"color": Color(0.14, 0.17, 0.22), "roughness": 0.24},
 	}
 	var mat_periph := {
 		"metalDark": {"color": Color(0.42, 0.44, 0.47), "roughness": 0.62},
@@ -363,8 +372,6 @@ func _build_furniture() -> void:
 	var cast_major := not _is_mobile_platform()
 
 	# --- 1. Study desk & swivel chair ---
-	# Scale desk to exact DESK_TOP (0.75 m) and spacious 1.63 m width (1.14x X) so all desktop
-	# props sit 15-26 cm clear of the 21.27 cm diorama without blocking the north window.
 	var desk_probe := _load_bounds("desk")
 	var desk_scale := DESK_TOP / maxf(desk_probe.size.y, 0.001)
 	_place_glb(furniture, "Desk", "desk", Vector3(0.0, 0.0, 0.0),
@@ -374,8 +381,6 @@ func _build_furniture() -> void:
 	_place_glb(furniture, "ChairDesk", "chairDesk", chair_pos,
 		Vector3.ONE * CHAIR_SCALE, PI, false, mat_chair, cast_major)
 
-	# Exported/accessible anchor above the chairDesk cushion facing `sandbox_anchor`
-	# for Phase 3 seated anime Yumeka.
 	ultra_giant_seat_y = CHAIR_RAW_SEAT_TOP_Y * CHAIR_SCALE
 	ultra_giant_anchor = Node3D.new()
 	ultra_giant_anchor.name = "UltraGiantAnchor"
@@ -392,43 +397,38 @@ func _build_furniture() -> void:
 		Vector3.UP,
 	)
 
-	# Phase 3A: mount the seated Yumeka on the swivel chair. The model GLB is a
-	# licensed asset kept out of the public repo (gitignored); on fresh public
-	# clones ResourceLoader.exists() fails, mounting quietly skips, and nothing
-	# downstream changes - no errors, no placeholder, regressions stay green.
 	if ResourceLoader.exists(YUMEKA_GLB, "PackedScene"):
 		var seated: Node3D = YumekaSeated.new()
 		seated.name = "Yumeka"
 		ultra_giant_anchor.add_child(seated)
 
 	# --- 2. Desktop landmarks pulled 15-26 cm clear of the 21.27 cm sandbox ---
-	# Left flank (monitor shifted well left so the sunlit north window stays open behind the city).
-	_place_glb(furniture, "ComputerScreen", "computerScreen",
+	var monitor := _place_glb(furniture, "ComputerScreen", "computerScreen",
 		Vector3(-0.46, DESK_TOP, -0.26), Vector3.ONE * 0.98, deg_to_rad(20.0), false, mat_screen, cast_major)
+	_attach_monitor_display(monitor)
+	# Keyboard and mouse rest cleanly on top of the 2.4 mm felt desk mat.
 	_place_glb(furniture, "ComputerKeyboard", "computerKeyboard",
-		Vector3(-0.48, DESK_TOP, 0.02), Vector3.ONE * 1.12, deg_to_rad(18.0), false, mat_periph, false)
+		Vector3(-0.48, DESK_TOP + DESK_MAT_THICKNESS, 0.02), Vector3.ONE * 1.12, deg_to_rad(18.0), false, mat_periph, false)
 	_place_glb(furniture, "ComputerMouse", "computerMouse",
-		Vector3(-0.29, DESK_TOP, 0.16), Vector3.ONE * 1.10, deg_to_rad(16.0), false, mat_periph, false)
+		Vector3(-0.29, DESK_TOP + DESK_MAT_THICKNESS, 0.16), Vector3.ONE * 1.10, deg_to_rad(16.0), false, mat_periph, false)
 	_place_glb(furniture, "PlantSmallDesk", "plantSmall1",
 		Vector3(-0.70, DESK_TOP, 0.23), Vector3.ONE * 1.45, deg_to_rad(15.0), false, mat_wood_soft, false)
 	_place_glb(furniture, "SpeakerLeft", "speakerSmall",
 		Vector3(-0.74, DESK_TOP, -0.15), Vector3.ONE * 0.76, deg_to_rad(32.0), false, mat_wood_soft, false)
 
-	# Right flank: warm glowing table lamp, upright books, right speaker (BearDesk removed).
-	_place_glb(furniture, "LampRoundTable", "lampRoundTable",
+	var desk_lamp := _place_glb(furniture, "LampRoundTable", "lampRoundTable",
 		Vector3(0.48, DESK_TOP, -0.25), Vector3.ONE * 1.20, deg_to_rad(-20.0), false, mat_lamp, cast_major)
+	_desk_lamp_shade_mat = _find_surface_material(desk_lamp, "lamp")
 	_place_glb(furniture, "BooksDesk", "books",
 		Vector3(0.47, DESK_TOP, 0.11), Vector3.ONE * 1.55, deg_to_rad(-22.0), false, mat_wood_soft, false)
 	_place_glb(furniture, "SpeakerRight", "speakerSmall",
 		Vector3(0.74, DESK_TOP, -0.15), Vector3.ONE * 0.76, deg_to_rad(-32.0), false, mat_wood_soft, false)
 
 	# --- 3. Large bedroom background furniture ---
-	# West wall: potted floor plant (NW), bedside nightstand, double bed with accent pillows.
 	_place_glb(furniture, "PottedPlant", "pottedPlant",
 		Vector3(-1.88, 0.0, -0.18), Vector3.ONE * 1.85, deg_to_rad(25.0), false, mat_wood_soft, cast_major)
 	var nightstand := _place_glb(furniture, "CabinetBedDrawer", "cabinetBedDrawer",
 		Vector3(-2.02, 0.0, 0.62), Vector3.ONE * 1.95, PI * 0.5, false, mat_wood_soft, cast_major)
-	# Small succulent accent on the nightstand (reuses plantSmall1.glb).
 	var ns_top := 0.2632 * 1.95
 	_place_glb(furniture, "PlantSmallNightstand", "plantSmall1",
 		Vector3(nightstand.position.x + 0.02, ns_top, nightstand.position.z - 0.06),
@@ -445,14 +445,11 @@ func _build_furniture() -> void:
 		Vector3(-1.74, bed_mattress_y, 2.28), Vector3.ONE * 1.40, deg_to_rad(96.0), false, mat_pillow_rose, false)
 	pillow_b.rotation.x = deg_to_rad(-20.0)
 
-	# Floor rug under chair / alongside bed (+2 mm to guarantee zero z-fighting with floor).
 	_place_glb(furniture, "RugRounded", "rugRounded",
 		Vector3(0.38, 0.002, 1.55), Vector3.ONE * 1.45, PI * 0.5, false, mat_rug, false)
 
-	# North-east & East wall: open bookcase (with shelf books), closed-door cabinet, trashcan, coat rack.
 	_place_glb(furniture, "BookcaseOpen", "bookcaseOpen",
 		Vector3(1.50, 0.0, -0.26), Vector3.ONE * 1.95, 0.0, false, mat_wood_soft, cast_major)
-	# Shelf decoration on open bookcase (exact shelf top Ys in bookcaseOpen.glb: 0.37 & 0.61).
 	_place_glb(furniture, "BooksShelfMid", "books",
 		Vector3(1.56, 0.37 * 1.95, -0.24), Vector3.ONE * 1.50, deg_to_rad(-8.0), false, mat_wood_soft, false)
 	_place_glb(furniture, "BooksShelfUpper", "books",
@@ -466,10 +463,757 @@ func _build_furniture() -> void:
 	_place_glb(furniture, "CoatRackStanding", "coatRackStanding",
 		Vector3(1.86, 0.0, 2.78), Vector3.ONE * 2.05, deg_to_rad(-30.0), false, mat_wood_soft, cast_major)
 
-	# Ceiling pendant light flush-mounted against y = ROOM.y.
-	_place_glb(furniture, "LampSquareCeiling", "lampSquareCeiling",
+	var ceiling_lamp := _place_glb(furniture, "LampSquareCeiling", "lampSquareCeiling",
 		Vector3(0.0, ROOM.y, 1.20), Vector3.ONE * 2.10, 0.0, true, mat_lamp, cast_major)
+	_ceiling_lamp_shade_mat = _find_surface_material(ceiling_lamp, "lamp")
 
+
+# ---------------------------------------------------------------------------
+# Soft Interior Decor (Visual-Only, Zero Collision, Lightweight Draw Budget)
+# ---------------------------------------------------------------------------
+
+func _build_decor() -> void:
+	var decor := Node3D.new()
+	decor.name = "Decor"
+	add_child(decor)
+	_build_curtains(decor)
+	_build_wall_art(decor)
+	_build_corkboard(decor)
+	_build_wall_shelf(decor)
+	_build_desk_details(decor)
+
+
+func _build_curtains(parent: Node3D) -> void:
+	var group := Node3D.new()
+	group.name = "Curtains"
+	parent.add_child(group)
+
+	var win_left := WIN_CENTER_X - WIN_WIDTH * 0.5
+	var win_right := WIN_CENTER_X + WIN_WIDTH * 0.5
+	var win_top := WIN_SILL_Y + WIN_HEIGHT
+	var rod_y := win_top + 0.095
+	var rod_z := ROOM_Z_MIN + 0.088
+	var rod_x0 := win_left - 0.22
+	var rod_x1 := win_right + 0.22
+	var rod_len := rod_x1 - rod_x0
+
+	# Natural birch curtain rod + spherical end finials + 3 wall brackets.
+	var rod := MeshInstance3D.new()
+	rod.name = "CurtainRod"
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 0.013
+	cyl.bottom_radius = 0.013
+	cyl.height = rod_len
+	cyl.radial_segments = 12
+	rod.mesh = cyl
+	rod.position = Vector3((rod_x0 + rod_x1) * 0.5, rod_y, rod_z)
+	rod.rotation.z = PI * 0.5
+	rod.material_override = _mat_wood_trim
+	rod.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	group.add_child(rod)
+
+	var finial_mesh := SphereMesh.new()
+	finial_mesh.radius = 0.023
+	finial_mesh.height = 0.046
+	finial_mesh.radial_segments = 10
+	finial_mesh.rings = 6
+	for side_idx in 2:
+		var fin := MeshInstance3D.new()
+		fin.mesh = finial_mesh
+		fin.position = Vector3(rod_x0 - 0.012 if side_idx == 0 else rod_x1 + 0.012, rod_y, rod_z)
+		fin.material_override = _mat_wood_trim
+		fin.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		group.add_child(fin)
+
+	var bracket_mesh := BoxMesh.new()
+	bracket_mesh.size = Vector3(0.018, 0.028, 0.094)
+	for bx in [rod_x0 + 0.14, WIN_CENTER_X, rod_x1 - 0.14]:
+		var br := MeshInstance3D.new()
+		br.mesh = bracket_mesh
+		br.position = Vector3(bx, rod_y, ROOM_Z_MIN + 0.045)
+		br.material_override = _mat_wood_trim
+		br.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		group.add_child(br)
+
+	# Translucent warm cream / soft apricot sheer curtain material with wrap shading so
+	# close desk-lamp light wraps softly across fabric folds instead of harsh dark bands.
+	_curtain_mat = StandardMaterial3D.new()
+	_curtain_mat.albedo_color = Color(0.985, 0.942, 0.898, 0.84)
+	_curtain_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_curtain_mat.diffuse_mode = BaseMaterial3D.DIFFUSE_LAMBERT_WRAP
+	_curtain_mat.roughness = 0.92
+	_curtain_mat.metallic = 0.0
+	_curtain_mat.metallic_specular = 0.08
+	_curtain_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+
+	# Left & right pleated sheer panels frame the outer ~22 cm of the window while keeping
+	# the central ~1.38 m completely open for sunlight and city-to-sky sightlines.
+	var tie_mat := _matte(Color(0.84, 0.74, 0.64), 0.88)
+	var left_panel := _make_pleated_curtain(-1.14, -0.74, true, rod_y - 0.015, 0.80, rod_z + 0.004)
+	left_panel.name = "CurtainLeft"
+	left_panel.material_override = _curtain_mat
+	group.add_child(left_panel)
+
+	var right_panel := _make_pleated_curtain(0.64, 1.04, false, rod_y - 0.015, 0.80, rod_z + 0.004)
+	right_panel.name = "CurtainRight"
+	right_panel.material_override = _curtain_mat
+	group.add_child(right_panel)
+
+	# Fabric tiebacks cinching each curtain snugly at y = 1.38 m.
+	for i in 2:
+		var is_left := (i == 0)
+		var tie := MeshInstance3D.new()
+		tie.name = "CurtainTieLeft" if is_left else "CurtainTieRight"
+		var tmesh := BoxMesh.new()
+		tmesh.size = Vector3(0.215, 0.028, 0.044)
+		tie.mesh = tmesh
+		tie.position = Vector3(-1.032 if is_left else 0.932, 1.38, rod_z + 0.008)
+		tie.rotation.z = deg_to_rad(5.0 if is_left else -5.0)
+		tie.material_override = tie_mat
+		tie.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		group.add_child(tie)
+
+
+func _make_pleated_curtain(x_min: float, x_max: float, cinch_left: bool,
+		y_top: float, y_bot: float, z_mid: float) -> MeshInstance3D:
+	var cols := 18
+	var rows := 14
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var pts: Array[Array] = []
+	for r in rows + 1:
+		var v := float(r) / float(rows)  # 0 = top, 1 = bottom
+		var y := lerpf(y_top, y_bot, v)
+		# Smooth hourglass cinch around v = 0.61 (y ≈ 1.38 m) pulling toward outer wall edge.
+		var cinch := exp(-pow((v - 0.61) / 0.22, 2.0))
+		var row_pts: Array[Vector3] = []
+		for c in cols + 1:
+			var u := float(c) / float(cols)
+			var base_x := lerpf(x_min, x_max, u)
+			var x := base_x
+			if cinch_left:
+				x = lerpf(base_x, x_min + (base_x - x_min) * 0.56, cinch)
+			else:
+				x = lerpf(base_x, x_max - (x_max - base_x) * 0.56, cinch)
+			# Gentle fabric drape folds (soft wave prevents grazing dark stripes near lamp).
+			var pleat_amp := lerpf(0.015, 0.010, cinch * 0.7) * (0.85 + 0.18 * v)
+			var z := z_mid + sin(u * TAU * 3.0) * pleat_amp + cinch * 0.006
+			row_pts.append(Vector3(x, y, z))
+		pts.append(row_pts)
+	for r in rows:
+		for c in cols:
+			var p00: Vector3 = pts[r][c]
+			var p10: Vector3 = pts[r][c + 1]
+			var p01: Vector3 = pts[r + 1][c]
+			var p11: Vector3 = pts[r + 1][c + 1]
+			var u0 := float(c) / float(cols)
+			var u1 := float(c + 1) / float(cols)
+			var v0 := float(r) / float(rows)
+			var v1 := float(r + 1) / float(rows)
+			st.set_uv(Vector2(u0, v0)); st.add_vertex(p00)
+			st.set_uv(Vector2(u1, v0)); st.add_vertex(p10)
+			st.set_uv(Vector2(u1, v1)); st.add_vertex(p11)
+			st.set_uv(Vector2(u0, v0)); st.add_vertex(p00)
+			st.set_uv(Vector2(u1, v1)); st.add_vertex(p11)
+			st.set_uv(Vector2(u0, v1)); st.add_vertex(p01)
+	st.generate_normals()
+	var mi := MeshInstance3D.new()
+	mi.mesh = st.commit()
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mi
+
+
+func _build_wall_art(parent: Node3D) -> void:
+	var half_x := ROOM.x * 0.5
+	# South wall behind Yumeka (prominent when looking south/upward from the city).
+	_add_framed_art(parent, "ArtSouthHarbor",
+		Vector3(-0.82, 1.66, ROOM_Z_MAX - 0.014), PI, Vector2(0.76, 0.50),
+		_make_art_texture("coastal_sunset"))
+	_add_framed_art(parent, "ArtSouthBotanical",
+		Vector3(1.66, 1.66, ROOM_Z_MAX - 0.014), PI, Vector2(0.42, 0.56),
+		_make_art_texture("botanical_sprig"))
+	# West wall above nightstand & double bed (fills the wall cleanly with zero blank gaps).
+	_add_framed_art(parent, "ArtWestNightstand",
+		Vector3(-half_x + 0.014, 1.54, 0.54), PI * 0.5, Vector2(0.40, 0.54),
+		_make_art_texture("botanical_sprig"))
+	_add_framed_art(parent, "ArtWestMisty",
+		Vector3(-half_x + 0.014, 1.62, 1.48), PI * 0.5, Vector2(0.56, 0.44),
+		_make_art_texture("misty_harbor"))
+	_add_framed_art(parent, "ArtWestMoon",
+		Vector3(-half_x + 0.014, 1.62, 2.26), PI * 0.5, Vector2(0.56, 0.44),
+		_make_art_texture("warm_moon"))
+	# East wall above closed bookcase (fits cleanly between y = 1.66 bookcase top & ceiling).
+	_add_framed_art(parent, "ArtEastLandscape",
+		Vector3(half_x - 0.014, 2.02, 0.58), -PI * 0.5, Vector2(0.62, 0.38),
+		_make_art_texture("coastal_sunset"))
+
+
+func _add_framed_art(parent: Node3D, node_name: String, pos: Vector3, rot_y: float,
+		outer_size: Vector2, tex: ImageTexture) -> void:
+	var root := Node3D.new()
+	root.name = node_name
+	root.position = pos
+	root.rotation.y = rot_y
+	parent.add_child(root)
+
+	var w := outer_size.x
+	var h := outer_size.y
+	var border := 0.022
+	var depth := 0.024
+	# Four pale-oak frame bars.
+	for spec in [
+		[Vector3(w, border, depth), Vector3(0.0, h * 0.5 - border * 0.5, 0.0)],
+		[Vector3(w, border, depth), Vector3(0.0, -h * 0.5 + border * 0.5, 0.0)],
+		[Vector3(border, h - border * 2.0, depth), Vector3(-w * 0.5 + border * 0.5, 0.0, 0.0)],
+		[Vector3(border, h - border * 2.0, depth), Vector3(w * 0.5 - border * 0.5, 0.0, 0.0)],
+	]:
+		var bar := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = spec[0]
+		bar.mesh = bm
+		bar.position = spec[1]
+		bar.material_override = _mat_wood_trim
+		bar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(bar)
+
+	# Warm-white mat board backing.
+	var backing := MeshInstance3D.new()
+	var back_mesh := BoxMesh.new()
+	back_mesh.size = Vector3(w - border * 1.6, h - border * 1.6, 0.006)
+	backing.mesh = back_mesh
+	backing.position = Vector3(0.0, 0.0, -0.004)
+	backing.material_override = _matte(Color(0.965, 0.952, 0.925), 0.90)
+	backing.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(backing)
+
+	# Crisp matte illustration inset inside the cream mat border.
+	var mat_pad := 0.036
+	var art := MeshInstance3D.new()
+	var qm := QuadMesh.new()
+	qm.size = Vector2(maxf(w - border * 2.0 - mat_pad * 2.0, 0.08), maxf(h - border * 2.0 - mat_pad * 2.0, 0.08))
+	art.mesh = qm
+	art.position = Vector3(0.0, 0.0, 0.001)
+	var art_mat := StandardMaterial3D.new()
+	art_mat.albedo_texture = tex
+	art_mat.roughness = 0.86
+	art_mat.metallic = 0.0
+	art_mat.metallic_specular = 0.14
+	art.material_override = art_mat
+	art.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(art)
+
+
+func _build_corkboard(parent: Node3D) -> void:
+	# North-west wall beside the window: warm cork memo board with pastel sticky notes.
+	var root := Node3D.new()
+	root.name = "CorkBoard"
+	root.position = Vector3(-1.62, 1.54, ROOM_Z_MIN + 0.014)
+	parent.add_child(root)
+
+	var w := 0.60
+	var h := 0.44
+	var border := 0.022
+	var depth := 0.022
+	for spec in [
+		[Vector3(w, border, depth), Vector3(0.0, h * 0.5 - border * 0.5, 0.0)],
+		[Vector3(w, border, depth), Vector3(0.0, -h * 0.5 + border * 0.5, 0.0)],
+		[Vector3(border, h - border * 2.0, depth), Vector3(-w * 0.5 + border * 0.5, 0.0, 0.0)],
+		[Vector3(border, h - border * 2.0, depth), Vector3(w * 0.5 - border * 0.5, 0.0, 0.0)],
+	]:
+		var bar := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = spec[0]
+		bar.mesh = bm
+		bar.position = spec[1]
+		bar.material_override = _mat_wood_trim
+		bar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(bar)
+
+	var board := MeshInstance3D.new()
+	var qm := QuadMesh.new()
+	qm.size = Vector2(w - border * 2.0, h - border * 2.0)
+	board.mesh = qm
+	board.position = Vector3(0.0, 0.0, 0.002)
+	var bmat := StandardMaterial3D.new()
+	bmat.albedo_texture = _make_cork_texture()
+	bmat.roughness = 0.92
+	bmat.metallic_specular = 0.10
+	board.material_override = bmat
+	board.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(board)
+
+
+func _build_wall_shelf(parent: Node3D) -> void:
+	# Minimalist pale-wood floating wall shelf on the South wall behind Yumeka.
+	var root := Node3D.new()
+	root.name = "WallShelfSouth"
+	root.position = Vector3(0.58, 1.48, ROOM_Z_MAX - 0.092)
+	root.rotation.y = PI
+	parent.add_child(root)
+
+	var shelf_w := 0.86
+	var shelf_t := 0.026
+	var shelf_d := 0.165
+	var plank := MeshInstance3D.new()
+	var pm := BoxMesh.new()
+	pm.size = Vector3(shelf_w, shelf_t, shelf_d)
+	plank.mesh = pm
+	plank.material_override = _mat_wood_trim
+	plank.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(plank)
+
+	for bx in [-0.28, 0.28]:
+		var br := MeshInstance3D.new()
+		var brm := BoxMesh.new()
+		brm.size = Vector3(0.022, 0.085, 0.12)
+		br.mesh = brm
+		br.position = Vector3(bx, -0.055, -0.015)
+		br.material_override = _mat_wood_trim
+		br.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(br)
+
+	var top_y := shelf_t * 0.5
+	# Small pastel books on the left half of the shelf.
+	var book_specs := [
+		[Vector3(-0.32, 0.082, 0.0), Vector3(0.028, 0.164, 0.12), 0.0, Color(0.84, 0.67, 0.63)],
+		[Vector3(-0.286, 0.074, 0.0), Vector3(0.024, 0.148, 0.115), 0.0, Color(0.70, 0.78, 0.84)],
+		[Vector3(-0.254, 0.086, 0.0), Vector3(0.026, 0.172, 0.122), 0.0, Color(0.92, 0.87, 0.74)],
+		[Vector3(-0.205, 0.072, 0.0), Vector3(0.024, 0.148, 0.115), deg_to_rad(-16.0), Color(0.75, 0.82, 0.74)],
+	]
+	for b in book_specs:
+		var book := MeshInstance3D.new()
+		var bm := BoxMesh.new()
+		bm.size = b[1]
+		book.mesh = bm
+		book.position = Vector3(b[0].x, top_y + b[0].y, b[0].z)
+		book.rotation.z = b[2]
+		book.material_override = _matte(b[3], 0.86)
+		book.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		root.add_child(book)
+
+	# Small cream ceramic succulent pot in the center.
+	var pot := MeshInstance3D.new()
+	var pot_mesh := CylinderMesh.new()
+	pot_mesh.top_radius = 0.044
+	pot_mesh.bottom_radius = 0.036
+	pot_mesh.height = 0.074
+	pot_mesh.radial_segments = 10
+	pot.mesh = pot_mesh
+	pot.position = Vector3(0.04, top_y + 0.037, 0.01)
+	pot.material_override = _matte(Color(0.94, 0.91, 0.86), 0.78)
+	pot.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(pot)
+
+	var plant_ball := MeshInstance3D.new()
+	var sp := SphereMesh.new()
+	sp.radius = 0.042
+	sp.height = 0.064
+	sp.radial_segments = 10
+	sp.rings = 6
+	plant_ball.mesh = sp
+	plant_ball.position = Vector3(0.04, top_y + 0.084, 0.01)
+	plant_ball.material_override = _matte(Color(0.48, 0.64, 0.46), 0.88)
+	plant_ball.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(plant_ball)
+
+	# Small leaning mini-photo frame on the right half of the shelf.
+	var mini := MeshInstance3D.new()
+	var mini_mesh := BoxMesh.new()
+	mini_mesh.size = Vector3(0.135, 0.165, 0.012)
+	mini.mesh = mini_mesh
+	mini.position = Vector3(0.26, top_y + 0.081, -0.01)
+	mini.rotation = Vector3(deg_to_rad(-11.0), deg_to_rad(-12.0), 0.0)
+	mini.material_override = _mat_wood_trim
+	mini.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(mini)
+
+	var mini_pic := MeshInstance3D.new()
+	var mq := QuadMesh.new()
+	mq.size = Vector2(0.105, 0.135)
+	mini_pic.mesh = mq
+	mini_pic.position = Vector3(0.0, 0.0, 0.007)
+	var mmat := StandardMaterial3D.new()
+	mmat.albedo_texture = _make_art_texture("misty_harbor")
+	mmat.roughness = 0.84
+	mini_pic.material_override = mmat
+	mini_pic.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mini.add_child(mini_pic)
+
+
+func _build_desk_details(parent: Node3D) -> void:
+	# Soft pale-oatmeal felt desk mat tucked cleanly under keyboard & mouse,
+	# keeping >= 5 cm clearance from the 21.27 cm sandbox and clear of Yumeka's hands.
+	var mat_node := MeshInstance3D.new()
+	mat_node.name = "DeskMat"
+	var mat_mesh := BoxMesh.new()
+	mat_mesh.size = Vector3(0.48, DESK_MAT_THICKNESS, 0.25)
+	mat_node.mesh = mat_mesh
+	mat_node.position = Vector3(-0.43, DESK_TOP + DESK_MAT_THICKNESS * 0.5, 0.08)
+	mat_node.rotation.y = deg_to_rad(17.0)
+	var desk_mat_m := StandardMaterial3D.new()
+	desk_mat_m.albedo_texture = _make_desk_mat_texture()
+	desk_mat_m.roughness = 0.94
+	desk_mat_m.metallic = 0.0
+	desk_mat_m.metallic_specular = 0.08
+	mat_node.material_override = desk_mat_m
+	mat_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(mat_node)
+
+	# Small pastel ceramic mug on a thin pale-oak coaster (far right desk corner,
+	# clear of BooksDesk, sandbox, and Yumeka's seated right hand).
+	var mug_root := Node3D.new()
+	mug_root.name = "DeskMug"
+	mug_root.position = Vector3(0.62, DESK_TOP, 0.24)
+	mug_root.rotation.y = deg_to_rad(-35.0)
+	parent.add_child(mug_root)
+
+	var coaster := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = 0.048
+	cm.bottom_radius = 0.048
+	cm.height = 0.005
+	cm.radial_segments = 14
+	coaster.mesh = cm
+	coaster.position = Vector3(0.0, 0.0025, 0.0)
+	coaster.material_override = _mat_wood_trim
+	coaster.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mug_root.add_child(coaster)
+
+	var mug_body := MeshInstance3D.new()
+	var mm := CylinderMesh.new()
+	mm.top_radius = 0.036
+	mm.bottom_radius = 0.033
+	mm.height = 0.082
+	mm.radial_segments = 14
+	mug_body.mesh = mm
+	mug_body.position = Vector3(0.0, 0.005 + 0.041, 0.0)
+	var ceramic := _matte(Color(0.95, 0.89, 0.85), 0.42)
+	mug_body.material_override = ceramic
+	mug_body.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mug_root.add_child(mug_body)
+
+	var tea := MeshInstance3D.new()
+	var tm := CylinderMesh.new()
+	tm.top_radius = 0.031
+	tm.bottom_radius = 0.031
+	tm.height = 0.003
+	tm.radial_segments = 12
+	tea.mesh = tm
+	tea.position = Vector3(0.0, 0.005 + 0.0815, 0.0)
+	tea.material_override = _matte(Color(0.46, 0.31, 0.20), 0.22)
+	tea.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mug_root.add_child(tea)
+
+	var handle := MeshInstance3D.new()
+	var hm := TorusMesh.new()
+	hm.inner_radius = 0.015
+	hm.outer_radius = 0.023
+	hm.rings = 10
+	hm.ring_segments = 8
+	handle.mesh = hm
+	handle.position = Vector3(0.036, 0.005 + 0.044, 0.0)
+	handle.rotation.x = PI * 0.5
+	handle.material_override = ceramic
+	handle.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mug_root.add_child(handle)
+
+
+func _attach_monitor_display(monitor_pivot: Node3D) -> void:
+	# Aligned to the exact tilted screen plane measured from computerScreen.glb prim=1
+	# (normal (0, 0.139, 0.990), centered at (0, 0.1713, 0) in pivot local coordinates).
+	var screen := MeshInstance3D.new()
+	screen.name = "MonitorDisplay"
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.372, 0.225)
+	screen.mesh = quad
+	var normal := Vector3(0.0, 0.139, 0.990).normalized()
+	screen.position = Vector3(0.0, 0.1713, -0.0001) + normal * 0.0024
+	screen.rotation.x = -atan2(0.139, 0.990)
+	var tex := _make_monitor_texture()
+	_monitor_mat = StandardMaterial3D.new()
+	_monitor_mat.albedo_texture = tex
+	_monitor_mat.roughness = 0.22
+	_monitor_mat.metallic = 0.0
+	_monitor_mat.metallic_specular = 0.25
+	_monitor_mat.emission_enabled = true
+	_monitor_mat.emission_texture = tex
+	_monitor_mat.emission_energy_multiplier = 0.38
+	screen.material_override = _monitor_mat
+	screen.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	monitor_pivot.add_child(screen)
+
+
+# ---------------------------------------------------------------------------
+# Procedural Crisp Mini-Textures (Zero External Downloads)
+# ---------------------------------------------------------------------------
+
+func _make_monitor_texture() -> ImageTexture:
+	var w := 256
+	var h := 154
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	# 1. Soft pastel anime twilight-harbor desktop wallpaper.
+	for y in h:
+		var vy := float(y) / float(h)
+		for x in w:
+			var vx := float(x) / float(w)
+			var col: Color
+			if vy < 0.62:
+				var t := vy / 0.62
+				var c_top := Color(0.30, 0.49, 0.78)
+				var c_mid := Color(0.68, 0.76, 0.91)
+				var c_hor := Color(0.98, 0.82, 0.72)
+				col = c_top.lerp(c_mid, clampf(t * 1.4, 0.0, 1.0)).lerp(c_hor, clampf((t - 0.45) / 0.55, 0.0, 1.0))
+				# Soft pastel clouds
+				var cloud := sin(vx * 9.0 + 0.7) * cos(vy * 14.0) + 0.5 * sin(vx * 18.0 - 1.2)
+				if vy > 0.16 and vy < 0.48 and cloud > 0.45:
+					var cw := smoothstep(0.45, 1.1, cloud) * (1.0 - absf(vy - 0.32) / 0.18)
+					col = col.lerp(Color(1.0, 0.96, 0.92), clampf(cw * 0.62, 0.0, 0.65))
+				# Warm sun orb on horizon
+				var sd := Vector2((vx - 0.68) * 1.65, vy - 0.54).length()
+				if sd < 0.16:
+					col = col.lerp(Color(1.0, 0.93, 0.76), smoothstep(0.16, 0.03, sd) * 0.85)
+			else:
+				# Calm shimmering bay water
+				var wt := (vy - 0.62) / 0.38
+				col = Color(0.45, 0.57, 0.74).lerp(Color(0.24, 0.33, 0.50), wt)
+				var shimmer := exp(-pow((vx - 0.68) / (0.04 + wt * 0.10), 2.0)) * (0.45 + 0.55 * sin(vy * 95.0))
+				col = col.lerp(Color(1.0, 0.86, 0.66), clampf(shimmer * 0.55, 0.0, 0.6))
+			# Distant soft blue mountain silhouette along horizon
+			var ridge := 0.62 - 0.08 * exp(-pow((vx - 0.24) / 0.20, 2.0)) - 0.055 * exp(-pow((vx - 0.82) / 0.24, 2.0))
+			if vy >= ridge and vy < 0.63:
+				col = Color(0.32, 0.40, 0.58)
+			img.set_pixel(x, y, col)
+
+	# 2. Left desktop app icons.
+	var icon_colors := [Color(0.95, 0.62, 0.58), Color(0.56, 0.80, 0.94), Color(0.98, 0.84, 0.48), Color(0.60, 0.85, 0.68)]
+	for i in icon_colors.size():
+		_fill_rect(img, 10, 12 + i * 22, 12, 12, icon_colors[i])
+		_fill_rect(img, 11, 26 + i * 22, 10, 2, Color(0.94, 0.95, 0.98, 0.85))
+
+	# 3. Cozy floating music/study player window (left-mid).
+	_fill_rect(img, 36, 26, 86, 62, Color(0.97, 0.96, 0.94))
+	_fill_rect(img, 36, 26, 86, 11, Color(0.86, 0.89, 0.94))
+	_fill_rect(img, 40, 29, 4, 4, Color(0.94, 0.48, 0.46))
+	_fill_rect(img, 47, 29, 4, 4, Color(0.95, 0.78, 0.36))
+	_fill_rect(img, 54, 29, 4, 4, Color(0.45, 0.80, 0.54))
+	# Album square + track lines + progress bar.
+	_fill_rect(img, 42, 42, 26, 26, Color(0.95, 0.72, 0.64))
+	_fill_rect(img, 46, 48, 18, 10, Color(0.54, 0.70, 0.88))
+	_fill_rect(img, 74, 45, 38, 4, Color(0.34, 0.38, 0.46))
+	_fill_rect(img, 74, 53, 28, 3, Color(0.58, 0.62, 0.68))
+	_fill_rect(img, 42, 74, 72, 4, Color(0.84, 0.86, 0.90))
+	_fill_rect(img, 42, 74, 44, 4, Color(0.42, 0.68, 0.92))
+
+	# 4. Right desktop notes / harbor mini-chart window.
+	_fill_rect(img, 134, 18, 106, 92, Color(0.98, 0.97, 0.95))
+	_fill_rect(img, 134, 18, 106, 11, Color(0.26, 0.32, 0.44))
+	_fill_rect(img, 139, 21, 4, 4, Color(0.94, 0.48, 0.46))
+	_fill_rect(img, 146, 21, 4, 4, Color(0.95, 0.78, 0.36))
+	_fill_rect(img, 153, 21, 4, 4, Color(0.45, 0.80, 0.54))
+	# Mini harbor map diagram inside right window.
+	_fill_rect(img, 142, 35, 90, 38, Color(0.76, 0.86, 0.94))
+	_fill_rect(img, 154, 42, 66, 24, Color(0.86, 0.84, 0.78))
+	_fill_rect(img, 184, 42, 5, 24, Color(0.56, 0.60, 0.66))
+	_fill_rect(img, 154, 52, 66, 4, Color(0.56, 0.60, 0.66))
+	_fill_rect(img, 162, 45, 14, 5, Color(0.84, 0.55, 0.46))
+	_fill_rect(img, 196, 58, 16, 6, Color(0.52, 0.72, 0.58))
+	# Note text lines below map.
+	_fill_rect(img, 142, 80, 74, 3, Color(0.38, 0.42, 0.48))
+	_fill_rect(img, 142, 88, 60, 3, Color(0.56, 0.60, 0.66))
+	_fill_rect(img, 142, 96, 82, 3, Color(0.56, 0.60, 0.66))
+
+	# 5. Sleek frosted dark taskbar at bottom.
+	_fill_rect(img, 0, h - 16, w, 16, Color(0.14, 0.17, 0.24))
+	_fill_rect(img, 0, h - 16, w, 1, Color(0.36, 0.44, 0.58))
+	_fill_rect(img, 8, h - 12, 9, 8, Color(0.42, 0.74, 0.98))
+	var bar_icons := [Color(0.95, 0.68, 0.42), Color(0.94, 0.52, 0.62), Color(0.52, 0.84, 0.66), Color(0.72, 0.64, 0.94)]
+	for i in bar_icons.size():
+		_fill_rect(img, 96 + i * 16, h - 12, 10, 8, bar_icons[i])
+	# Clock/status pills on right.
+	_fill_rect(img, w - 34, h - 11, 24, 6, Color(0.78, 0.84, 0.92))
+	return ImageTexture.create_from_image(img)
+
+
+func _make_art_texture(theme: String) -> ImageTexture:
+	var w := 144
+	var h := 104
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	match theme:
+		"coastal_sunset":
+			for y in h:
+				var vy := float(y) / float(h)
+				for x in w:
+					var vx := float(x) / float(w)
+					var col: Color
+					if vy < 0.60:
+						var t := vy / 0.60
+						col = Color(0.44, 0.58, 0.80).lerp(Color(0.94, 0.72, 0.64), clampf(t * 1.1, 0.0, 1.0))
+						col = col.lerp(Color(0.99, 0.87, 0.70), clampf((t - 0.55) / 0.45, 0.0, 1.0))
+						var sun_d := Vector2((vx - 0.66) * 1.38, vy - 0.49).length()
+						if sun_d < 0.14:
+							col = col.lerp(Color(1.0, 0.96, 0.85), smoothstep(0.14, 0.04, sun_d))
+					else:
+						var wt := (vy - 0.60) / 0.40
+						col = Color(0.72, 0.68, 0.76).lerp(Color(0.42, 0.52, 0.68), wt)
+						var glow := exp(-pow((vx - 0.66) / (0.05 + wt * 0.11), 2.0))
+						col = col.lerp(Color(0.99, 0.86, 0.66), glow * 0.65)
+					# Distant headland + tiny lighthouse
+					var hill1 := 0.61 - 0.14 * exp(-pow((vx - 0.22) / 0.22, 2.0))
+					var hill2 := 0.62 - 0.09 * exp(-pow((vx - 0.84) / 0.19, 2.0))
+					if vy >= hill1 and vy < 0.64:
+						col = Color(0.36, 0.42, 0.56)
+					if vy >= hill2 and vy < 0.64:
+						col = Color(0.46, 0.48, 0.60)
+					if vx > 0.205 and vx < 0.232 and vy > 0.35 and vy < 0.49:
+						col = Color(0.96, 0.93, 0.88)
+					img.set_pixel(x, y, col)
+		"botanical_sprig":
+			for y in h:
+				var vy := float(y) / float(h)
+				for x in w:
+					var vx := float(x) / float(w)
+					var bg := Color(0.965, 0.945, 0.905).lerp(Color(0.935, 0.905, 0.855), vy * 0.6)
+					# Soft terracotta sun circle in upper background
+					var cd := Vector2((vx - 0.58) * 1.2, vy - 0.36).length()
+					if cd < 0.22:
+						bg = bg.lerp(Color(0.92, 0.78, 0.68), smoothstep(0.22, 0.19, cd) * 0.55)
+					# Curved stem
+					var stem_x := 0.46 + 0.11 * sin((vy - 0.15) * 3.8)
+					if vy > 0.16 and vy < 0.90 and absf(vx - stem_x) < 0.011:
+						bg = Color(0.39, 0.48, 0.38)
+					img.set_pixel(x, y, bg)
+			# Paired sage-green leaves along the stem
+			var leaves := [
+				[0.41, 0.74, -0.55], [0.56, 0.70, 0.50],
+				[0.44, 0.56, -0.60], [0.59, 0.52, 0.55],
+				[0.43, 0.39, -0.50], [0.57, 0.35, 0.48],
+				[0.48, 0.22, -0.10],
+			]
+			for lf in leaves:
+				var cx: float = lf[0] * w
+				var cy: float = lf[1] * h
+				var ang: float = lf[2]
+				var ca := cos(ang)
+				var sa := sin(ang)
+				for py in range(maxi(0, int(cy) - 18), mini(h, int(cy) + 18)):
+					for px in range(maxi(0, int(cx) - 18), mini(w, int(cx) + 18)):
+						var dx := float(px) - cx
+						var dy := float(py) - cy
+						var rx := dx * ca + dy * sa
+						var ry := -dx * sa + dy * ca
+						var d := (rx * rx) / 144.0 + (ry * ry) / 42.0
+						if d < 1.0:
+							var leaf_c := Color(0.46, 0.60, 0.48).lerp(Color(0.62, 0.74, 0.60), clampf(0.5 + ry / 14.0, 0.0, 1.0))
+							img.set_pixel(px, py, leaf_c)
+		"misty_harbor":
+			for y in h:
+				var vy := float(y) / float(h)
+				for x in w:
+					var vx := float(x) / float(w)
+					var col: Color
+					if vy < 0.58:
+						col = Color(0.58, 0.76, 0.90).lerp(Color(0.92, 0.94, 0.95), vy / 0.58)
+					else:
+						col = Color(0.70, 0.83, 0.88).lerp(Color(0.48, 0.65, 0.76), (vy - 0.58) / 0.42)
+					var m1 := 0.58 - 0.16 * exp(-pow((vx - 0.32) / 0.24, 2.0)) - 0.12 * exp(-pow((vx - 0.76) / 0.26, 2.0))
+					var m2 := 0.60 - 0.10 * exp(-pow((vx - 0.56) / 0.22, 2.0))
+					if vy >= m1 and vy < 0.61:
+						col = Color(0.55, 0.68, 0.74)
+					if vy >= m2 and vy < 0.61:
+						col = Color(0.42, 0.56, 0.62)
+					img.set_pixel(x, y, col)
+			# Two minimalist white sailboats on the bay
+			for bx in [48, 96]:
+				for dy in range(0, 14):
+					var span := int(float(dy) * 0.55)
+					for dx in range(0, span + 1):
+						img.set_pixel(clampi(bx + dx, 0, w - 1), clampi(62 + dy, 0, h - 1), Color(0.98, 0.97, 0.94))
+				_fill_rect(img, bx - 3, 76, 14, 3, Color(0.76, 0.44, 0.36))
+		_:
+			# "warm_moon": pastel dusk twilight with glowing crescent/full moon and cozy hill town
+			for y in h:
+				var vy := float(y) / float(h)
+				for x in w:
+					var vx := float(x) / float(w)
+					var col := Color(0.24, 0.30, 0.52).lerp(Color(0.76, 0.56, 0.62), clampf(vy * 1.15, 0.0, 1.0))
+					col = col.lerp(Color(0.95, 0.78, 0.64), clampf((vy - 0.52) / 0.36, 0.0, 1.0))
+					var md := Vector2((vx - 0.70) * 1.38, vy - 0.30).length()
+					if md < 0.11:
+						col = col.lerp(Color(1.0, 0.96, 0.82), smoothstep(0.11, 0.075, md))
+					var hill := 0.74 - 0.12 * exp(-pow((vx - 0.28) / 0.30, 2.0)) - 0.08 * exp(-pow((vx - 0.80) / 0.26, 2.0))
+					if vy >= hill:
+						col = Color(0.24, 0.26, 0.38)
+					img.set_pixel(x, y, col)
+			# Tiny glowing town lights along the ridge
+			for pt in [[32, 74], [38, 72], [44, 75], [52, 78], [108, 74], [115, 76]]:
+				_fill_rect(img, pt[0], pt[1], 3, 3, Color(1.0, 0.88, 0.56))
+	return ImageTexture.create_from_image(img)
+
+
+func _make_cork_texture() -> ImageTexture:
+	var w := 160
+	var h := 112
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 20261126
+	for y in h:
+		for x in w:
+			var n := rng.randf_range(-0.045, 0.045)
+			var speck := -0.05 if rng.randf() < 0.08 else 0.0
+			var c := Color(0.76 + n + speck, 0.60 + n * 0.85 + speck, 0.44 + n * 0.7 + speck)
+			img.set_pixel(x, y, c)
+	# Pinned pastel sticky notes & mini postcard with subtle drop shadow + pushpin.
+	var notes := [
+		[14, 14, 34, 34, Color(0.98, 0.93, 0.68), Color(0.86, 0.38, 0.36)],
+		[58, 12, 42, 30, Color(0.95, 0.96, 0.97), Color(0.36, 0.62, 0.86)],
+		[110, 16, 36, 36, Color(0.96, 0.82, 0.84), Color(0.92, 0.72, 0.30)],
+		[22, 58, 46, 38, Color(0.84, 0.93, 0.86), Color(0.38, 0.68, 0.52)],
+		[82, 54, 52, 42, Color(0.97, 0.95, 0.90), Color(0.86, 0.38, 0.36)],
+	]
+	for n in notes:
+		var nx: int = n[0]; var ny: int = n[1]; var nw: int = n[2]; var nh: int = n[3]
+		_fill_rect(img, nx + 2, ny + 2, nw, nh, Color(0.42, 0.32, 0.22))
+		_fill_rect(img, nx, ny, nw, nh, n[4])
+		# Tiny note lines
+		for li in 3:
+			_fill_rect(img, nx + 5, ny + 10 + li * 7, nw - 12 - (li % 2) * 6, 2, Color(0.46, 0.44, 0.42))
+		# Pushpin at top center
+		_fill_rect(img, nx + nw / 2 - 2, ny + 2, 4, 4, n[5])
+	# Mini sky-blue photo accent inside the second card
+	_fill_rect(img, 62, 18, 34, 16, Color(0.60, 0.78, 0.92))
+	_fill_rect(img, 62, 28, 34, 6, Color(0.42, 0.56, 0.64))
+	return ImageTexture.create_from_image(img)
+
+
+func _make_desk_mat_texture() -> ImageTexture:
+	var w := 128
+	var h := 64
+	var img := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 4042
+	for y in h:
+		for x in w:
+			var edge := (x == 3 or x == w - 4 or y == 3 or y == h - 4)
+			var stitch := edge and ((x + y) % 4 < 2)
+			var n := rng.randf_range(-0.018, 0.018)
+			var c := Color(0.86 + n, 0.82 + n, 0.76 + n)
+			if stitch:
+				c = Color(0.75, 0.69, 0.62)
+			img.set_pixel(x, y, c)
+	return ImageTexture.create_from_image(img)
+
+
+func _fill_rect(img: Image, x0: int, y0: int, rw: int, rh: int, col: Color) -> void:
+	var x1 := mini(img.get_width(), x0 + rw)
+	var y1 := mini(img.get_height(), y0 + rh)
+	for y in range(maxi(0, y0), y1):
+		for x in range(maxi(0, x0), x1):
+			img.set_pixel(x, y, col)
+
+
+# ---------------------------------------------------------------------------
+# Furniture Placement Helpers
+# ---------------------------------------------------------------------------
 
 func _load_bounds(stem: String) -> AABB:
 	var packed := load(FURNITURE_DIR + stem + ".glb") as PackedScene
@@ -505,8 +1249,22 @@ func _place_glb(parent: Node, node_name: String, stem: String, world_pos: Vector
 	return pivot
 
 
+func _find_surface_material(root: Node, res_name: String) -> StandardMaterial3D:
+	if root is MeshInstance3D:
+		var mi := root as MeshInstance3D
+		if mi.mesh != null:
+			for surf in mi.mesh.get_surface_count():
+				var m := mi.get_active_material(surf) as StandardMaterial3D
+				if m != null and m.resource_name == res_name:
+					return m
+	for child in root.get_children():
+		var found := _find_surface_material(child, res_name)
+		if found != null:
+			return found
+	return null
+
+
 func _prepare_visual_subtree(node: Node, material_overrides: Dictionary, cast_shadow: bool) -> void:
-	# Strip any physics collider if present and set shadow casting per major/minor asset tier.
 	for child in node.get_children():
 		if child is CollisionObject3D:
 			node.remove_child(child)
@@ -586,15 +1344,19 @@ func _transform_aabb(xf: Transform3D, box: AABB) -> AABB:
 	return AABB(lo, hi - lo)
 
 
+# ---------------------------------------------------------------------------
+# Lights, Sky Shader & Day/Dusk/Night Linkage
+# ---------------------------------------------------------------------------
+
 func _build_lights() -> void:
 	var lights := Node3D.new()
 	lights.name = "Lights"
 	add_child(lights)
-	# Warm afternoon sunlight pouring through the north window with a single lightweight
-	# orthogonal shadow cascade on desktop (half-rate SubViewport keeps iGPU cost minimal).
+
+	# Primary window directional light (sunlight -> golden dusk -> cool moonlight).
 	_window_sun = DirectionalLight3D.new()
 	_window_sun.name = "WindowSun"
-	_window_sun.light_color = Color(1.0, 0.92, 0.80)
+	_window_sun.light_color = Color(1.0, 0.93, 0.82)
 	_window_sun.light_energy = 0.76
 	_window_sun.shadow_enabled = not _is_mobile_platform()
 	_window_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
@@ -605,37 +1367,221 @@ func _build_lights() -> void:
 	_window_sun.shadow_opacity = 0.56
 	lights.add_child(_window_sun)
 	_window_sun.look_at_from_position(Vector3(1.3, 3.1, -3.8), Vector3(-0.35, 0.55, 1.0), Vector3.UP)
-	# Soft warm-cream bounce fill from inside the room so shaded walls stay warm without flattening.
-	var bounce := DirectionalLight3D.new()
-	bounce.name = "InteriorBounce"
-	bounce.light_color = Color(0.96, 0.92, 0.86)
-	bounce.light_energy = 0.22
-	bounce.shadow_enabled = false
-	lights.add_child(bounce)
-	bounce.look_at_from_position(Vector3(-0.8, 2.2, 3.0), Vector3(0.2, 1.0, -0.5), Vector3.UP)
-	# Subtle warm fill near the ceiling pendant.
-	var fill := OmniLight3D.new()
-	fill.name = "CeilingFill"
-	fill.position = Vector3(0.0, ROOM.y - 0.52, 1.20)
-	fill.light_color = Color(1.0, 0.92, 0.80)
-	fill.light_energy = 0.14
-	fill.omni_range = 6.5
-	fill.shadow_enabled = false
-	lights.add_child(fill)
+
+	# Soft interior bounce fill.
+	_interior_bounce = DirectionalLight3D.new()
+	_interior_bounce.name = "InteriorBounce"
+	_interior_bounce.light_color = Color(0.96, 0.92, 0.86)
+	_interior_bounce.light_energy = 0.22
+	_interior_bounce.shadow_enabled = false
+	lights.add_child(_interior_bounce)
+	_interior_bounce.look_at_from_position(Vector3(-0.8, 2.2, 3.0), Vector3(0.2, 1.0, -0.5), Vector3.UP)
+
+	# Subtle warm fill near the ceiling pendant (dims at night so the desk lamp dominates).
+	_ceiling_fill = OmniLight3D.new()
+	_ceiling_fill.name = "CeilingFill"
+	_ceiling_fill.position = Vector3(0.0, ROOM.y - 0.52, 1.20)
+	_ceiling_fill.light_color = Color(1.0, 0.92, 0.80)
+	_ceiling_fill.light_energy = 0.14
+	_ceiling_fill.omni_range = 6.5
+	_ceiling_fill.shadow_enabled = false
+	lights.add_child(_ceiling_fill)
+
+	# Single warm table lamp OmniLight3D inside LampRoundTable: automatically switches on
+	# at dusk/night to softly illuminate Yumeka's face, shoulders, and the desktop diorama.
+	_desk_lamp_light = OmniLight3D.new()
+	_desk_lamp_light.name = "DeskLampLight"
+	_desk_lamp_light.position = Vector3(0.45, DESK_TOP + 0.295, -0.18)
+	_desk_lamp_light.light_color = Color(1.0, 0.76, 0.44)
+	_desk_lamp_light.light_energy = 0.0
+	_desk_lamp_light.omni_range = 3.8
+	_desk_lamp_light.omni_attenuation = 1.30
+	_desk_lamp_light.shadow_enabled = false
+	_desk_lamp_light.visible = false
+	lights.add_child(_desk_lamp_light)
 
 
 func _build_environment() -> void:
-	# Lower ambient (0.28) + tuned exposure (0.82) prevent BG_CANVAS compositing blowout while
-	# keeping warm sunlit vs shaded contrast crisp across walls, floor, desk, and chair.
-	var env := Environment.new()
-	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.76, 0.86, 0.95)
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.96, 0.91, 0.84)
-	env.ambient_light_energy = 0.28
-	env.tonemap_mode = Environment.TONE_MAPPER_AGX
-	env.tonemap_exposure = 0.82
+	# Dynamic outdoor sky shader visible through the north window (clouds, sun/sunset halo,
+	# and starry night sky), paired with explicit interior ambient color control.
+	var sky_shader := Shader.new()
+	sky_shader.code = """
+shader_type sky;
+
+uniform vec3 sky_top : source_color = vec3(0.26, 0.56, 0.90);
+uniform vec3 sky_mid : source_color = vec3(0.58, 0.80, 0.96);
+uniform vec3 sky_horizon : source_color = vec3(0.95, 0.94, 0.90);
+uniform vec3 ground_color : source_color = vec3(0.56, 0.62, 0.68);
+uniform vec3 sun_dir = vec3(0.26, 0.28, -0.92);
+uniform vec3 sun_color : source_color = vec3(1.0, 0.95, 0.82);
+uniform float sun_strength = 0.75;
+uniform vec3 cloud_color : source_color = vec3(1.0, 0.99, 0.97);
+uniform float cloud_opacity = 0.50;
+uniform float star_strength = 0.0;
+uniform float cloud_drift = 0.0;
+
+float hash21(vec2 p) {
+	p = fract(p * vec2(123.34, 456.21));
+	p += dot(p, p + 45.32);
+	return fract(p.x * p.y);
+}
+
+float vnoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float a = hash21(i);
+	float b = hash21(i + vec2(1.0, 0.0));
+	float c = hash21(i + vec2(0.0, 1.0));
+	float d = hash21(i + vec2(1.0, 1.0));
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm(vec2 p) {
+	float v = 0.0;
+	v += 0.55 * vnoise(p);
+	v += 0.30 * vnoise(p * 2.13 + vec2(3.7, 1.9));
+	v += 0.15 * vnoise(p * 4.41 + vec2(8.2, 5.1));
+	return v;
+}
+
+void sky() {
+	vec3 dir = normalize(EYEDIR);
+	// Bias the effective sky horizon slightly downward (upper-floor bedroom viewpoint) so
+	// looking straight through the north window always shows expansive sky, clouds, and stars.
+	float y = dir.y + 0.16;
+	vec3 col;
+	if (y >= 0.0) {
+		float t_mid = smoothstep(0.0, 0.22, y);
+		float t_top = smoothstep(0.14, 0.70, y);
+		col = mix(sky_horizon, sky_mid, t_mid);
+		col = mix(col, sky_top, t_top);
+	} else {
+		col = mix(sky_horizon, ground_color, smoothstep(0.0, -0.35, y));
+	}
+
+	// Soft sun / sunset / moon halo visible through the north window.
+	vec3 sdir = normalize(sun_dir);
+	float sdot = max(dot(dir, sdir), 0.0);
+	float halo = pow(sdot, 8.0) * 0.45 + pow(sdot, 54.0) * 0.68;
+	float disc = smoothstep(0.9965, 0.9992, sdot) * 1.15;
+	col += sun_color * (halo + disc) * sun_strength * smoothstep(-0.08, 0.06, y);
+
+	// Airy sunlit / sunset clouds visible cleanly across the window panes.
+	if (y > 0.02 && cloud_opacity > 0.01) {
+		vec2 cp = dir.xz / (y + 0.20) * 0.72 + vec2(cloud_drift, cloud_drift * 0.35);
+		float n = fbm(cp * vec2(1.10, 1.75));
+		float mask = smoothstep(0.43, 0.70, n) * smoothstep(0.02, 0.16, y) * smoothstep(0.95, 0.38, y);
+		vec3 lit_cloud = cloud_color + sun_color * pow(sdot, 4.0) * 0.24 * sun_strength;
+		col = mix(col, lit_cloud, clamp(mask * cloud_opacity, 0.0, 0.88));
+	}
+
+	// Crisp twinkling starfield at dusk/night across all window panes.
+	if (y > 0.02 && star_strength > 0.01) {
+		vec2 sp = dir.xz / (y + 0.26) * 44.0;
+		vec2 cell = floor(sp);
+		vec2 f = fract(sp) - 0.5;
+		float rnd = hash21(cell);
+		if (rnd > 0.962) {
+			vec2 off = vec2(hash21(cell + 17.3), hash21(cell + 53.7)) - 0.5;
+			float d = length(f - off * 0.52);
+			float star = smoothstep(0.20, 0.02, d) * smoothstep(0.02, 0.14, y);
+			float twinkle = 0.72 + 0.28 * sin(rnd * 62.0 + cloud_drift * 14.0);
+			col += vec3(0.90, 0.94, 1.0) * star * twinkle * star_strength * 1.45;
+		}
+	}
+
+	COLOR = col;
+}
+"""
+	_sky_mat = ShaderMaterial.new()
+	_sky_mat.shader = sky_shader
+	var sky := Sky.new()
+	sky.sky_material = _sky_mat
+
+	_bedroom_env = Environment.new()
+	_bedroom_env.background_mode = Environment.BG_SKY
+	_bedroom_env.sky = sky
+	_bedroom_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	_bedroom_env.ambient_light_color = Color(0.96, 0.91, 0.84)
+	_bedroom_env.ambient_light_energy = 0.28
+	_bedroom_env.tonemap_mode = Environment.TONE_MAPPER_AGX
+	_bedroom_env.tonemap_exposure = 0.82
 	var we := WorldEnvironment.new()
 	we.name = "BedroomEnvironment"
-	we.environment = env
+	we.environment = _bedroom_env
 	add_child(we)
+
+
+func apply_day_night(day_w: float, dusk_w: float, night_w: float, cycle_time: float = 0.0) -> void:
+	var sum := maxf(day_w + dusk_w + night_w, 0.0001)
+	var d := day_w / sum
+	var u := dusk_w / sum
+	var n := night_w / sum
+
+	if _sky_mat != null:
+		var top_col := Color(0.19, 0.50, 0.90) * d + Color(0.18, 0.21, 0.44) * u + Color(0.025, 0.045, 0.13) * n
+		var mid_col := Color(0.48, 0.76, 0.97) * d + Color(0.86, 0.44, 0.38) * u + Color(0.055, 0.095, 0.22) * n
+		var hor_col := Color(0.88, 0.93, 0.97) * d + Color(1.00, 0.58, 0.24) * u + Color(0.10, 0.15, 0.29) * n
+		var gnd_col := Color(0.74, 0.84, 0.93) * d + Color(0.68, 0.42, 0.32) * u + Color(0.05, 0.08, 0.17) * n
+		var sdir := (Vector3(0.22, 0.16, -0.96) * d + Vector3(0.24, 0.04, -0.97) * u + Vector3(-0.20, 0.14, -0.97) * n).normalized()
+		var scol := Color(1.0, 0.96, 0.84) * d + Color(1.0, 0.62, 0.26) * u + Color(0.76, 0.86, 1.0) * n
+		var sstr := 0.78 * d + 1.15 * u + 0.52 * n
+		var ccol := Color(1.0, 0.995, 0.985) * d + Color(1.0, 0.76, 0.58) * u + Color(0.22, 0.30, 0.48) * n
+		var cop := 0.62 * d + 0.60 * u + 0.18 * n
+		var stars := 0.0 * d + 0.16 * u + 1.0 * n
+		_sky_mat.set_shader_parameter(&"sky_top", top_col)
+		_sky_mat.set_shader_parameter(&"sky_mid", mid_col)
+		_sky_mat.set_shader_parameter(&"sky_horizon", hor_col)
+		_sky_mat.set_shader_parameter(&"ground_color", gnd_col)
+		_sky_mat.set_shader_parameter(&"sun_dir", sdir)
+		_sky_mat.set_shader_parameter(&"sun_color", scol)
+		_sky_mat.set_shader_parameter(&"sun_strength", sstr)
+		_sky_mat.set_shader_parameter(&"cloud_color", ccol)
+		_sky_mat.set_shader_parameter(&"cloud_opacity", cop)
+		_sky_mat.set_shader_parameter(&"star_strength", stars)
+		_sky_mat.set_shader_parameter(&"cloud_drift", cycle_time * 0.02)
+
+	if _window_sun != null:
+		_window_sun.light_color = Color(1.0, 0.93, 0.82) * d + Color(1.0, 0.56, 0.28) * u + Color(0.46, 0.62, 0.94) * n
+		_window_sun.light_energy = 0.76 * d + 0.84 * u + 0.16 * n
+		_window_sun.shadow_opacity = 0.56 * d + 0.64 * u + 0.46 * n
+		# Dusk sun slants low through the north window across Yumeka's side face and sandbox.
+		var from_p := Vector3(1.3, 3.1, -3.8) * d + Vector3(1.8, 2.45, -3.2) * u + Vector3(-1.2, 2.7, -3.6) * n
+		var to_p := Vector3(-0.35, 0.55, 1.0) * d + Vector3(-0.15, 0.90, 0.65) * u + Vector3(0.15, 0.65, 0.85) * n
+		_window_sun.look_at_from_position(from_p, to_p, Vector3.UP)
+
+	if _interior_bounce != null:
+		_interior_bounce.light_color = Color(0.96, 0.92, 0.86) * d + Color(0.92, 0.64, 0.54) * u + Color(0.28, 0.36, 0.58) * n
+		_interior_bounce.light_energy = 0.22 * d + 0.18 * u + 0.08 * n
+
+	if _ceiling_fill != null:
+		_ceiling_fill.light_color = Color(1.0, 0.92, 0.80) * d + Color(1.0, 0.76, 0.56) * u + Color(0.42, 0.50, 0.72) * n
+		_ceiling_fill.light_energy = 0.14 * d + 0.10 * u + 0.04 * n
+
+	# Warm table lamp lights up automatically through dusk into night.
+	var lamp_energy := 0.0 * d + 0.48 * u + 1.45 * n
+	if _desk_lamp_light != null:
+		_desk_lamp_light.light_energy = lamp_energy
+		_desk_lamp_light.visible = lamp_energy > 0.01
+	if _desk_lamp_shade_mat != null:
+		_desk_lamp_shade_mat.emission = Color(1.0, 0.86, 0.58) * d + Color(1.0, 0.74, 0.36) * u + Color(1.0, 0.72, 0.32) * n
+		_desk_lamp_shade_mat.emission_energy_multiplier = 0.10 * d + 0.95 * u + 1.75 * n
+	if _curtain_mat != null:
+		# Subtle warm inner bounce keeps sheer curtains luminous instead of turning muddy at night.
+		_curtain_mat.emission_enabled = (u + n) > 0.05
+		_curtain_mat.emission = Color(1.0, 0.76, 0.52) * u + Color(0.95, 0.74, 0.46) * n
+		_curtain_mat.emission_energy_multiplier = 0.08 * u + 0.10 * n
+	if _ceiling_lamp_shade_mat != null:
+		_ceiling_lamp_shade_mat.emission_energy_multiplier = 0.22 * d + 0.16 * u + 0.04 * n
+	if _monitor_mat != null:
+		_monitor_mat.emission_energy_multiplier = 0.38 * d + 0.62 * u + 0.94 * n
+	if _window_glass_mat != null:
+		_window_glass_mat.albedo_color = Color(0.92, 0.96, 1.0, 0.11) * d \
+				+ Color(1.0, 0.82, 0.66, 0.13) * u + Color(0.18, 0.26, 0.46, 0.18) * n
+
+	if _bedroom_env != null:
+		_bedroom_env.ambient_light_color = Color(0.96, 0.91, 0.84) * d \
+				+ Color(0.88, 0.64, 0.58) * u + Color(0.22, 0.29, 0.48) * n
+		_bedroom_env.ambient_light_energy = 0.28 * d + 0.24 * u + 0.18 * n
+		_bedroom_env.tonemap_exposure = 0.82 * d + 0.84 * u + 0.88 * n

@@ -80,6 +80,7 @@ func configure(driver: Skeleton3D) -> void:
 				alignments[wrist] = target_name
 			break
 
+	shade_anime_materials(meshes)
 	_configure_pose(driver, mapping, alignments, ALIGN_YAW)
 
 

@@ -11,23 +11,22 @@ const FIT_SCALE := 1.1840
 # Keep the body clear of the ground; tuned against the sit / sit-idle poses.
 const FLOOR_OFFSET := 0.0
 
-# Unlit MToon base color is too hot under the harbor sun, so every PBR copy gets a
-# fully matte, zero-specular finish. The near-white maps are also tinted per material
-# family instead of one shared multiplier: the white maid dress and stockings used to
-# clip to plain white because only SKIN/HAIR were dimmed.
-const SHADE_ROUGHNESS := 1.0
-const SHADE_SPECULAR := 0.0
-# Warm, slightly darker than the dress so the face still reads as skin next to white cloth.
-const TINT_SKIN := Color(0.80, 0.73, 0.70)
-# Everything not skin/hair/eye: white dress, apron, sleeve frills and stockings.
-const TINT_CLOTH := Color(0.70, 0.71, 0.75)
-# Hair and the fox tail: cool white, a touch brighter than the dress.
-const TINT_HAIR := Color(0.75, 0.78, 0.84)
-const NO_TINT := Color(1.0, 1.0, 1.0)
+# Unlit MToon base color clips into flat chalky white under sunlight (especially with
+# DIFFUSE_TOON's hard step). Use soft Burley matte PBR (roughness ~0.89, specular ~0.16)
+# and restrain bright whites into the 0.84-0.90 range so facial features, bangs, and white
+# maid-dress folds stay readable under AGX daylight and react naturally to dusk/night light.
+const SHADE_ROUGHNESS := 0.89
+const SHADE_SPECULAR := 0.16
+# Warm peach-ivory skin tint so the face reads softly against the white hair and outfit.
+const TINT_SKIN := Color(0.88, 0.83, 0.81)
+# Everything not skin/hair/eye: white maid dress, apron, sleeve frills and stockings.
+const TINT_CLOTH := Color(0.84, 0.85, 0.88)
+# Hair and fox tail: cool snowy white, slightly brighter than the cloth.
+const TINT_HAIR := Color(0.86, 0.87, 0.90)
+const NO_TINT := Color(0.95, 0.95, 0.96)
 const SKIN_HINTS := ["SKIN", "FACE"]
 const HAIR_HINTS := ["HAIR", "TAIL"]
-# Only the eye balls/highlights keep their authored brightness; eyelashes and eyelines
-# belong to the face and follow the skin tint.
+# Eyes keep near-authored brightness without clipping the eye whites.
 const EYE_HINTS := ["_EYE"]
 
 const HAIR_ZONE := 0
@@ -42,7 +41,7 @@ class SecondaryChain:
 	var phase := 0.0
 
 
-var diffuse_mode := BaseMaterial3D.DIFFUSE_TOON
+var diffuse_mode := BaseMaterial3D.DIFFUSE_BURLEY
 
 var _chains: Array[SecondaryChain] = []
 var _sec_ready := false
@@ -158,29 +157,10 @@ func follow_pose(pelvis_scale := 1.0) -> void:
 		_apply_secondary_motion()
 
 
-# MToon arrives as KHR_materials_unlit, which shades nothing. Re-shade the albedo-only
-# StandardMaterial3D copies so the giant reads with form under the game sun.
+# MToon arrives as KHR_materials_unlit, which shades nothing. Re-shade to soft matte PBR
+# so facial features and white garment folds read clearly under AGX sunlight and night light.
 func _shade_unlit_materials() -> void:
-	for mesh in meshes:
-		for surface in mesh.mesh.get_surface_count():
-			var mat := mesh.mesh.surface_get_material(surface) as StandardMaterial3D
-			if mat == null or mat.shading_mode != BaseMaterial3D.SHADING_MODE_UNSHADED:
-				continue
-			var shaded := mat.duplicate() as StandardMaterial3D
-			shaded.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-			shaded.diffuse_mode = diffuse_mode
-			shaded.roughness = SHADE_ROUGHNESS
-			shaded.metallic = 0.0
-			shaded.metallic_specular = SHADE_SPECULAR
-			shaded.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
-			shaded.emission_enabled = false
-			var tint := material_tint(shaded.resource_name)
-			shaded.albedo_color = Color(
-				shaded.albedo_color.r * tint.r,
-				shaded.albedo_color.g * tint.g,
-				shaded.albedo_color.b * tint.b,
-				shaded.albedo_color.a)
-			mesh.set_surface_override_material(surface, shaded)
+	shade_anime_materials(meshes, material_tint, diffuse_mode, SHADE_ROUGHNESS, SHADE_SPECULAR)
 
 
 ## Tint for one imported material. Every family except the eyes is dimmed so nothing turns

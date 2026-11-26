@@ -63,6 +63,18 @@ const OPTIONS := [
 		"key": "own_camera_shake", "label": "自身震动", "hint": "自己踩踏时镜头是否跟着震。",
 		"kind": "toggle", "page": PAGE_GRAPHICS, "scope": "display", "apply": APPLY_LIVE,
 	},
+	{
+		"key": "time_of_day", "label": "昼夜时段",
+		"hint": "切换港口与卧室的光照时段（自动循环 / 固定白天 / 固定黄昏 / 固定夜晚）；局内按 F7 可快速轮切。",
+		"kind": "choice",
+		"choices": [
+			{"value": "auto", "label": "自动昼夜循环"},
+			{"value": "day", "label": "固定白天"},
+			{"value": "dusk", "label": "固定黄昏"},
+			{"value": "night", "label": "固定夜晚"},
+		],
+		"page": PAGE_GRAPHICS, "scope": "display", "apply": APPLY_LIVE,
+	},
 
 	# --- 地图与开局 ---------------------------------------------------------
 	{

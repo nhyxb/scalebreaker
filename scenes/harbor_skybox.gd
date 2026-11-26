@@ -148,3 +148,10 @@ func _process(_delta: float) -> void:
 ## seated Yumeka) — call this whenever such content animates.
 func mark_dirty() -> void:
 	_pose_dirty = true
+
+
+## Forward day/dusk/night atmosphere weights to the bedroom world and force a redraw.
+func apply_day_night(day_w: float, dusk_w: float, night_w: float, cycle_time: float = 0.0) -> void:
+	if bedroom != null and bedroom.has_method(&"apply_day_night"):
+		bedroom.call(&"apply_day_night", day_w, dusk_w, night_w, cycle_time)
+	mark_dirty()

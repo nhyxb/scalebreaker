@@ -2,6 +2,7 @@ extends Node3D
 
 const HistoricBuildings := preload("res://scenes/historic_buildings.gd")
 const BuildingBatches := preload("res://scenes/district_batches.gd")
+const CityNightLights := preload("res://scenes/city_night_lights.gd")
 const BUILDING_LAYER := 8
 const RUBBLE_LAYER := 16
 
@@ -238,8 +239,14 @@ func _build_kit_intact() -> Node3D:
 	for slot_transform: Transform3D in slots:
 		for part: Array in parts:
 			var instance := MeshInstance3D.new()
-			instance.mesh = part[0]
+			var part_mesh: Mesh = part[0]
+			instance.mesh = part_mesh
 			instance.transform = slot_transform * (part[1] as Transform3D)
+			if part_mesh != null:
+				for surf in part_mesh.get_surface_count():
+					var night_mat := CityNightLights.near_building_material(part_mesh.surface_get_material(surf))
+					if night_mat != null:
+						instance.set_surface_override_material(surf, night_mat)
 			model.add_child(instance)
 	return wrapper
 

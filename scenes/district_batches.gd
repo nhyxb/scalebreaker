@@ -16,6 +16,7 @@ extends Node3D
 ## `cracked` buildings are tinted through the per-instance colour instead of a material
 ## overlay, which costs nothing.
 
+const CityNightLights := preload("res://scenes/city_night_lights.gd")
 const NEAR_RADIUS := 280.0
 ## The near/far split is only refreshed after the camera moved this far (metres).
 const REFILL_STEP := 40.0
@@ -318,15 +319,12 @@ func _normalized_proxy(spec: String) -> ArrayMesh:
 	var normalize := Transform3D(
 			Basis.IDENTITY.scaled(Vector3(1.0 / size.x, 1.0 / size.y, 1.0 / size.z)),
 			Vector3(-bounds.position.x / size.x, -bounds.position.y / size.y, -bounds.position.z / size.z))
-	return merge_parts(parts, normalize)
+	return merge_parts(parts, normalize, true)
 
 
 func _box_proxy() -> ArrayMesh:
 	var size := Vector3(1.0, 1.0, 1.0)
-	var material := StandardMaterial3D.new()
-	material.vertex_color_use_as_albedo = true
-	material.vertex_color_is_srgb = false
-	material.roughness = 0.9
+	var material: Material = CityNightLights.far_box_material()
 	var body := BoxMesh.new()
 	body.material = material
 	body.size = Vector3(size.x, size.y * 0.86, size.z)
@@ -335,7 +333,7 @@ func _box_proxy() -> ArrayMesh:
 	roof.material = material
 	roof.size = Vector3(size.x * 1.04, size.y * 0.14, size.z * 1.04)
 	parts.append([roof, Transform3D(Basis.IDENTITY, Vector3(0.0, size.y * 0.93, 0.0))])
-	return merge_parts(parts, Transform3D())
+	return merge_parts(parts, Transform3D(), true)
 
 
 func _mound_proxy() -> ArrayMesh:
@@ -388,7 +386,7 @@ static func tintable(source: Material) -> Material:
 	return material
 
 
-static func merge_parts(parts: Array, place := Transform3D()) -> ArrayMesh:
+static func merge_parts(parts: Array, place := Transform3D(), far_proxy := false) -> ArrayMesh:
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
@@ -428,7 +426,14 @@ static func merge_parts(parts: Array, place := Transform3D()) -> ArrayMesh:
 	merged_arrays[Mesh.ARRAY_TEX_UV] = uvs
 	merged_arrays[Mesh.ARRAY_INDEX] = indices
 	merged.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, merged_arrays)
-	merged.surface_set_material(0, tintable(material))
+	var final_mat: Material = null
+	if far_proxy:
+		final_mat = material if material is ShaderMaterial else CityNightLights.far_textured_material(material)
+	else:
+		final_mat = CityNightLights.near_building_material(material)
+	if final_mat == null:
+		final_mat = tintable(material)
+	merged.surface_set_material(0, final_mat)
 	return merged
 
 

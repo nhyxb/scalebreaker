@@ -96,4 +96,5 @@ func configure(driver: Skeleton3D) -> void:
 	rotation.y = -PI * 0.5
 	scale = Vector3.ONE * FIT_SCALE
 	position = -(basis * skeleton.position) + Vector3.UP * FLOOR_OFFSET
+	shade_anime_materials(meshes)
 	_configure_pose(driver, DRIVER_BONES, ALIGN_TOWARD, ALIGN_YAW)

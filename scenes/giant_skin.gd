@@ -119,6 +119,56 @@ func _configure_pose(driver: Skeleton3D, mapping: Dictionary, alignments: Dictio
 			_pelvis_height_ratio = clampf(target_hip.y / driver_hip.y, 0.75, 1.25)
 
 
+const ANIME_ROUGHNESS := 0.89
+const ANIME_SPECULAR := 0.16
+const ANIME_DEFAULT_TINT := Color(0.88, 0.88, 0.90)
+const ANIME_EYE_TINT := Color(0.95, 0.95, 0.96)
+const ANIME_OUTLINE_TINT := Color(0.75, 0.75, 0.75)
+
+
+## Converts imported KHR_materials_unlit / overly hot character materials to soft matte PBR
+## (roughness ~0.89, specular ~0.16, gently tempered whites) so faces and white outfits read
+## cleanly under AGX sunlight and respond naturally to dusk and night lighting.
+static func shade_anime_materials(target_meshes: Array[MeshInstance3D],
+		tint_fn: Callable = Callable(),
+		diffuse_mode := BaseMaterial3D.DIFFUSE_BURLEY,
+		roughness := ANIME_ROUGHNESS,
+		specular := ANIME_SPECULAR) -> void:
+	for mesh in target_meshes:
+		if mesh == null or mesh.mesh == null:
+			continue
+		for surface in mesh.mesh.get_surface_count():
+			var mat := mesh.mesh.surface_get_material(surface) as StandardMaterial3D
+			if mat == null:
+				continue
+			var shaded := mat.duplicate() as StandardMaterial3D
+			shaded.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+			shaded.diffuse_mode = diffuse_mode
+			shaded.specular_mode = BaseMaterial3D.SPECULAR_SCHLICK_GGX
+			shaded.roughness = roughness
+			shaded.metallic = 0.0
+			shaded.metallic_specular = specular
+			shaded.emission_enabled = false
+			var tint: Color = tint_fn.call(shaded.resource_name) if tint_fn.is_valid() \
+					else default_anime_tint(shaded.resource_name)
+			shaded.albedo_color = Color(
+				shaded.albedo_color.r * tint.r,
+				shaded.albedo_color.g * tint.g,
+				shaded.albedo_color.b * tint.b,
+				shaded.albedo_color.a,
+			)
+			mesh.set_surface_override_material(surface, shaded)
+
+
+static func default_anime_tint(material_name: String) -> Color:
+	var upper := material_name.to_upper()
+	if upper.contains("_EYE") or upper == "EYES":
+		return ANIME_EYE_TINT
+	if upper.contains("OUTLINE"):
+		return ANIME_OUTLINE_TINT
+	return ANIME_DEFAULT_TINT
+
+
 func pelvis_height_ratio() -> float:
 	return _pelvis_height_ratio
 
