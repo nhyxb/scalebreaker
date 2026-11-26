@@ -11,6 +11,7 @@ __pycache__/
 .aws/
 .codex/
 .agents/
-/.dsh/
+/.dsh/*
+!/.dsh/skills
 /.wtest
 .DS_Store
