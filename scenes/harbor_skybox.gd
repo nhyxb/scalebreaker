@@ -24,11 +24,21 @@ var _sky_cam: Camera3D
 var _layer: CanvasLayer
 var _rect: TextureRect
 var _anchor: Node3D
-var _half_flip := false
 var _last_vp_size := Vector2i.ZERO
+## Change-driven refresh state: the backdrop re-renders only on frames the main camera's
+## pose/fov/frustum actually moved, so fast rotation shows zero frame lag while static
+## frames skip the second viewport entirely.
+var _pose_dirty := true
+var _last_cam_xf := Transform3D()
+var _last_cam_fov := -1.0
+var _last_cam_keep_aspect := -1
+var _last_cam_offset := Vector2(NAN, NAN)
 
 
 func _ready() -> void:
+	# Run after HarbourRound settles the gameplay camera this frame (higher priority runs
+	# later), so the bedroom copy always uses the final pose — no 1–2 frame rotation lag.
+	process_priority = 100
 	var is_mobile := _is_mobile_platform()
 	_sub = SubViewport.new()
 	_sub.name = "BedroomViewport"
@@ -56,7 +66,14 @@ func _ready() -> void:
 	_rect = TextureRect.new()
 	_rect.name = "BedroomPicture"
 	_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	# EXPAND_IGNORE_SIZE + STRETCH_SCALE: the old default EXPAND_KEEP_SIZE let the viewport
+	# texture drive the control's minimum size, so a 0.85-ratio 1632x918 texture at a
+	# 1920x1080 window blew the rect up to 1.275x the 1280x720 logical canvas and shifted
+	# the optical centre ~14% down-right — floating the sandbox off the desk. With
+	# ignore-size the full-rect anchors alone govern: the rect is exactly the visible
+	# canvas at every window resolution and RES_RATIO.
+	_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_rect.stretch_mode = TextureRect.STRETCH_SCALE
 	_rect.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_rect.texture = _sub.get_texture()
@@ -109,8 +126,25 @@ func _process(_delta: float) -> void:
 	_sky_cam.global_transform = _anchor.global_transform \
 			* Transform3D(xf.basis, xf.origin * SKY_SCALE)
 	_sky_cam.fov = cam.fov
-	# The backdrop moves imperceptibly at 1:6667, so rendering the bedroom every other
-	# frame halves the second viewport's cost on integrated GPUs with no visible loss.
-	if _half_flip:
+	_sky_cam.keep_aspect = cam.keep_aspect
+	_sky_cam.h_offset = cam.h_offset * SKY_SCALE
+	_sky_cam.v_offset = cam.v_offset * SKY_SCALE
+	# Change-driven refresh: render the bedroom the very frame the camera moved so fast
+	# rotation shows zero lag, and skip the second viewport entirely while it is static.
+	# (The old alternating _half_flip rendered unconditionally on odd frames and lagged.)
+	var offset := Vector2(cam.h_offset, cam.v_offset)
+	if _pose_dirty or _last_cam_xf != xf or _last_cam_fov != cam.fov \
+			or _last_cam_keep_aspect != cam.keep_aspect or _last_cam_offset != offset:
 		_sub.render_target_update_mode = SubViewport.UPDATE_ONCE
-	_half_flip = not _half_flip
+		_last_cam_xf = xf
+		_last_cam_fov = cam.fov
+		_last_cam_keep_aspect = cam.keep_aspect
+		_last_cam_offset = offset
+		_pose_dirty = false
+
+
+## Queue one immediate backdrop re-render, outside camera-tracking timescales. Needed by
+## any future bedroom content the change-driven refresh cannot see (e.g. the phase-3
+## seated Yumeka) — call this whenever such content animates.
+func mark_dirty() -> void:
+	_pose_dirty = true

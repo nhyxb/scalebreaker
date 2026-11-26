@@ -32,7 +32,7 @@ func _run() -> void:
 	root.add_child(_game)
 	await process_frame
 	_check(_game.get_screen() == "menu", "main menu opens")
-	_bedroom_skybox()
+	await _bedroom_skybox()
 	await _human_controls()
 	await _human_evacuates()
 	await _human_vs_ai()
@@ -78,6 +78,22 @@ func _bedroom_skybox() -> void:
 	_check(rect.texture_filter == CanvasItem.TEXTURE_FILTER_LINEAR
 			and sub.size.x >= mini(win.x, expected_min) and sub.msaa_3d == Viewport.MSAA_2X,
 			"desktop skybox renders with linear filtering, high resolution ratio and 2x MSAA")
+	# Regression guard for the real-recording sandbox-float bug (2026-11-26): the backdrop
+	# rect must ignore the viewport texture's size and stay exactly the visible canvas even
+	# when the 0.85-ratio texture exceeds the 1280x720 base (1920x1080 -> 1632x918).
+	sky.set_process(false)
+	sky._resize(Vector2(1920.0, 1080.0))
+	await process_frame
+	await process_frame
+	_check(rect.expand_mode == TextureRect.EXPAND_IGNORE_SIZE
+			and rect.stretch_mode == TextureRect.STRETCH_SCALE,
+			"backdrop rect ignores texture size and scales it (no min-size overflow)")
+	_check(sub.size.x > int(root.get_visible_rect().size.x)
+			and rect.size == root.get_visible_rect().size,
+			"backdrop rect equals the visible canvas even with a larger texture (sandbox not floating)")
+	sky.set_process(true)
+	await process_frame
+	await process_frame
 	var furniture := bedroom.get_node_or_null("Furniture")
 	var required := [
 		"Desk", "ChairDesk", "ComputerScreen", "ComputerKeyboard", "ComputerMouse",

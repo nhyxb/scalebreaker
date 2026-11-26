@@ -4,6 +4,72 @@
 
 ---
 
+## 2026-11-26 — 修复实机录屏「沙盘悬空/不在桌子上」投影错位：卧室背景 TextureRect 溢出、相机属性同步、变化驱动刷新与接触影增强
+
+备份：`backups/20261126_140922_skybox_float_fix/{scenes/{harbor_skybox.gd,skybox_bedroom.gd},tests/playtest.gd,CHANGELOG.md,MEMORY.md}`（改动前副本）。
+回滚：
+
+```sh
+cp backups/20261126_140922_skybox_float_fix/scenes/harbor_skybox.gd scenes/harbor_skybox.gd
+cp backups/20261126_140922_skybox_float_fix/scenes/skybox_bedroom.gd scenes/skybox_bedroom.gd
+cp backups/20261126_140922_skybox_float_fix/tests/playtest.gd tests/playtest.gd
+```
+
+### 一、根因（headless 数值复现）
+
+- `scenes/harbor_skybox.gd` 的 `_rect` 未设 `expand_mode`（Godot 4 默认 `EXPAND_KEEP_SIZE`，用 SubViewport 纹理尺寸当控件最小尺寸）。窗口超过 1506×847 时 `DESKTOP_RES_RATIO=0.85` 使 `_sub.size` 超过 1280×720 基准逻辑画布（1920×1080 → 1632×918），`_rect` 被撑大 1.275× 并从画布左上溢出，卧室背景整体放大且光学中心右下偏约 14%，主世界沙盘与卧室书桌完全错位悬空。headless 复现：强制 `_resize(1920×1080)` 后修复前 `rect.size = rect.get_minimum_size() = 1632×918`；修复后 `rect.size = 1280×720 = root.get_visible_rect().size`、最小尺寸归零。
+- `_half_flip` 无条件隔帧刷新 + 未设 `process_priority`：快速旋转时卧室背景滞后主相机 1–2 帧，沙盘在桌面上打滑。
+
+### 二、修复（`scenes/harbor_skybox.gd`、`scenes/skybox_bedroom.gd`）
+
+1. `_rect` 补 `expand_mode = EXPAND_IGNORE_SIZE`、`stretch_mode = STRETCH_SCALE`（保留 `PRESET_FULL_RECT`）：任何窗口分辨率与 RES_RATIO 下背景矩形严格等于主视口可见画布，光学中心与主相机 100% 重合。
+2. `_sky_cam` 同步 `keep_aspect = cam.keep_aspect`、`h_offset = cam.h_offset * SKY_SCALE`、`v_offset = cam.v_offset * SKY_SCALE`。
+3. `_ready()` 设 `process_priority = 100`（主相机当帧更新完后再同步卧室相机）；删除 `_half_flip`，改**变化驱动刷新**：相机位姿/fov/keep_aspect/h-v offset 任一变化当帧 `UPDATE_ONCE`，静止帧零重渲；新增公共 `mark_dirty()`——阶段 3 卧室内的动画内容（坐姿 Yumeka 等）每帧必须调用。
+4. `SandboxContactShadow` 接触影峰透明度 0.18 → 0.42（`scenes/skybox_bedroom.gd`）：沙盘木框底边在书桌上有清晰柔和的落地压暗。
+
+### 三、防回归与验证（本轮全部完成；视觉目视未完成项单独声明）
+
+- `tests/playtest.gd::_bedroom_skybox()` 新增两条断言：`expand_mode == EXPAND_IGNORE_SIZE && stretch_mode == STRETCH_SCALE`；强制 `_resize(1920×1080)` 使 `sub.size = 1632×918 > 1280×720` 时 `rect.size` 仍严格等于 `root.get_visible_rect().size`（旧代码此处即为 1632×918 溢出，必红）。
+- Rust：`cargo build --locked` 与 `cargo test --locked` **40/40 通过**；Godot 8 套 headless 回归 **673 项全绿**（playtest 214（含新断言）/ growth 192 / brawl 43 / mode_menu 45 / touch 42 / audio 36 / sit_crush_gameplay 44 / sit_crush 57）。
+- 变化驱动刷新机制探针（`build/tmp/backdrop_refresh_probe.gd`，Xvfb + llvmpipe，裸 Skybox）：静止 4 帧纹理字节恒定（跳过渲染成立）；连续 4 帧大幅移动每帧字节都变化（**同帧 `UPDATE_ONCE` 连续重赋值有效**，修复了旋转零帧滞后）；停止移动后 3 帧立即稳定。
+- 1920×1080（`--resolution 1920x1080` 建窗，`sub=1632×918`，即 bug 触发口径）Xvfb 截图 6 张存 `build/tmp/float_fix_shots/`（renderer=llvmpipe，光栅化结果与硬件一致，仅速度慢）。首轮 1152×648 对照组（sub 未超基准，不构成 bug 条件）存 `build/tmp/float_fix_shots_1152/`，其卧室直出图 05/06 已目视核验：**框底与桌面接触处无缝隙、无悬浮、无墙色/地板漏出**，阴影均匀无污染周边物件。
+- **未完成项（如实声明）**：1920×1080 六张主图的逐张目视核验因视觉后端限流/超时暂未进行，待下一轮恢复后补验；补验如发现木框底边漏墙/悬浮按规范列待修。
+- 动态旋转帧率（真核显）按项目显示规范须由**用户在真实桌面**运行（llvmpipe 下长基准被禁止、数据无意义）：`build/tmp/rotation_bench.gd` 已备好（`ab_probe` 同口径：420 帧预热 + 60 帧采样、vsync 关；1280×720 与 1920×1080 两窗口 ABBA 交叉；headless 冒烟 8 段通过）。命令：
+  `MESA_LOADER_DRIVER_OVERRIDE=radeonsi timeout 300 godot --path . --resolution 1916x1077 --script res://build/tmp/rotation_bench.gd`
+- 顺带勘误 MEMORY：`ab_probe.gd` 为 60 帧采样（非 60 秒）。
+
+---
+
+## 2026-11-26 — 新增永久测试规范：视觉/渲染测试一律用隔离虚拟显示，禁止占用用户真实桌面
+
+备份：`backups/20261126_140608_virtual_display_spec/{AGENTS.md,SKILL.md,MEMORY.md,CHANGELOG.md}`（改动前副本；`SKILL.md` 原路径 `.dsh/skills/harbor-alert-workflow/SKILL.md`）。
+回滚：
+
+```sh
+cp backups/20261126_140608_virtual_display_spec/AGENTS.md AGENTS.md
+cp backups/20261126_140608_virtual_display_spec/SKILL.md .dsh/skills/harbor-alert-workflow/SKILL.md
+cp backups/20261126_140608_virtual_display_spec/MEMORY.md MEMORY.md
+```
+
+### 一、规范内容（`AGENTS.md` + `.dsh/skills/harbor-alert-workflow/SKILL.md`）
+
+- **禁止占用用户的真实桌面窗口**：跑 Godot 渲染截图、探针脚本（含 `tests/gpu_probe.gd`）或任何 GPU 测试时，不得把窗口弹到用户真实桌面（不抢焦点、不挤占平铺窗口）。
+- **改用内存中的隔离虚拟显示，先检测再降级**：
+  1. 先检测本机是否支持带 AMD Renoir 硬件加速的无头虚拟显示——优先 `xvfb-run` 配 `vglrun -d /dev/dri/renderD128`，或 `weston --backend=headless --use-gl` / `gamescope` 等虚拟 Wayland 显示；开跑前必须验证 `OpenGL renderer` 仍是 AMD Radeon 而非 `llvmpipe`（测核显需 `MESA_LOADER_DRIVER_OVERRIDE=radeonsi`）。
+  2. 本机只有纯 `Xvfb`（如 `xvfb-run -a -s "-screen 0 1920x1080x24"`，本机需手动 `Xvfb :97`）时：仅允许**少量帧**的截图与布局验证（命令挂 `timeout`）；**禁止**在掉回 `llvmpipe` 的纯 `Xvfb` 里硬跑长帧率 ABBA 基准，需要真实核显 FPS 时明确提示用户在真实桌面自行运行。
+- **纯逻辑与回归测试继续 `--headless`**。
+- 落点：`AGENTS.md` 新增「视觉/渲染测试显示规范（永久）」一节，工作流技能条数 4 → 5、`gpu_probe` 的窗口要求指向该规范；SKILL.md 新增第 5 条硬性规范，第 2 条的禁窗/截图条款改为与第 5 条衔接（不矛盾），交付前自查补显示隔离与 FPS 来源两项；`MEMORY.md` 记录本机隔离显示能力实测（见下）。
+
+### 二、本轮实测依据（检测全程未触碰用户真实桌面）
+
+- 工具链：`vglrun`/`weston`/`gamescope`/`xvfb-run` 均未装；`Xvfb`/`glxinfo`/`eglinfo` 可用。`/dev/dri/by-path` 确认 `renderD128`＝AMD（08:00.0）、`renderD129`＝NVIDIA（01:00.0）。
+- `DISPLAY= WAYLAND_DISPLAY= timeout 40 eglinfo -B`（surfaceless，不碰真实桌面）：`AMD Radeon Graphics (radeonsi, renoir, ACO, DRM 3.64)`；另有 llvmpipe 设备（LLVM 23.1.5）。
+- 纯 `Xvfb`（`Xvfb :97 -screen 0 1920x1080x24` + `DISPLAY=:97 glxinfo -B`）：`OpenGL renderer string: llvmpipe (LLVM 23.1.5, 256 bits)`。
+- 纯 Xvfb 内 Godot 4.7.2 窗口探针：`XDG_DATA_HOME="$PWD/build/xdg" DISPLAY=:97 timeout 90 godot --path . --quit-after 5` → exit=0、约 23 s（渲染后端 `gl_compatibility`，日志 `Using Device: Mesa - llvmpipe`）——「少量帧截图/布局验证」路径可行；按新规范未跑任何 FPS 基准。
+- 本轮为纯文档/规范改动，无 Rust 与场景代码变更，无需 `cargo build/test` 与 playtest。
+
+---
+
 ## 2026-11-26 — 阶段 2 录屏问题修复：移除外海/船礁、主世界微缩沙盘木框、卧室单灯阴影、桌面疏朗化与启动报错治理
 
 备份：`backups/20261126_130550_phase2_diorama_polish/{scenes,scripts,tests,rust/src,project.godot,CHANGELOG.md,MEMORY.md}`（改动前完整源码副本）。

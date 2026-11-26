@@ -294,7 +294,7 @@ render_mode unshaded, depth_draw_never, cull_disabled;
 void fragment() {
 	vec2 d = abs(UV - vec2(0.5)) * 2.0;
 	float edge = max(d.x, d.y);
-	float alpha = (1.0 - smoothstep(0.74, 1.0, edge)) * 0.18;
+	float alpha = (1.0 - smoothstep(0.74, 1.0, edge)) * 0.42;
 	ALBEDO = vec3(0.16, 0.11, 0.07);
 	ALPHA = alpha;
 }
