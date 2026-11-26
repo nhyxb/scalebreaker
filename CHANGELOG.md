@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-11-26 — 夜景人脸补光微调：城内角色背光可读性提升 + 仰视 Yumeka 左眼硬影柔化
+
+备份：`backups/20261126_192300_night_face_fill_polish/{scenes/{day_night_cycle.gd,skybox_bedroom.gd},CHANGELOG.md}`。
+回滚：
+
+```sh
+cp -a backups/20261126_192300_night_face_fill_polish/scenes/{day_night_cycle.gd,skybox_bedroom.gd} scenes/
+cp backups/20261126_192300_night_face_fill_polish/CHANGELOG.md CHANGELOG.md
+```
+
+### 改动内容（仅调整夜间分支，白天/黄昏及万家灯火/星夜保持不变）
+
+- **城内夜景角色背光补光**（`scenes/day_night_cycle.gd`）：夜间主世界 `SkyMaterial` 地平线与地面漫反射略带书桌暖光倾向（`sky_horizon=(0.38,0.36,0.46)`、`ground_bottom=(0.36,0.30,0.28)`），夜间 `ambient_light_color=(0.50,0.48,0.58)`、`ambient_light_energy=0.78`，月光 `Sun` 提至 `0.46` 且阴影透明度柔化至 `0.52`（`tonemap_exposure=1.06`），让 50 m / 500 m 视角下背光面的 `snow_fox` 五官与白衣褶皱清晰可读，同时维持深蓝街区与万家灯火高对比度。
+- **卧室夜景 Yumeka 左眼硬影柔化**（`scenes/skybox_bedroom.gd`）：零新增光源节点，夜间将既有无阴影 `CeilingFill` 平滑移至左前显示器/桌面反光位（`(-0.38, DESK_TOP+0.38, -0.06)`、短距 `omni_range=2.0`、`attenuation=1.55`、`energy=0.52`），配合 `WindowSun` 夜间阴影柔化至 `0.12` 与 `DeskLampLight` 微抬至 `(0.42, DESK_TOP+0.34, -0.10)`（`range=4.4`、`energy=1.32`），在保持远墙深蓝夜色与暖黄台灯主氛围的同时彻底化开左眼与左颊的硬暗切线。
+
+### 验证
+
+- **视觉核验（隔离 `Xvfb :97`，`llvmpipe`，1280×720 少量帧，零真实桌面占用）**：复拍 `build/tmp/night_face_fill_shots/{01_night_lookup_yumeka_face,02_night_50m_snowfox_front,03_night_500m_overview}.png`（不入库）——仰视 Yumeka 双眼双颊柔和通透、左眼硬黑切线消失、远墙保持深蓝；50 m `snow_fox` 严苛背光正面五官/发丝/围裙折痕清晰且不过曝，建筑窗户高对比度不衰减；实机核显 FPS 未测。
+- **回归全绿**：`cargo test --locked` **41/41**；8 套 Godot `--headless` 回归 **687/687**（`playtest` 228 / `growth` 192 / `mode_menu` 45 / `touch` 42 / `sit_crush_gameplay` 44 / `sit_crush` 57 / `brawl` 43 / `audio` 36）及 `--quit-after 5` 零报错。
+
+---
+
 ## 2026-11-26 — 画面质感与昼夜氛围精装升级：卧室精装、角色防过曝 AGX 光照、零新增光源万家灯火与暖黄台灯联动
 
 备份：`backups/20261126_175630_visual_polish_daynight/{scenes,rust/src,tests,scripts,project.godot,CHANGELOG.md,MEMORY.md}`。

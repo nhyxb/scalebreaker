@@ -1391,11 +1391,11 @@ func _build_lights() -> void:
 	# at dusk/night to softly illuminate Yumeka's face, shoulders, and the desktop diorama.
 	_desk_lamp_light = OmniLight3D.new()
 	_desk_lamp_light.name = "DeskLampLight"
-	_desk_lamp_light.position = Vector3(0.45, DESK_TOP + 0.295, -0.18)
+	_desk_lamp_light.position = Vector3(0.42, DESK_TOP + 0.34, -0.10)
 	_desk_lamp_light.light_color = Color(1.0, 0.76, 0.44)
 	_desk_lamp_light.light_energy = 0.0
-	_desk_lamp_light.omni_range = 3.8
-	_desk_lamp_light.omni_attenuation = 1.30
+	_desk_lamp_light.omni_range = 4.4
+	_desk_lamp_light.omni_attenuation = 1.15
 	_desk_lamp_light.shadow_enabled = false
 	_desk_lamp_light.visible = false
 	lights.add_child(_desk_lamp_light)
@@ -1545,22 +1545,34 @@ func apply_day_night(day_w: float, dusk_w: float, night_w: float, cycle_time: fl
 	if _window_sun != null:
 		_window_sun.light_color = Color(1.0, 0.93, 0.82) * d + Color(1.0, 0.56, 0.28) * u + Color(0.46, 0.62, 0.94) * n
 		_window_sun.light_energy = 0.76 * d + 0.84 * u + 0.16 * n
-		_window_sun.shadow_opacity = 0.56 * d + 0.64 * u + 0.46 * n
+		# Keep night moonlight shadow very soft so bangs/window frame never cut a hard dark line across Yumeka's eyes.
+		_window_sun.shadow_opacity = 0.56 * d + 0.64 * u + 0.12 * n
 		# Dusk sun slants low through the north window across Yumeka's side face and sandbox.
-		var from_p := Vector3(1.3, 3.1, -3.8) * d + Vector3(1.8, 2.45, -3.2) * u + Vector3(-1.2, 2.7, -3.6) * n
-		var to_p := Vector3(-0.35, 0.55, 1.0) * d + Vector3(-0.15, 0.90, 0.65) * u + Vector3(0.15, 0.65, 0.85) * n
+		var from_p := Vector3(1.3, 3.1, -3.8) * d + Vector3(1.8, 2.45, -3.2) * u + Vector3(-0.3, 2.8, -3.6) * n
+		var to_p := Vector3(-0.35, 0.55, 1.0) * d + Vector3(-0.15, 0.90, 0.65) * u + Vector3(0.05, 0.75, 0.85) * n
 		_window_sun.look_at_from_position(from_p, to_p, Vector3.UP)
 
 	if _interior_bounce != null:
-		_interior_bounce.light_color = Color(0.96, 0.92, 0.86) * d + Color(0.92, 0.64, 0.54) * u + Color(0.28, 0.36, 0.58) * n
-		_interior_bounce.light_energy = 0.22 * d + 0.18 * u + 0.08 * n
+		# Keep global interior bounce gentle at night so far bedroom walls retain deep midnight-blue depth.
+		_interior_bounce.light_color = Color(0.96, 0.92, 0.86) * d + Color(0.92, 0.64, 0.54) * u + Color(0.32, 0.40, 0.62) * n
+		_interior_bounce.light_energy = 0.22 * d + 0.18 * u + 0.09 * n
+		_interior_bounce.look_at_from_position(Vector3(-0.8, 2.2, 3.0), Vector3(0.2, 1.0, -0.5), Vector3.UP)
 
 	if _ceiling_fill != null:
-		_ceiling_fill.light_color = Color(1.0, 0.92, 0.80) * d + Color(1.0, 0.76, 0.56) * u + Color(0.42, 0.50, 0.72) * n
-		_ceiling_fill.light_energy = 0.14 * d + 0.10 * u + 0.04 * n
+		# During day/dusk this stays near the ceiling pendant; at night the ceiling lamp is off,
+		# so we repurpose this zero-shadow OmniLight3D as a short-range monitor + tabletop bounce
+		# fill on Yumeka's front-left (-X, -Z) to smoothly soften her left eye/cheek without
+		# washing out the deep blue bedroom walls behind her.
+		var ceil_pos := Vector3(0.0, ROOM.y - 0.52, 1.20)
+		var desk_fill_pos := Vector3(-0.38, DESK_TOP + 0.38, -0.06)
+		_ceiling_fill.position = ceil_pos.lerp(desk_fill_pos, n)
+		_ceiling_fill.omni_range = lerpf(6.5, 2.0, n)
+		_ceiling_fill.omni_attenuation = lerpf(1.0, 1.55, n)
+		_ceiling_fill.light_color = Color(1.0, 0.92, 0.80) * d + Color(1.0, 0.76, 0.56) * u + Color(0.92, 0.88, 0.96) * n
+		_ceiling_fill.light_energy = 0.14 * d + 0.10 * u + 0.52 * n
 
 	# Warm table lamp lights up automatically through dusk into night.
-	var lamp_energy := 0.0 * d + 0.48 * u + 1.45 * n
+	var lamp_energy := 0.0 * d + 0.48 * u + 1.32 * n
 	if _desk_lamp_light != null:
 		_desk_lamp_light.light_energy = lamp_energy
 		_desk_lamp_light.visible = lamp_energy > 0.01
@@ -1582,6 +1594,6 @@ func apply_day_night(day_w: float, dusk_w: float, night_w: float, cycle_time: fl
 
 	if _bedroom_env != null:
 		_bedroom_env.ambient_light_color = Color(0.96, 0.91, 0.84) * d \
-				+ Color(0.88, 0.64, 0.58) * u + Color(0.22, 0.29, 0.48) * n
-		_bedroom_env.ambient_light_energy = 0.28 * d + 0.24 * u + 0.18 * n
+				+ Color(0.88, 0.64, 0.58) * u + Color(0.25, 0.31, 0.49) * n
+		_bedroom_env.ambient_light_energy = 0.28 * d + 0.24 * u + 0.21 * n
 		_bedroom_env.tonemap_exposure = 0.82 * d + 0.84 * u + 0.88 * n

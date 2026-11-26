@@ -167,35 +167,35 @@ func _apply_now() -> void:
 		_sun.rotation_degrees = rot_day * d + rot_dusk * u + rot_night * n
 		_sun.light_color = Color(1.0, 0.94, 0.85) * d \
 				+ Color(1.0, 0.56, 0.28) * u \
-				+ Color(0.46, 0.63, 0.94) * n
-		_sun.light_energy = 0.98 * d + 0.92 * u + 0.34 * n
-		_sun.shadow_opacity = 0.68 * d + 0.76 * u + 0.72 * n
+				+ Color(0.60, 0.72, 0.96) * n
+		_sun.light_energy = 0.98 * d + 0.92 * u + 0.46 * n
+		_sun.shadow_opacity = 0.68 * d + 0.76 * u + 0.52 * n
 
 	# 2. Main world Environment ambient, sky hemisphere & fog tint (never touch BG_CANVAS or fog density).
 	if _sky_mat != null:
 		_sky_mat.sky_top_color = Color(0.40, 0.65, 0.92) * d \
 				+ Color(0.32, 0.34, 0.56) * u \
-				+ Color(0.06, 0.10, 0.22) * n
+				+ Color(0.16, 0.21, 0.36) * n
 		_sky_mat.sky_horizon_color = Color(0.86, 0.89, 0.92) * d \
 				+ Color(0.95, 0.56, 0.34) * u \
-				+ Color(0.12, 0.17, 0.30) * n
+				+ Color(0.38, 0.36, 0.46) * n
 		_sky_mat.ground_bottom_color = Color(0.46, 0.44, 0.40) * d \
 				+ Color(0.28, 0.22, 0.24) * u \
-				+ Color(0.05, 0.07, 0.12) * n
+				+ Color(0.36, 0.30, 0.28) * n
 		_sky_mat.ground_horizon_color = Color(0.76, 0.74, 0.69) * d \
 				+ Color(0.68, 0.42, 0.30) * u \
-				+ Color(0.10, 0.13, 0.22) * n
+				+ Color(0.38, 0.33, 0.36) * n
 
 	if _env != null:
 		_env.ambient_light_color = Color(0.66, 0.78, 0.94) * d \
 				+ Color(0.70, 0.52, 0.62) * u \
-				+ Color(0.20, 0.28, 0.48) * n
-		_env.ambient_light_energy = 0.44 * d + 0.40 * u + 0.36 * n
+				+ Color(0.50, 0.48, 0.58) * n
+		_env.ambient_light_energy = 0.44 * d + 0.40 * u + 0.78 * n
 		_env.fog_light_color = Color(0.86, 0.88, 0.90) * d \
 				+ Color(0.88, 0.56, 0.38) * u \
 				+ Color(0.10, 0.15, 0.28) * n
 		_env.fog_light_energy = 0.95 * d + 0.85 * u + 0.45 * n
-		_env.tonemap_exposure = 0.96 * d + 0.98 * u + 1.02 * n
+		_env.tonemap_exposure = 0.96 * d + 0.98 * u + 1.06 * n
 
 	# 3. City-wide window & streetlamp emissive glow (zero extra dynamic lights).
 	var night_glow := clampf(u * 0.38 + n * 1.0, 0.0, 1.0)
