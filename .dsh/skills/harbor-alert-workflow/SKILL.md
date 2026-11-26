@@ -1,15 +1,16 @@
 ---
 name: harbor-alert-workflow
 description: >-
-  harbor-alert（gba 工程）专属工作流硬性规范，共 4 条：同口径数据对比、无 GPU 沙盒下只用 --headless 以免
-  llvmpipe 软渲染卡死超时、汇报截图前先逐张客观描述再下结论、测试通过后同步纯源码包到 Google 云盘。
+  harbor-alert（gba 工程）专属工作流硬性规范，共 5 条：同口径数据对比、无 GPU 沙盒下只用 --headless 以免
+  llvmpipe 软渲染卡死超时、汇报截图前先逐张客观描述再下结论、测试通过后同步纯源码包到 Google 云盘、
+  视觉/渲染测试一律在隔离虚拟显示中跑（禁止占用用户真实桌面窗口）。
   在本工程里改代码、跑测试、对比模型/场景/性能数据、汇报渲染截图或交付同步时使用。
 ---
 
 # harbor-alert 工作流硬性规范
 
 本工程 = Godot 4.7 前端 + Rust GDExtension（`rust/` 编译给 `native/harbor.gdextension`）。
-下面 4 条是**硬性**规则，与根目录 `AGENTS.md` 并行生效；与 `AGENTS.md` 既有约定冲突时以 `AGENTS.md` 为准，并先向用户确认再行动。
+下面 5 条是**硬性**规则，与根目录 `AGENTS.md` 并行生效；与 `AGENTS.md` 既有约定冲突时以 `AGENTS.md` 为准，并先向用户确认再行动。
 
 ---
 
@@ -46,7 +47,7 @@ glxinfo -B 2>/dev/null | grep -i "OpenGL renderer"   # 或 glxinfo | grep "OpenG
 
 - 输出含 `llvmpipe`、`softpipe`、`swrast` → **软渲染环境**（沙盒/无 GPU 权限）。
 - 软渲染下**只允许 `--headless`**：逻辑测试、回归脚本、资源导入、启动校验。
-  - 禁止带窗口跑游戏或做全城 3D 渲染：会卡死或超时，且画面结果没有参考价值。
+  - 禁止软渲染下硬跑带窗口的全城 3D 渲染（会卡死或超时、FPS 无参考价值）；唯一例外是第 5 条允许的纯 Xvfb 少量帧截图与布局验证（必须挂 `timeout`）。
 - 软渲染下可以跑的（本工程常用）：
 
   ```sh
@@ -55,7 +56,7 @@ glxinfo -B 2>/dev/null | grep -i "OpenGL renderer"   # 或 glxinfo | grep "OpenG
   godot --headless --path . --import                                          # 新检出先导入
   ```
 
-- 需要"全城实机截图"时：**不要自己硬开渲染窗口**，改为提示用户在本机按 F5 运行并截图（说明要看哪个场景/视角/部位），或明确写出"视觉未验证"。
+- 需要"全城截图"时：窗口一律按第 5 条开在隔离虚拟显示里自己截少量帧验布局；要看实机 GPU 效果/FPS 则提示用户本机按 F5 运行并截图（说明要看哪个场景/视角/部位），或明确写出"视觉未验证"。
 - 长命令加 `timeout`（如 `timeout 180 ...`），避免无 GPU 时无限等待。
 
 ---
@@ -110,9 +111,34 @@ rclone lsl gdrive:gba-sync/gba_code_latest.tar.gz
 
 ---
 
+## 5. 视觉/渲染测试用隔离虚拟显示（禁止占用用户真实桌面）
+
+跑 Godot 渲染截图、探针脚本（含 `tests/gpu_probe.gd`）或 GPU 测试时，**禁止把窗口弹到用户的真实桌面**——不抢焦点、不挤占平铺窗口。改用内存虚拟显示，按顺序降级：
+
+1. **先检测硬件加速虚拟显示可用性**（每轮开窗口前实测，不要按经验假设）：
+
+   ```sh
+   for c in xvfb-run Xvfb vglrun weston gamescope; do command -v "$c" || echo "$c MISSING"; done
+   ls -l /dev/dri/by-path/ | grep render      # 确认哪个 renderD* 是 AMD：本机 renderD128＝AMD 核显、renderD129＝NVIDIA dGPU
+   DISPLAY= WAYLAND_DISPLAY= timeout 30 eglinfo -B   # surfaceless 直接看 renderer，不碰真实桌面
+   ```
+
+   - 优先 `xvfb-run` 配 `vglrun -d /dev/dri/renderD128`，或 `weston --backend=headless --use-gl` / `gamescope` 等虚拟 Wayland 显示。
+   - 开跑前**必须**在虚拟显示里验证 `OpenGL renderer` / Godot 日志 `Using Device:` 是 AMD Radeon 而非 `llvmpipe`（测核显需 `MESA_LOADER_DRIVER_OVERRIDE=radeonsi`，否则可能落到 zink/NVIDIA dGPU）；验证不过＝没有硬件加速，按下一档处理。
+
+2. **本机只有纯 `Xvfb`**（如 `xvfb-run -a -s "-screen 0 1920x1080x24"`；本机更原始，连包装脚本都没有，需手动 `Xvfb :97`）：
+   - 允许：**少量帧**的截图与布局验证，全部命令挂 `timeout`（2026-11-26 实测：llvmpipe + gl_compatibility 启动 + `--quit-after 5` 约 23 s）。
+   - 禁止：在掉回 `llvmpipe` 的纯 `Xvfb` 里硬跑长帧率 ABBA 基准——FPS 无参考价值、还长时间烧 CPU。
+   - 需要真实核显 FPS 时：明确提示用户在真实桌面自行运行（口径按第 1 条：同窗口尺寸、同预热、交叠 AB），或仅在验证过 renderer＝AMD Radeon 的虚拟显示中运行。
+
+3. **纯逻辑与回归测试继续 `--headless`**：显示隔离由本条管，软渲染超时风险仍由第 2 条管，两条并行不冲突。
+
+---
+
 ## 交付前自查
 
 - [ ] 数字都带口径与数据源，对比表同口径；
-- [ ] 软渲染环境下没有开窗口渲染；需要画面时已请用户本机截图或标明视觉未验证；
-- [ ] 有截图就先逐张客观描述，再给通过/待修结论；
+- [ ] 本轮没把任何渲染/游戏窗口弹到用户真实桌面；开过的窗口都在隔离虚拟显示里，renderer 已验证并在汇报写明（AMD Radeon / llvmpipe）；
+- [ ] 软渲染环境没跑长帧率基准；FPS 数据要么来自验证过硬件加速的虚拟显示、要么明确请用户本机运行或标"未测"；
+- [ ] 有截图就先逐张客观描述，再给通过/待修结论；只跑了 headless 时明确写"视觉未验证（仅 headless 逻辑通过）"；
 - [ ] 代码改动已过 `cargo test` + 相关 playtest，并已询问或执行 `./scripts/sync_drive.sh`。
