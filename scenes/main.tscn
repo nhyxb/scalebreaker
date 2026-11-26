@@ -1,0 +1,73 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/district.tscn" id="District"]
+
+[ext_resource type="PackedScene" path="res://scenes/round.tscn" id="Round"]
+[ext_resource type="Script" path="res://scenes/harbor_skybox.gd" id="Skybox"]
+[ext_resource type="Script" path="res://scenes/interface.gd" id="UI"]
+
+[sub_resource type="ProceduralSkyMaterial" id="SkyMaterial"]
+sky_top_color = Color(0.19, 0.32, 0.40, 1)
+sky_horizon_color = Color(0.66, 0.73, 0.73, 1)
+ground_bottom_color = Color(0.66, 0.73, 0.73, 1)
+ground_horizon_color = Color(0.66, 0.73, 0.73, 1)
+sun_angle_max = 12.0
+sun_curve = 0.15
+
+[sub_resource type="Sky" id="Sky"]
+sky_material = SubResource("SkyMaterial")
+
+[sub_resource type="Environment" id="Coast"]
+resource_local_to_scene = true
+background_mode = 3
+sky = SubResource("Sky")
+ambient_light_source = 3
+ambient_light_color = Color(0.71, 0.80, 0.87, 1)
+ambient_light_energy = 0.50
+tonemap_mode = 2
+fog_enabled = true
+fog_mode = 1
+fog_light_color = Color(0.66, 0.73, 0.73, 1)
+fog_light_energy = 0.94
+fog_sun_scatter = 0.08
+fog_density = 1.0
+fog_aerial_perspective = 0.75
+fog_sky_affect = 0.0
+fog_depth_curve = 1.65
+fog_depth_begin = 425.0
+fog_depth_end = 780.0
+
+[node name="HarborGame" type="HarborGame" unique_id=824639659]
+process_mode = 3
+round_scene = ExtResource("Round")
+district_scene = ExtResource("District")
+
+[node name="MapSlot" type="Node3D" parent="."]
+process_mode = 1
+
+[node name="District" parent="MapSlot" instance=ExtResource("District")]
+
+[node name="Atmosphere" type="WorldEnvironment" parent="."]
+environment = SubResource("Coast")
+
+[node name="Skybox" type="Node3D" parent="."]
+script = ExtResource("Skybox")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-37, -37, 0)
+light_color = Color(1, 0.80, 0.62, 1)
+light_energy = 1.03
+shadow_enabled = true
+directional_shadow_mode = 1
+directional_shadow_max_distance = 180.0
+
+[node name="Overview" type="Camera3D" parent="."]
+position = Vector3(148, 102, 162)
+rotation = Vector3(-0.48, 0.72, 0)
+current = true
+fov = 50.0
+far = 950.0
+metadata/district_draw_distance = 460.0
+
+[node name="Interface" type="CanvasLayer" parent="."]
+script = ExtResource("UI")

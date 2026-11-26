@@ -1,0 +1,23 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://assets/characters/kawaii.glb" id="Model"]
+[ext_resource type="Script" path="res://prototypes/giant_turn/giant_turn_visual.gd" id="Visual"]
+
+[sub_resource type="CapsuleShape3D" id="Capsule"]
+resource_local_to_scene = true
+radius = 2.9
+height = 25.2
+
+[node name="GiantTurnActor" type="CharacterBody3D"]
+collision_layer = 4
+collision_mask = 31
+floor_snap_length = 0.4
+script = ExtResource("Visual")
+
+[node name="Collision" type="CollisionShape3D" parent="."]
+position = Vector3(0, 12.6, 0)
+shape = SubResource("Capsule")
+
+[node name="Model" parent="." instance=ExtResource("Model")]
+rotation = Vector3(0, 3.141593, 0)
+scale = Vector3(14.8, 14.8, 14.8)

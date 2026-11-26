@@ -1,0 +1,46 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/district.tscn" id="District"]
+[ext_resource type="PackedScene" path="res://scenes/human.tscn" id="Human"]
+[ext_resource type="PackedScene" path="res://scenes/giant.tscn" id="Giant"]
+
+[ext_resource type="Script" path="res://scenes/round_effects.gd" id="Effects"]
+[ext_resource type="Script" path="res://scenes/coins.gd" id="Coins"]
+
+[sub_resource type="SphereShape3D" id="CameraProbe"]
+radius = 0.28
+
+[node name="Round" type="HarborRound"]
+process_mode = 1
+npc_scene = ExtResource("Human")
+giant_scene = ExtResource("Giant")
+
+[node name="District" parent="." instance=ExtResource("District")]
+
+[node name="Human" parent="." instance=ExtResource("Human")]
+
+[node name="Giant" parent="." instance=ExtResource("Giant")]
+
+[node name="OtherGiants" type="Node3D" parent="."]
+
+[node name="Civilians" type="Node3D" parent="."]
+
+[node name="Coins" type="Node3D" parent="."]
+script = ExtResource("Coins")
+
+[node name="Orbit" type="Node3D" parent="."]
+
+[node name="Arm" type="SpringArm3D" parent="Orbit"]
+collision_mask = 26
+shape = SubResource("CameraProbe")
+spring_length = 5.0
+margin = 0.16
+
+[node name="Camera" type="Camera3D" parent="Orbit/Arm"]
+position = Vector3(0, 0, 5)
+fov = 69.0
+near = 0.09
+far = 560.0
+
+[node name="Effects" type="Node3D" parent="."]
+script = ExtResource("Effects")

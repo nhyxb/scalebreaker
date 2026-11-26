@@ -1,0 +1,8 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = "4.7"
+
+[libraries]
+linux.debug.x86_64 = "res://rust/target/debug/libharbor.so"
+linux.release.x86_64 = "res://rust/target/release/libharbor.so"
+android.arm64 = "res://native/libharbor_android.so"

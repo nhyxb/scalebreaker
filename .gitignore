@@ -1,0 +1,16 @@
+/.godot/
+/rust/target/
+/native/*.so
+/build/
+/backups/
+*.tar.gz
+__pycache__/
+*.pyc
+*.tmp
+/rust/target/*.lock
+.aws/
+.codex/
+.agents/
+/.dsh/
+/.wtest
+.DS_Store

@@ -1,0 +1,380 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/district.gd" id="District"]
+[ext_resource type="Script" path="res://scenes/damageable.gd" id="Damageable"]
+[ext_resource type="PackedScene" path="res://assets/district/roads/RoadStraight.glb" id="RoadStraight"]
+[ext_resource type="PackedScene" path="res://assets/district/roads/RoadCross.glb" id="RoadCross"]
+[ext_resource type="PackedScene" path="res://assets/district/roads/RoadTee.glb" id="RoadTee"]
+[ext_resource type="PackedScene" path="res://assets/district/roads/RoadBend90.glb" id="RoadBend90"]
+[ext_resource type="HeightMapShape3D" path="res://assets/district/ruin_collision/DockPress.tres" id="DockPressFloor"]
+[ext_resource type="HeightMapShape3D" path="res://assets/district/ruin_collision/Tidewater.tres" id="TidewaterFloor"]
+[ext_resource type="HeightMapShape3D" path="res://assets/district/ruin_collision/MarineWorks.tres" id="MarineWorksFloor"]
+[ext_resource type="PackedScene" path="res://assets/kenney/commercial/building-e.glb" id="KenneyDockPress"]
+[ext_resource type="PackedScene" path="res://assets/kenney/commercial/building-m.glb" id="KenneyTidewater"]
+[ext_resource type="PackedScene" path="res://assets/kenney/industrial/building-s.glb" id="KenneyMarineWorks"]
+
+[sub_resource type="StandardMaterial3D" id="GroundMaterial"]
+albedo_color = Color(0.28, 0.33, 0.32, 1)
+roughness = 0.97
+
+[sub_resource type="BoxMesh" id="GroundMesh"]
+material = SubResource("GroundMaterial")
+size = Vector3(1418, 0.4, 1418)
+
+[sub_resource type="BoxShape3D" id="GroundShape"]
+size = Vector3(1418, 0.4, 1418)
+
+[sub_resource type="StandardMaterial3D" id="LotMaterial"]
+albedo_color = Color(0.42, 0.39, 0.32, 1)
+roughness = 0.94
+
+[sub_resource type="BoxMesh" id="LotMesh"]
+material = SubResource("LotMaterial")
+size = Vector3(24, 0.14, 24)
+
+[sub_resource type="BoxShape3D" id="BoundaryShape"]
+size = Vector3(1414, 120, 2)
+
+[sub_resource type="StandardMaterial3D" id="WaterMaterial"]
+albedo_color = Color(0.09, 0.24, 0.28, 1)
+roughness = 0.56
+
+[sub_resource type="PlaneMesh" id="WaterMesh"]
+material = SubResource("WaterMaterial")
+size = Vector2(3600, 3600)
+
+[node name="District" type="Node3D"]
+script = ExtResource("District")
+
+[node name="Ground" type="StaticBody3D" parent="."]
+position = Vector3(0, -0.2, 0)
+collision_mask = 0
+
+[node name="Surface" type="MeshInstance3D" parent="Ground"]
+mesh = SubResource("GroundMesh")
+
+[node name="Collision" type="CollisionShape3D" parent="Ground"]
+shape = SubResource("GroundShape")
+
+[node name="Water" type="MeshInstance3D" parent="."]
+position = Vector3(0, -0.82, 0)
+mesh = SubResource("WaterMesh")
+
+[node name="Boundary" type="StaticBody3D" parent="."]
+collision_layer = 2
+collision_mask = 0
+
+[node name="North" type="CollisionShape3D" parent="Boundary"]
+position = Vector3(0, 60, -705)
+rotation = Vector3(0, 0, 0)
+shape = SubResource("BoundaryShape")
+
+[node name="South" type="CollisionShape3D" parent="Boundary"]
+position = Vector3(0, 60, 705)
+rotation = Vector3(0, 0, 0)
+shape = SubResource("BoundaryShape")
+
+[node name="West" type="CollisionShape3D" parent="Boundary"]
+position = Vector3(-705, 60, 0)
+rotation = Vector3(0, 1.570796, 0)
+shape = SubResource("BoundaryShape")
+
+[node name="East" type="CollisionShape3D" parent="Boundary"]
+position = Vector3(705, 60, 0)
+rotation = Vector3(0, 1.570796, 0)
+shape = SubResource("BoundaryShape")
+
+[node name="Lots" type="Node3D" parent="."]
+
+[node name="Lot1" type="MeshInstance3D" parent="Lots"]
+position = Vector3(-18, -0.06, -18)
+mesh = SubResource("LotMesh")
+
+[node name="Lot2" type="MeshInstance3D" parent="Lots"]
+position = Vector3(18, -0.06, -18)
+mesh = SubResource("LotMesh")
+
+[node name="Lot3" type="MeshInstance3D" parent="Lots"]
+position = Vector3(-18, -0.06, 18)
+mesh = SubResource("LotMesh")
+
+[node name="Lot4" type="MeshInstance3D" parent="Lots"]
+position = Vector3(18, -0.06, 18)
+mesh = SubResource("LotMesh")
+
+[node name="Roads" type="Node3D" parent="."]
+
+[node name="Tile00" parent="Roads" instance=ExtResource("RoadBend90")]
+position = Vector3(-36, 0.017, -36)
+rotation = Vector3(0, 4.712388, 0)
+
+[node name="Tile01" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-36, 0.017, -24)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile02" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-36, 0.017, -12)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile03" parent="Roads" instance=ExtResource("RoadTee")]
+position = Vector3(-36, 0.017, 0)
+rotation = Vector3(0, 4.712388, 0)
+
+[node name="Tile04" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-36, 0.017, 12)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile05" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-36, 0.017, 24)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile06" parent="Roads" instance=ExtResource("RoadBend90")]
+position = Vector3(-36, 0.017, 36)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile10" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-24, 0.017, -36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile13" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-24, 0.017, 0)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile16" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-24, 0.017, 36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile20" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-12, 0.017, -36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile23" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-12, 0.017, 0)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile26" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(-12, 0.017, 36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile30" parent="Roads" instance=ExtResource("RoadTee")]
+position = Vector3(0, 0.017, -36)
+rotation = Vector3(0, 3.141592, 0)
+
+[node name="Tile31" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(0, 0.017, -24)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile32" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(0, 0.017, -12)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile33" parent="Roads" instance=ExtResource("RoadCross")]
+position = Vector3(0, 0.017, 0)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile34" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(0, 0.017, 12)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile35" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(0, 0.017, 24)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile36" parent="Roads" instance=ExtResource("RoadTee")]
+position = Vector3(0, 0.017, 36)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile40" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(12, 0.017, -36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile43" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(12, 0.017, 0)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile46" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(12, 0.017, 36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile50" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(24, 0.017, -36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile53" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(24, 0.017, 0)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile56" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(24, 0.017, 36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile60" parent="Roads" instance=ExtResource("RoadBend90")]
+position = Vector3(36, 0.017, -36)
+rotation = Vector3(0, 3.141592, 0)
+
+[node name="Tile61" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(36, 0.017, -24)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile62" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(36, 0.017, -12)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile63" parent="Roads" instance=ExtResource("RoadTee")]
+position = Vector3(36, 0.017, 0)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Tile64" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(36, 0.017, 12)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile65" parent="Roads" instance=ExtResource("RoadStraight")]
+position = Vector3(36, 0.017, 24)
+rotation = Vector3(0, 0.0, 0)
+
+[node name="Tile66" parent="Roads" instance=ExtResource("RoadBend90")]
+position = Vector3(36, 0.017, 36)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="Targets" type="Node3D" parent="."]
+
+[node name="DockPress1" type="Node3D" parent="Targets"]
+position = Vector3(-24.0, 0.015, -23.65)
+rotation = Vector3(0, 3.141592, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"dockpress"
+intact_scene = ExtResource("KenneyDockPress")
+kit_scale = 6.16
+footprint = Vector3(10.1, 7.8, 7.4)
+ruin_floor = ExtResource("DockPressFloor")
+
+[node name="Tidewater1" type="Node3D" parent="Targets"]
+position = Vector3(-12.0, 0.015, -23.65)
+rotation = Vector3(0, 3.141592, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"tidewater"
+intact_scene = ExtResource("KenneyTidewater")
+kit_scale = 5.08
+footprint = Vector3(8.9, 16.0, 7.6)
+ruin_floor = ExtResource("TidewaterFloor")
+
+[node name="MarineWorks1" type="Node3D" parent="Targets"]
+position = Vector3(-18, 0.015, -12.5)
+rotation = Vector3(0, 0.0, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"marineworks"
+intact_scene = ExtResource("KenneyMarineWorks")
+kit_scale = 6.55
+footprint = Vector3(14.2, 5.5, 9.3)
+ruin_floor = ExtResource("MarineWorksFloor")
+
+[node name="DockPress2" type="Node3D" parent="Targets"]
+position = Vector3(12.0, 0.015, -23.65)
+rotation = Vector3(0, 3.141592, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"dockpress"
+intact_scene = ExtResource("KenneyDockPress")
+kit_scale = 6.16
+footprint = Vector3(10.1, 7.8, 7.4)
+ruin_floor = ExtResource("DockPressFloor")
+
+[node name="Tidewater2" type="Node3D" parent="Targets"]
+position = Vector3(24.0, 0.015, -23.65)
+rotation = Vector3(0, 3.141592, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"tidewater"
+intact_scene = ExtResource("KenneyTidewater")
+kit_scale = 5.08
+footprint = Vector3(8.9, 16.0, 7.6)
+ruin_floor = ExtResource("TidewaterFloor")
+
+[node name="MarineWorks2" type="Node3D" parent="Targets"]
+position = Vector3(18, 0.015, -12.5)
+rotation = Vector3(0, 0.0, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"marineworks"
+intact_scene = ExtResource("KenneyMarineWorks")
+kit_scale = 6.55
+footprint = Vector3(14.2, 5.5, 9.3)
+ruin_floor = ExtResource("MarineWorksFloor")
+
+[node name="DockPress3" type="Node3D" parent="Targets"]
+position = Vector3(-12.0, 0.015, 23.65)
+rotation = Vector3(0, 0.0, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"dockpress"
+intact_scene = ExtResource("KenneyDockPress")
+kit_scale = 6.16
+footprint = Vector3(10.1, 7.8, 7.4)
+ruin_floor = ExtResource("DockPressFloor")
+
+[node name="Tidewater3" type="Node3D" parent="Targets"]
+position = Vector3(-24.0, 0.015, 23.65)
+rotation = Vector3(0, 0.0, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"tidewater"
+intact_scene = ExtResource("KenneyTidewater")
+kit_scale = 5.08
+footprint = Vector3(8.9, 16.0, 7.6)
+ruin_floor = ExtResource("TidewaterFloor")
+
+[node name="MarineWorks3" type="Node3D" parent="Targets"]
+position = Vector3(-18, 0.015, 12.5)
+rotation = Vector3(0, 3.141592, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"marineworks"
+intact_scene = ExtResource("KenneyMarineWorks")
+kit_scale = 6.55
+footprint = Vector3(14.2, 5.5, 9.3)
+ruin_floor = ExtResource("MarineWorksFloor")
+
+[node name="DockPress4" type="Node3D" parent="Targets"]
+position = Vector3(24.0, 0.015, 23.65)
+rotation = Vector3(0, 0.0, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"dockpress"
+intact_scene = ExtResource("KenneyDockPress")
+kit_scale = 6.16
+footprint = Vector3(10.1, 7.8, 7.4)
+ruin_floor = ExtResource("DockPressFloor")
+
+[node name="Tidewater4" type="Node3D" parent="Targets"]
+position = Vector3(12.0, 0.015, 23.65)
+rotation = Vector3(0, 0.0, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"tidewater"
+intact_scene = ExtResource("KenneyTidewater")
+kit_scale = 5.08
+footprint = Vector3(8.9, 16.0, 7.6)
+ruin_floor = ExtResource("TidewaterFloor")
+
+[node name="MarineWorks4" type="Node3D" parent="Targets"]
+position = Vector3(18, 0.015, 12.5)
+rotation = Vector3(0, 3.141592, 0)
+script = ExtResource("Damageable")
+kind = "building"
+historic_style = &"marineworks"
+intact_scene = ExtResource("KenneyMarineWorks")
+kit_scale = 6.55
+footprint = Vector3(14.2, 5.5, 9.3)
+ruin_floor = ExtResource("MarineWorksFloor")
+
+[node name="HumanSpawn" type="Marker3D" parent="."]
+position = Vector3(0, 0.02, -34)
+
+[node name="GiantSpawn" type="Marker3D" parent="."]
+position = Vector3(0, 0.02, 32)
+
+[node name="Evacuation" type="Marker3D" parent="."]
+position = Vector3(36, 0, 34)

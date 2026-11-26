@@ -1,0 +1,37 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/girl_bedroom.gd" id="1"]
+[ext_resource type="PackedScene" path="res://assets/bedroom/GirlBedroom.glb" id="2"]
+[ext_resource type="PackedScene" path="res://scenes/human.tscn" id="3"]
+[ext_resource type="Script" path="res://scenes/bedroom_player.gd" id="4"]
+
+[sub_resource type="SphereShape3D" id="CameraProbe"]
+radius = 0.0015
+
+[node name="GirlBedroom" type="Node3D"]
+script = ExtResource("1")
+
+[node name="Visual" parent="." instance=ExtResource("2")]
+
+[node name="Player" parent="." instance=ExtResource("3")]
+position = Vector3(-1.86, 0.001, 1.699)
+collision_mask = 1
+floor_snap_length = 0.001
+safe_margin = 0.00012
+script = ExtResource("4")
+
+[node name="Orbit" type="Node3D" parent="Player"]
+position = Vector3(0, 0.0065, 0)
+rotation = Vector3(0, 1.570796, 0)
+
+[node name="SpringArm3D" type="SpringArm3D" parent="Player/Orbit"]
+rotation = Vector3(-0.30, 0, 0)
+shape = SubResource("CameraProbe")
+spring_length = 0.032
+margin = 0.00015
+
+[node name="Camera3D" type="Camera3D" parent="Player/Orbit/SpringArm3D"]
+position = Vector3(0, 0, 0.032)
+near = 0.0008
+far = 12.0
+fov = 63.0

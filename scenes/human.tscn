@@ -1,0 +1,36 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://assets/characters/human_kenney.glb" id="Model"]
+[ext_resource type="Script" path="res://scenes/human_visual.gd" id="Visual"]
+[ext_resource type="Shader" path="res://scenes/giant_health.gdshader" id="Health"]
+
+[sub_resource type="CapsuleShape3D" id="Capsule"]
+radius = 0.42
+height = 1.8
+
+[sub_resource type="ShaderMaterial" id="HealthMaterial"]
+resource_local_to_scene = true
+shader = ExtResource("Health")
+
+[sub_resource type="QuadMesh" id="HealthQuad"]
+size = Vector2(1, 0.12)
+
+[node name="Human" type="CharacterBody3D" unique_id=118355606 groups=["harbor_actor"]]
+collision_layer = 4
+collision_mask = 31
+floor_snap_length = 0.25
+script = ExtResource("Visual")
+
+[node name="Collision" type="CollisionShape3D" parent="."]
+position = Vector3(0, 0.9, 0)
+shape = SubResource("Capsule")
+
+[node name="Model" parent="." instance=ExtResource("Model")]
+rotation = Vector3(0, 3.141593, 0)
+
+[node name="HealthBar" type="MeshInstance3D" parent="."]
+visible = false
+top_level = true
+cast_shadow = 0
+material_override = SubResource("HealthMaterial")
+mesh = SubResource("HealthQuad")

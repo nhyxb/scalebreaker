@@ -1,0 +1,58 @@
+[gd_scene format=3]
+
+[ext_resource type="PackedScene" path="res://assets/characters/kawaii.glb" id="Model"]
+[ext_resource type="PackedScene" path="res://assets/characters/human_kenney.glb" id="HumanModel"]
+[ext_resource type="Script" path="res://scenes/giant_visual.gd" id="Visual"]
+[ext_resource type="Shader" path="res://scenes/giant_health.gdshader" id="Health"]
+[ext_resource type="FontFile" path="res://assets/fonts/harbor-ui.otf" id="NameFont"]
+
+[sub_resource type="CapsuleShape3D" id="Capsule"]
+resource_local_to_scene = true
+radius = 2.9
+height = 25.2
+
+[sub_resource type="ShaderMaterial" id="HealthMaterial"]
+resource_local_to_scene = true
+shader = ExtResource("Health")
+
+[sub_resource type="QuadMesh" id="HealthQuad"]
+size = Vector2(1, 0.12)
+
+[sub_resource type="FontVariation" id="NameWeight"]
+base_font = ExtResource("NameFont")
+variation_opentype = {2003265652: 650}
+
+[node name="Giant" type="CharacterBody3D" unique_id=38017738 groups=["harbor_actor"]]
+collision_layer = 4
+collision_mask = 31
+floor_snap_length = 0.4
+script = ExtResource("Visual")
+
+[node name="Collision" type="CollisionShape3D" parent="."]
+position = Vector3(0, 12.6, 0)
+shape = SubResource("Capsule")
+
+[node name="Model" parent="." instance=ExtResource("Model")]
+rotation = Vector3(0, 3.141593, 0)
+scale = Vector3(14.8, 14.8, 14.8)
+
+[node name="HumanModel" parent="." instance=ExtResource("HumanModel")]
+visible = false
+rotation = Vector3(0, 3.141593, 0)
+
+[node name="HealthBar" type="MeshInstance3D" parent="."]
+visible = false
+top_level = true
+cast_shadow = 0
+material_override = SubResource("HealthMaterial")
+mesh = SubResource("HealthQuad")
+
+[node name="GiantName" type="Label3D" parent="HealthBar"]
+visible = false
+position = Vector3(0, 0.235, 0)
+pixel_size = 0.009
+font = SubResource("NameWeight")
+font_size = 30
+outline_size = 4
+modulate = Color(0.98, 0.95, 0.89, 1)
+outline_modulate = Color(0.0667, 0.0745, 0.0863, 1)
