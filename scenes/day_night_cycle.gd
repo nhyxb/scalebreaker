@@ -111,6 +111,10 @@ func get_night_glow() -> float:
 	return CityNightLights.get_night_glow()
 
 
+func get_giant_shadow_strength() -> float:
+	return CityNightLights.get_giant_shadow_strength()
+
+
 func _weights_for_phase(p: float) -> Vector3:
 	# Smooth periodic 24h weights:
 	#   0.26..0.64 -> full day
@@ -200,6 +204,16 @@ func _apply_now() -> void:
 	# 3. City-wide window & streetlamp emissive glow (zero extra dynamic lights).
 	var night_glow := clampf(u * 0.38 + n * 1.0, 0.0, 1.0)
 	CityNightLights.set_night_glow(night_glow)
+
+	# 3b. Ultra-giant looming shadow over the southern harbour (strongest in day/dusk,
+	#     gently softened at night so city window lights stay crisp and un-dimmed).
+	var yumeka_present: bool = _skybox != null and _skybox.has_method(&"is_yumeka_mounted") \
+			and bool(_skybox.call(&"is_yumeka_mounted"))
+	var shadow_strength := (0.66 * d + 0.70 * u + 0.26 * n) if yumeka_present else 0.0
+	var shadow_tint := Color(0.41, 0.51, 0.68) * d \
+			+ Color(0.38, 0.34, 0.58) * u \
+			+ Color(0.56, 0.60, 0.76) * n
+	CityNightLights.set_giant_shadow(shadow_strength, shadow_tint)
 
 	# 4. Bedroom skybox synchronization (north window sky, sunset sun, auto warm desk lamp).
 	if _skybox != null and _skybox.has_method(&"apply_day_night"):

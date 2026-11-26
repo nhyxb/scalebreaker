@@ -377,7 +377,7 @@ func _build_furniture() -> void:
 	_place_glb(furniture, "Desk", "desk", Vector3(0.0, 0.0, 0.0),
 		Vector3(desk_scale * 1.14, desk_scale, desk_scale), 0.0, false, mat_wood_soft, cast_major)
 
-	var chair_pos := Vector3(0.0, 0.0, 0.64)
+	var chair_pos := Vector3(0.0, 0.0, 0.60)
 	_place_glb(furniture, "ChairDesk", "chairDesk", chair_pos,
 		Vector3.ONE * CHAIR_SCALE, PI, false, mat_chair, cast_major)
 
@@ -406,11 +406,11 @@ func _build_furniture() -> void:
 	var monitor := _place_glb(furniture, "ComputerScreen", "computerScreen",
 		Vector3(-0.46, DESK_TOP, -0.26), Vector3.ONE * 0.98, deg_to_rad(20.0), false, mat_screen, cast_major)
 	_attach_monitor_display(monitor)
-	# Keyboard and mouse rest cleanly on top of the 2.4 mm felt desk mat.
+	# Keyboard and mouse rest cleanly on top of the 2.4 mm felt desk mat, clear of Yumeka's left hand.
 	_place_glb(furniture, "ComputerKeyboard", "computerKeyboard",
-		Vector3(-0.48, DESK_TOP + DESK_MAT_THICKNESS, 0.02), Vector3.ONE * 1.12, deg_to_rad(18.0), false, mat_periph, false)
+		Vector3(-0.52, DESK_TOP + DESK_MAT_THICKNESS, -0.02), Vector3.ONE * 1.12, deg_to_rad(18.0), false, mat_periph, false)
 	_place_glb(furniture, "ComputerMouse", "computerMouse",
-		Vector3(-0.29, DESK_TOP + DESK_MAT_THICKNESS, 0.16), Vector3.ONE * 1.10, deg_to_rad(16.0), false, mat_periph, false)
+		Vector3(-0.42, DESK_TOP + DESK_MAT_THICKNESS, 0.17), Vector3.ONE * 1.10, deg_to_rad(16.0), false, mat_periph, false)
 	_place_glb(furniture, "PlantSmallDesk", "plantSmall1",
 		Vector3(-0.70, DESK_TOP, 0.23), Vector3.ONE * 1.45, deg_to_rad(15.0), false, mat_wood_soft, false)
 	_place_glb(furniture, "SpeakerLeft", "speakerSmall",
@@ -420,7 +420,7 @@ func _build_furniture() -> void:
 		Vector3(0.48, DESK_TOP, -0.25), Vector3.ONE * 1.20, deg_to_rad(-20.0), false, mat_lamp, cast_major)
 	_desk_lamp_shade_mat = _find_surface_material(desk_lamp, "lamp")
 	_place_glb(furniture, "BooksDesk", "books",
-		Vector3(0.47, DESK_TOP, 0.11), Vector3.ONE * 1.55, deg_to_rad(-22.0), false, mat_wood_soft, false)
+		Vector3(0.55, DESK_TOP, 0.05), Vector3.ONE * 1.55, deg_to_rad(-22.0), false, mat_wood_soft, false)
 	_place_glb(furniture, "SpeakerRight", "speakerSmall",
 		Vector3(0.74, DESK_TOP, -0.15), Vector3.ONE * 0.76, deg_to_rad(-32.0), false, mat_wood_soft, false)
 
@@ -848,7 +848,7 @@ func _build_desk_details(parent: Node3D) -> void:
 	var mat_mesh := BoxMesh.new()
 	mat_mesh.size = Vector3(0.48, DESK_MAT_THICKNESS, 0.25)
 	mat_node.mesh = mat_mesh
-	mat_node.position = Vector3(-0.43, DESK_TOP + DESK_MAT_THICKNESS * 0.5, 0.08)
+	mat_node.position = Vector3(-0.48, DESK_TOP + DESK_MAT_THICKNESS * 0.5, 0.06)
 	mat_node.rotation.y = deg_to_rad(17.0)
 	var desk_mat_m := StandardMaterial3D.new()
 	desk_mat_m.albedo_texture = _make_desk_mat_texture()

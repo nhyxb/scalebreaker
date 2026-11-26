@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-11-26 — 坐姿超巨 Yumeka 十公里级压迫感升级（A 前倾趴桌收臂微屈指 + B 精准眼球锁视 + C 城内遮天阴影与背景空气透视）
+
+备份：`backups/20261126_212507_yumeka_looming_presence/{scripts/export_yumeka_seated.py,scenes/{city_night_lights,day_night_cycle,district,district_expansion,harbor_skybox,skybox_bedroom,yumeka_ultra_giant}.gd,scenes/main.tscn,tests/playtest.gd,CHANGELOG.md,MEMORY.md}`。
+回滚：
+
+```sh
+cp -a backups/20261126_212507_yumeka_looming_presence/scripts/export_yumeka_seated.py scripts/
+cp -a backups/20261126_212507_yumeka_looming_presence/scenes/. scenes/
+cp -a backups/20261126_212507_yumeka_looming_presence/tests/playtest.gd tests/
+cp backups/20261126_212507_yumeka_looming_presence/{CHANGELOG.md,MEMORY.md} .
+# 若需恢复旧坐姿 GLB，重跑回滚后的 scripts/export_yumeka_seated.py 并执行 godot --headless --path . --editor --import --quit
+```
+
+### 一、前倾趴桌与自然收臂/五指微屈姿态（`scripts/export_yumeka_seated.py`、`scenes/skybox_bedroom.gd`）
+
+- **前移靠近书桌**：`ChairDesk` 前移 4.0 cm 至 `z = 0.60`（`ultra_giant_anchor.z = 0.50835`，与桌下左抽屉留足净空）；同步将 `ComputerKeyboard`、`ComputerMouse`、`DeskMat` 略左移并将 `BooksDesk` 略右移，确保桌面物件与 Yumeka 双臂/手指零碰撞。
+- **30° 上身前倾压低视线**：拆分 `LEG_POSE_TWISTS` 与 `UPPER_POSE_TWISTS`（先读未倾骨盆接触面再叠加上身前倾），`Spine +4° / Chest +26°` 前倾共 30°、`Neck +14° / Head -14°` 平衡低头俯视，`BODY_SCALE = 1.05` + `CUSHION_COMPRESSION = 0.042`，坐姿眼高由 1.200 m 压低至 **0.979 m**（`eye_z = 0.350 m`，大腿顶 `0.605 m < 0.690 m` 桌底净空，鞋底 `+0.039 m`）；1.80 m / 25 m / 100 m 城内水平平视（0° 仰角、FOV 69°）即可见巨脸与双眼直接压满天际线。
+- **双臂内收弯肘落桌 + 五指自然微屈**：`UpperArm_L/R` 贴近躯干自然下垂前收，`LowerArm_L/R` 屈肘呈对称八字形（`/\`）轻搭在 21.27 cm 沙盘南侧外缘桌面（`LowerArm_L/R = (±0.223, 0.803, 0.369)`，`Hand_L/R = (±0.169, 0.796, 0.202)`，零穿入桌板/沙盘、零肘部内衬穿模）；利用骨骼真实屈指轴 `local (1, 0, 0)` 为拇指及四指施加递增半握微屈，手腕与指尖自然轻落桌面。
+- **无损管线保持不变**：继续沿用 1 帧 `SeatedPose` Action（48 根受控骨骼）+ 14 个面部形态键，绝不调用 `armature_apply()`；`assets/characters/yumeka/` 保持 gitignored（`git ls-files` 为空）。
+
+### 二、精准 `Eye_L` / `Eye_R` 眼球锁视（`scenes/yumeka_ultra_giant.gd`）
+
+- 修正原 `_swing_to()` 弧度/角度单位混用导致的转头偏小问题，重构为从父到子顺序叠加（`Spine → Chest → Neck → Head → Eye_L/Eye_R`）。
+- 新增双眼 `Eye_L` / `Eye_R` 共轭平滑追踪（`EYE_YAW_LIMIT = ±14°`、`EYE_PITCH_LIMIT = ±10°`，阻尼速率 `11.0/s`），把主世界玩家实时坐标经 `SKY_SCALE` 换算到沙盘空间精准锁视玩家，附轻柔上眼睑下视联动（不改呼吸/眨眼节奏，不加额外凑近动画）。
+
+### 三、城内巨型遮天阴影 + 背景极轻空气透视（`scenes/city_night_lights.gd`、`scenes/district.gd`、`scenes/district_expansion.gd`、`scenes/harbor_skybox.gd`、`scenes/day_night_cycle.gd`）
+
+- **世界空间巨型遮天阴影（零新增 Draw Call / 零 Z-fighting）**：在 `city_night_lights.gd` 的建筑/路灯着色器及新封装 `shadowed_surface_material()`（覆盖地面、地块、道路、树木与沙盘框）中注入 `apply_giant_shadow()`（躯干+俯身头部+双臂软阴影包络，仅调暗漫反射 `ALBEDO` 不压暗 `EMISSION` 万家灯火），并随 Yumeka 4.2 s 呼吸周期极轻微脉动、随昼夜自动调节（白天 `0.66` / 黄昏 `0.70` / 夜晚柔淡 `0.26`，未挂载 Yumeka 时为 `0.0`）。
+- **背景微柔焦与空气薄雾**：给 `harbor_skybox.gd` 的 `_rect` 挂单 pass 轻量 2D `ShaderMaterial`（5-tap `0.78 px` 微柔焦 + 昼 `5.8%` / 昏 `6.4%` / 夜 `4.4%` 随昼夜色温联动的极轻薄雾），拉开十公里背景尺度纵深且保持双眼细节清晰。
+
+### 四、同口径几何/合批对比与测试验证
+
+| 指标 | 口径 | 数据源 | 基准值 | 当前值 |
+|---|---|---|---|---|
+| 城内 MultiMesh 批次 | 全图（Roads+Lots+Batches+BuildingBatches） | `scripts/district_stats.gd`（headless） | 76（48 近 + 5 远 + 1 废墟） | 76（48 近 + 5 远 + 1 废墟） |
+| 城内几何总面数 | 三角面 tris（含 MultiMesh 实例展开） | `scripts/district_stats.gd`（headless） | 3,571,462 | 3,571,462 |
+| 城内动态点/聚光源 | `MapSlot/District` 内 `OmniLight3D`+`SpotLight3D` | `tests/playtest.gd` | 0 | 0 |
+| 实机核显 FPS | 真实桌面 radeonsi | 未测（本轮视觉核验仅在隔离 `Xvfb`/`llvmpipe` 截少量帧，不测软渲染 FPS） | — | 未测 |
+
+- **Rust**：`cargo build --locked` + `cargo test --locked` **41/41 通过**。
+- **Godot 8 套 `--headless` 回归全绿（689/689）**：`playtest` **230**（更新前倾坐姿眼高/手部/大腿/脚部区间断言，新增 `Eye_L`/`Eye_R` 眼球追踪与限幅、背景空气透视材质与昼/昏/夜遮天阴影联动断言）/ `growth` 192 / `mode_menu` 45 / `touch` 42 / `sit_crush_gameplay` 44 / `sit_crush` 57 / `brawl` 43 / `audio` 36；启动校验 `--quit-after 5` 零报错；`git ls-files assets/characters/yumeka/` 为空。
+- **视觉核验（隔离 `Xvfb`，`llvmpipe`，1280×720 少量帧）**：`build/tmp/arm_polish_2shots/{01_bedroom_34_overview,02_city_180m_level_south}.png` 与前序 `build/tmp/looming_presence_shots/`（含黄昏/夜晚 100 m、俯瞰遮天阴影、左右眼球锁视特写）逐张目视通过（均不入库）。
+
+---
+
 ## 2026-11-26 — 夜景人脸补光微调：城内角色背光可读性提升 + 仰视 Yumeka 左眼硬影柔化
 
 备份：`backups/20261126_192300_night_face_fill_polish/{scenes/{day_night_cycle.gd,skybox_bedroom.gd},CHANGELOG.md}`。

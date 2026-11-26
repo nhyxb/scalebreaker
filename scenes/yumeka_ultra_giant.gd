@@ -12,6 +12,7 @@ extends Node3D
 ## renders more than the animation needs.
 
 const GLB_PATH := "res://assets/characters/yumeka/Yumeka_seated.glb"
+const CityNightLights := preload("res://scenes/city_night_lights.gd")
 const SKY_SCALE := 1.0 / 6666.67
 ## Main-world y == 0 (city ground) maps to this bedroom height (desk + 32 m of
 ## diorama base, matching `skybox_bedroom.gd::sandbox_anchor`).
@@ -31,6 +32,10 @@ const BLINK_OPEN_TIME := 0.14
 ## Comfort limits around the baked seated rest orientation (degrees).
 const GAZE_YAW_LIMIT := 15.0
 const GAZE_PITCH_LIMIT := 10.0
+## Anatomical eyeball rotation limits inside the sockets (degrees): tracks the
+## player crisply without sclera clipping or rolling back.
+const EYE_YAW_LIMIT := 14.0
+const EYE_PITCH_LIMIT := 10.0
 ## Soft anime matte (gl_compatibility + AGX friendly).
 const MATTE_ROUGHNESS := 0.88
 const MATTE_SPECULAR := 0.16
@@ -44,19 +49,26 @@ var _head_idx := -1
 var _neck_idx := -1
 var _chest_idx := -1
 var _spine_idx := -1
+var _eye_l_idx := -1
+var _eye_r_idx := -1
 ## Baked (animated) seated transforms per animated bone: breathing and gaze
-## compose over these, never over the armature's raw T-pose rest.
+## compose parent-to-child over these, never over the armature's raw T-pose rest.
 var _posed_bases := {}
+var _local_bases := {}             # child bone idx -> local transform relative to parent in SeatedPose
+var _rest_eye_mid_local := Vector3.ZERO
 
 var _anim_acc := 0.0
 var _time := 0.0
+var _breath_lift := 0.0            # [-1, +1] sine shared with main-world looming shadow
 var _blink_state := 0.0            # 0 = open, 1 = closed (animated weight)
 var _blink_timer := 2.2            # seconds until the next blink
 var _blink_anim := -1.0            # < 0: idle; else seconds into the blink
-var _gaze_yaw := 0.0               # smoothed degrees around the baked rest
+var _gaze_yaw := 0.0               # smoothed head+neck degrees around the baked rest
 var _gaze_pitch := 0.0             # positive = lower the gaze further
-var _gaze_swing := Vector2.ZERO    # neutral (diorama) gaze angle, subtracted
-var _gaze_override: Vector3         # world-space debug/test target (0,0,0 = off)
+var _eye_yaw := 0.0                # smoothed Eye_L/Eye_R degrees in current head space
+var _eye_pitch := 0.0              # positive = lower irises toward diorama
+var _gaze_swing := Vector2.ZERO    # neutral (diorama) gaze angle (degrees), subtracted
+var _gaze_override: Vector3        # world-space debug/test target (0,0,0 = off)
 var _mobile := false
 
 @onready var _rng := RandomNumberGenerator.new()
@@ -162,6 +174,8 @@ func _find_animation_rig() -> void:
 	_neck_idx = _skeleton.find_bone("Neck")
 	_chest_idx = _skeleton.find_bone("Chest")
 	_spine_idx = _skeleton.find_bone("Spine")
+	_eye_l_idx = _skeleton.find_bone("Eye_L")
+	_eye_r_idx = _skeleton.find_bone("Eye_R")
 	# The bedroom renders in a SubViewport whose parent is the Skybox node
 	# (harbor_skybox.gd); that is the mark_dirty() owner.
 	var vp := get_viewport()
@@ -200,9 +214,31 @@ func _land_seated_pose() -> void:
 
 
 func _cache_posed_bases() -> void:
-	for idx in [_head_idx, _neck_idx, _chest_idx, _spine_idx]:
+	for idx in [_spine_idx, _chest_idx, _neck_idx, _head_idx, _eye_l_idx, _eye_r_idx]:
 		if idx >= 0:
 			_posed_bases[idx] = _skeleton.get_bone_global_pose(idx)
+	# Cache parent-relative transforms from SeatedPose so parent-to-child twists
+	# (Spine -> Chest -> Neck -> Head -> Eye_L/Eye_R) compose seamlessly without drift.
+	var pairs := [
+		[_chest_idx, _spine_idx],
+		[_neck_idx, _chest_idx],
+		[_head_idx, _neck_idx],
+		[_eye_l_idx, _head_idx],
+		[_eye_r_idx, _head_idx],
+	]
+	for pair in pairs:
+		var child_i: int = pair[0]
+		var parent_i: int = pair[1]
+		if child_i >= 0 and parent_i >= 0 and _posed_bases.has(child_i) and _posed_bases.has(parent_i):
+			var p_base: Transform3D = _posed_bases[parent_i]
+			var c_base: Transform3D = _posed_bases[child_i]
+			_local_bases[child_i] = p_base.affine_inverse() * c_base
+	if _eye_l_idx >= 0 and _eye_r_idx >= 0:
+		var el: Transform3D = _posed_bases[_eye_l_idx]
+		var er: Transform3D = _posed_bases[_eye_r_idx]
+		_rest_eye_mid_local = (el.origin + er.origin) * 0.5
+	elif _head_idx >= 0:
+		_rest_eye_mid_local = (_posed_bases[_head_idx] as Transform3D).origin + Vector3(0.0, 0.04, 0.04)
 
 
 func _cache_neutral_gaze() -> void:
@@ -257,13 +293,17 @@ func _process(delta: float) -> void:
 
 
 func _drive_breathing() -> void:
-	# One slow sine per ~4.2 s: chest leads, spine eases; applied as tiny twists
-	# over the baked rest pose (never touching the pose itself).
+	# One slow sine per ~4.2 s: spine leads slightly, chest follows cleanly as a
+	# child of spine so upper-body & eyes ride the breathing cycle naturally.
 	var phase := fposmod(_time / BREATH_PERIOD, 1.0) * TAU
-	var lift := sin(phase)
-	# Negative rotation about +X tips the chest back up on the inhale.
-	_twist_bone(_chest_idx, Vector3.RIGHT, -lift * BREATH_CHEST_RAD)
-	_twist_bone(_spine_idx, Vector3.RIGHT, -lift * BREATH_SPINE_RAD)
+	_breath_lift = sin(phase)
+	# Negative rotation about +X tips the torso gently back up on the inhale.
+	_twist_bone_from_base(_spine_idx, _posed_bases.get(_spine_idx, Transform3D.IDENTITY),
+			Vector3.RIGHT, -_breath_lift * BREATH_SPINE_RAD)
+	if _chest_idx >= 0:
+		var chest_base: Transform3D = _composed_base(_chest_idx, _spine_idx)
+		_twist_bone_from_base(_chest_idx, chest_base, Vector3.RIGHT, -_breath_lift * BREATH_CHEST_RAD)
+	CityNightLights.set_giant_shadow_pulse(_breath_lift)
 
 
 func _drive_blink(dt: float) -> void:
@@ -315,57 +355,103 @@ func _drive_gaze(dt: float) -> void:
 			)
 		else:
 			world_target = DIORAMA_CENTRE
+
+	# 1. Gentle neck + head turn toward the player (parent-to-child over the
+	#    breathing chest pose), keeping soft inertia and +/-15° yaw / +/-10° pitch bounds.
 	var swing := _swing_to(world_target)
-	var desired_yaw := clampf(swing.x - _gaze_swing.x, -GAZE_YAW_LIMIT, GAZE_YAW_LIMIT)
-	var desired_pitch := clampf(swing.y - _gaze_swing.y, -GAZE_PITCH_LIMIT, GAZE_PITCH_LIMIT)
-	var smoothing := 1.0 - exp(-dt * 4.5)
-	_gaze_yaw = lerpf(_gaze_yaw, desired_yaw, smoothing)
-	_gaze_pitch = lerpf(_gaze_pitch, desired_pitch, smoothing)
-	# The head carries most of the turn; the neck eases the remainder.
-	_twist_bone(_head_idx, Vector3.UP, deg_to_rad(_gaze_yaw) * 0.65,
-			Vector3.RIGHT, deg_to_rad(_gaze_pitch) * 0.65)
+	var delta_yaw := swing.x - _gaze_swing.x
+	var delta_pitch := swing.y - _gaze_swing.y
+	# Head carries ~68% of the total required turn (up to its comfort limits);
+	# the eyeballs take over the exact residual so irises stay locked dead-on.
+	var desired_yaw := clampf(delta_yaw * 0.68, -GAZE_YAW_LIMIT, GAZE_YAW_LIMIT)
+	var desired_pitch := clampf(delta_pitch * 0.60, -GAZE_PITCH_LIMIT, GAZE_PITCH_LIMIT)
+	var head_smooth := 1.0 - exp(-dt * 4.2)
+	_gaze_yaw = lerpf(_gaze_yaw, desired_yaw, head_smooth)
+	_gaze_pitch = lerpf(_gaze_pitch, desired_pitch, head_smooth)
+
 	if _neck_idx >= 0:
-		_twist_bone(_neck_idx, Vector3.UP, deg_to_rad(_gaze_yaw) * 0.35,
+		var neck_base := _composed_base(_neck_idx, _chest_idx)
+		_twist_bone_from_base(_neck_idx, neck_base,
+				Vector3.UP, deg_to_rad(_gaze_yaw) * 0.35,
 				Vector3.RIGHT, deg_to_rad(_gaze_pitch) * 0.35)
+	var head_base := _composed_base(_head_idx, _neck_idx)
+	_twist_bone_from_base(_head_idx, head_base,
+			Vector3.UP, deg_to_rad(_gaze_yaw) * 0.65,
+			Vector3.RIGHT, deg_to_rad(_gaze_pitch) * 0.65)
+
+	# 2. Precision Eye_L / Eye_R eyeball lock in the CURRENT posed head frame:
+	#    irises track the exact residual angle to the player smoothly & quickly
+	#    within strict anatomical bounds (+/-14° horizontal, +/-10° vertical).
+	_drive_eyes(world_target, dt)
+
+
+func _drive_eyes(world_target: Vector3, dt: float) -> void:
+	if _eye_l_idx < 0 or _eye_r_idx < 0:
+		return
+	var eye_l_base := _composed_base(_eye_l_idx, _head_idx)
+	var eye_r_base := _composed_base(_eye_r_idx, _head_idx)
+	var eye_mid := (eye_l_base.origin + eye_r_base.origin) * 0.5
+	var target_skel := _skeleton.global_transform.affine_inverse() * world_target
+	var dir_skel := target_skel - eye_mid
+	if dir_skel.length_squared() < 1e-8:
+		dir_skel = eye_l_base.basis.z
+	# Transform direction into the resting eye socket basis (+Z optical forward,
+	# +X her left, +Y up) so angles are purely relative to the current head pose.
+	var dir_eye := eye_l_base.basis.inverse() * dir_skel
+	var horiz := Vector2(dir_eye.x, dir_eye.z).length()
+	var desired_eye_yaw := clampf(rad_to_deg(atan2(dir_eye.x, maxf(dir_eye.z, 1e-4))),
+			-EYE_YAW_LIMIT, EYE_YAW_LIMIT)
+	var desired_eye_pitch := clampf(rad_to_deg(atan2(-dir_eye.y, maxf(horiz, 1e-4))),
+			-EYE_PITCH_LIMIT, EYE_PITCH_LIMIT)
+	var eye_smooth := 1.0 - exp(-dt * 11.0)
+	_eye_yaw = lerpf(_eye_yaw, desired_eye_yaw, eye_smooth)
+	_eye_pitch = lerpf(_eye_pitch, desired_eye_pitch, eye_smooth)
+
+	# Conjugate gaze (identical yaw/pitch on both eyes) keeps anime iris symmetry
+	# cleanly locked onto the player without cross-eye distortion at close edges.
+	var eye_rot := Basis(Vector3.UP, deg_to_rad(_eye_yaw)) \
+			* Basis(Vector3.RIGHT, deg_to_rad(_eye_pitch))
+	_skeleton.set_bone_global_pose(_eye_l_idx,
+			Transform3D(eye_l_base.basis * eye_rot, eye_l_base.origin))
+	_skeleton.set_bone_global_pose(_eye_r_idx,
+			Transform3D(eye_r_base.basis * eye_rot, eye_r_base.origin))
+
+	# Gently couple upper-lid droop (eyelids only, zero iris shift) with downward gaze.
+	if _blink_anim < 0.0:
+		var lid_follow := clampf(0.10 + maxf(_eye_pitch, 0.0) / EYE_PITCH_LIMIT * 0.14, 0.08, 0.24)
+		set_morph("look_down", lid_follow)
+
+
+func _composed_base(child_idx: int, parent_idx: int) -> Transform3D:
+	if parent_idx >= 0 and _local_bases.has(child_idx):
+		return _skeleton.get_bone_global_pose(parent_idx) * (_local_bases[child_idx] as Transform3D)
+	if _posed_bases.has(child_idx):
+		return _posed_bases[child_idx] as Transform3D
+	return _skeleton.get_bone_global_pose(child_idx)
 
 
 func _swing_to(world_target: Vector3) -> Vector2:
-	# Yaw/pitch of the target relative to the skeleton's baked facing (+Z local
-	# forward after the mount flip), measured from the eye midpoint.
-	var eye_pos := _eye_world_position()
+	# Yaw/pitch (degrees) of the target relative to the skeleton's baked facing
+	# (+Z local forward after the mount flip), measured from the resting eye midpoint.
+	var eye_pos := _skeleton.global_transform * _rest_eye_mid_local
 	var dir := world_target - eye_pos
 	if dir.length_squared() < 1e-8:
 		dir = Vector3(0.0, -0.1, -1.0)
 	var dir_local := _skeleton.global_transform.affine_inverse().basis * dir
-	var yaw := atan2(dir_local.x, dir_local.z)
-	var pitch := atan2(-dir_local.y, Vector2(dir_local.x, dir_local.z).length())
+	var yaw := rad_to_deg(atan2(dir_local.x, maxf(dir_local.z, 1e-4)))
+	var pitch := rad_to_deg(atan2(-dir_local.y, Vector2(dir_local.x, dir_local.z).length()))
 	return Vector2(yaw, pitch)
 
 
-func _eye_world_position() -> Vector3:
-	var eye_l := _skeleton.find_bone("Eye_L")
-	var eye_r := _skeleton.find_bone("Eye_R")
-	if eye_l < 0 or eye_r < 0:
-		return _skeleton.global_position + Vector3.UP * 0.70
-	var pl := _skeleton.get_bone_global_pose(eye_l).origin
-	var pr := _skeleton.get_bone_global_pose(eye_r).origin
-	return _skeleton.global_transform * ((pl + pr) * 0.5)
-
-
-func _twist_bone(bone_idx: int, axis_a: Vector3, angle_a: float,
+func _twist_bone_from_base(bone_idx: int, base: Transform3D, axis_a: Vector3, angle_a: float,
 		axis_b := Vector3.ZERO, angle_b := 0.0) -> void:
-	# Rotates the bone about skeleton-space axes through the bone's own pivot,
-	# stacked over its baked REST pose (the seated GLB pose). set_bone_global_pose
-	# only moves this bone; children inherit automatically - same semantics as the
-	# Blender exporter's bend().
+	# Rotates the bone about skeleton-space axes through its current pivot,
+	# stacked over `base` (parent-composed SeatedPose).
 	if bone_idx < 0 or _skeleton == null:
 		return
 	var basis := Basis(axis_a.normalized(), angle_a)
 	if axis_b != Vector3.ZERO:
 		basis = Basis(axis_b.normalized(), angle_b) * basis
-	var base: Transform3D = _posed_bases.get(bone_idx, null)
-	if base == null:
-		base = _skeleton.get_bone_global_pose(bone_idx)
 	var pivot := base.origin
 	var pose := Transform3D(Basis(), pivot) * Transform3D(basis, Vector3.ZERO) \
 			* Transform3D(Basis(), -pivot) * base
@@ -404,6 +490,18 @@ func debug_anim_time() -> float:
 
 func debug_head_swing() -> Vector2:
 	return Vector2(_gaze_yaw, _gaze_pitch)
+
+
+func debug_eye_swing() -> Vector2:
+	return Vector2(_eye_yaw, _eye_pitch)
+
+
+func debug_eye_bones_ready() -> bool:
+	return _eye_l_idx >= 0 and _eye_r_idx >= 0
+
+
+func get_breath_lift() -> float:
+	return _breath_lift
 
 
 func debug_set_gaze_override(world_pos_or_null: Vector3) -> void:

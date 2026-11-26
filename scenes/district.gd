@@ -2,6 +2,7 @@ extends Node3D
 
 const DistrictExpansion := preload("res://scenes/district_expansion.gd")
 const DistrictBatches := preload("res://scenes/district_batches.gd")
+const CityNightLights := preload("res://scenes/city_night_lights.gd")
 const CHUNK_SIZE := DistrictExpansion.RENDER_CHUNK_SIZE
 const CULL_INTERVAL := 0.18
 const CULL_MARGIN := 24.0
@@ -36,8 +37,11 @@ func _ready() -> void:
 		# The walkable collider stays at zero so coin and character contact heights agree.
 		surface.position.y = -0.012
 		$Lots.position.y = -0.015
-		for floor_mesh: MeshInstance3D in [surface] + $Lots.get_children():
-			floor_mesh.material_override = DistrictExpansion.ground_detail(floor_mesh.mesh.material)
+	var grain := DistrictExpansion.surface_grain_texture() if micro_ground else null
+	for floor_mesh: MeshInstance3D in [surface] + $Lots.get_children():
+		floor_mesh.material_override = CityNightLights.shadowed_surface_material(
+				floor_mesh.mesh.material, grain)
+	CityNightLights.set_giant_shadow_half_extent(map_side * 0.5)
 	spawn_points = DistrictExpansion.populate(self, micro_ground, map_side * 0.5)
 	# Buildings are drawn by three map-wide MultiMesh layers (near detail, far low-detail,
 	# ruins) and stay visible everywhere; only the loose props under `Scenery` still stream

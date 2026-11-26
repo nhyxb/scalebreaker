@@ -158,19 +158,25 @@ func _bedroom_skybox() -> void:
 				and _count_collisions_in(yumeka) == 0,
 				"seated Yumeka mounts under the anchor with zero colliders")
 		if yumeka != null and yumeka.debug_is_mounted():
-			# Hard seated-pose assertions: the exporter root fix (2026-11-26) sends
-			# the pose as a 1-frame SeatedPose animation, so guard against the GLB
-			# ever regressing to the raw T-pose block-through-chair state.
+			# Hard seated-pose assertions: the exporter sends the forward-leaning
+			# elbow-prop pose as a 1-frame SeatedPose animation; guard against any
+			# regression to T-pose, high upright eyes, sandbox-clipping hands, or
+			# desk-clipping thighs.
 			var hm_l: Vector3 = yumeka.debug_bone_pos("Hand_L")
 			var hm_r: Vector3 = yumeka.debug_bone_pos("Hand_R")
 			var eye_l_pos: Vector3 = yumeka.debug_bone_pos("Eye_L")
+			var knee_l: Vector3 = yumeka.debug_bone_pos("LowerLeg_L")
+			var knee_r: Vector3 = yumeka.debug_bone_pos("LowerLeg_R")
 			var ft_l: Vector3 = yumeka.debug_bone_pos("Foot_L")
 			var ft_r: Vector3 = yumeka.debug_bone_pos("Foot_R")
-			_check(hm_l.y < eye_l_pos.y - 0.35 and hm_r.y < eye_l_pos.y - 0.35
+			_check(hm_l.y < eye_l_pos.y - 0.15 and hm_r.y < eye_l_pos.y - 0.15
+					and hm_l.y > 0.74 and hm_l.y < 0.88 and hm_r.y > 0.74 and hm_r.y < 0.88
+					and absf(hm_l.x) > 0.12 and absf(hm_r.x) > 0.12
+					and knee_l.y < 0.68 and knee_r.y < 0.68
 					and ft_l.y < 0.25 and ft_r.y < 0.25
 					and ft_l.z < 0.35 and ft_r.z < 0.35
-					and eye_l_pos.y > 1.10 and eye_l_pos.y < 1.30,
-					"SeatedPose lands in Godot: hands below eye level, feet tucked forward-low, eyes at spec (not T-pose)")
+					and eye_l_pos.y >= 0.95 and eye_l_pos.y <= 1.08,
+					"SeatedPose lands in Godot: leaning eye height 0.95-1.08 m, hands on desk outside sandbox, knees under desk, feet tucked forward-low")
 			_check(yumeka.get_morph("eye_nagomi_1") > 0.2
 					and yumeka.get_morph("mouth_smile_1") > 0.1
 					and yumeka.get_morph("eye_close") < 0.01,
@@ -189,26 +195,38 @@ func _bedroom_skybox() -> void:
 					break
 			_check(saw_blink and yumeka.debug_eye_close() < 0.01,
 					"forced blink closes and reopens the eyelids morph")
-			# Gaze: the head swings toward override targets, mirrored and limited.
+			# Gaze: both head/neck and Eye_L/Eye_R bones smoothly track override
+			# targets left/right and stay clamped within anatomical limits.
 			yumeka.debug_set_gaze_override(Vector3(-0.62, 0.85, 0.0))
 			var yaw_left := 0.0
+			var eye_left := 0.0
 			for frame in 120:
 				await physics_frame
 				yaw_left = yumeka.debug_head_swing().x
-				if absf(yaw_left) > 4.0:
+				eye_left = yumeka.debug_eye_swing().x
+				if absf(yaw_left) > 5.0 and absf(eye_left) > 4.0:
 					break
 			yumeka.debug_set_gaze_override(Vector3(0.62, 0.85, 0.0))
 			var yaw_right := 0.0
+			var eye_right := 0.0
 			for frame in 120:
 				await physics_frame
 				yaw_right = yumeka.debug_head_swing().x
-				if absf(yaw_right) > 4.0:
+				eye_right = yumeka.debug_eye_swing().x
+				if yaw_right * yaw_left < 0.0 and absf(yaw_right) > 5.0 \
+						and eye_right * eye_left < 0.0 and absf(eye_right) > 4.0:
 					break
-			yumeka.debug_set_gaze_override(Vector3.ZERO)
 			var swing: Vector2 = yumeka.debug_head_swing()
+			var eye_swing: Vector2 = yumeka.debug_eye_swing()
+			yumeka.debug_set_gaze_override(Vector3.ZERO)
 			_check(yaw_left * yaw_right < 0.0
 					and absf(swing.x) <= 15.5 and absf(swing.y) <= 10.5,
 					"gaze overrides swing the head both ways within yaw/pitch limits")
+			_check(yumeka.debug_eye_bones_ready()
+					and eye_left * eye_right < 0.0
+					and absf(eye_left) > 3.0 and absf(eye_right) > 3.0
+					and absf(eye_swing.x) <= 14.5 and absf(eye_swing.y) <= 10.5,
+					"Eye_L and Eye_R bones track left/right gaze targets smoothly within anatomical clamp")
 			# Change-driven refresh wiring: every animation tick ends with a
 			# mark_dirty() call, so asserting the skybox reference plus live
 			# ticking proves the bedroom re-renders while the camera rests.
@@ -298,23 +316,42 @@ func _day_night_and_settings() -> void:
 				and String(dn.call("get_mode")) == "night",
 				"time_of_day persists to gameplay.cfg across all modes and restores on reload")
 
-	# Verify day / dusk / night transitions, city emission mask precision, F7 shortcut, and zero city dynamic lights.
+	# Verify day / dusk / night transitions, city emission mask precision, F7 shortcut,
+	# giant looming shadow linkage, backdrop atmospheric haze shader, and zero city dynamic lights.
+	var sky: Node = _game.get_node_or_null("Skybox")
+	var bg_mat: ShaderMaterial = sky.call("get_backdrop_shader_material") if sky != null and sky.has_method(&"get_backdrop_shader_material") else null
+	var yumeka_present: bool = sky != null and sky.has_method(&"is_yumeka_mounted") and bool(sky.call(&"is_yumeka_mounted"))
 	dn.call("set_mode", "day")
 	await process_frame
+	var sh_day: float = float(dn.call("get_giant_shadow_strength"))
+	var haze_day: float = float(bg_mat.get_shader_parameter(&"haze_strength")) if bg_mat != null else -1.0
 	var day_ok: bool = is_zero_approx(float(dn.call("get_night_glow"))) \
 			and not desk_lamp.visible and sun.light_energy > 0.85
 	dn.call("set_mode", "dusk")
 	await process_frame
+	var sh_dusk: float = float(dn.call("get_giant_shadow_strength"))
+	var haze_dusk: float = float(bg_mat.get_shader_parameter(&"haze_strength")) if bg_mat != null else -1.0
 	var dusk_glow: float = float(dn.call("get_night_glow"))
 	var dusk_ok: bool = dusk_glow > 0.25 and dusk_glow < 0.65 \
 			and desk_lamp.visible and sun.light_color.r > sun.light_color.b + 0.35
 	dn.call("set_mode", "night")
 	await process_frame
+	var sh_night: float = float(dn.call("get_giant_shadow_strength"))
+	var haze_night: float = float(bg_mat.get_shader_parameter(&"haze_strength")) if bg_mat != null else -1.0
 	var night_ok: bool = float(dn.call("get_night_glow")) > 0.95 \
 			and desk_lamp.visible and desk_lamp.light_energy > 1.0 \
 			and sun.light_color.b > sun.light_color.r + 0.25
 	_check(day_ok and dusk_ok and night_ok,
 			"day, dusk, and night presets synchronize Sun, city night glow, and bedroom DeskLampLight")
+	var blur_px: float = float(bg_mat.get_shader_parameter(&"blur_radius_px")) if bg_mat != null else -1.0
+	var shadow_ok := (sh_day > 0.50 and sh_dusk > 0.50 and sh_night > 0.05 and sh_night < sh_day * 0.6) \
+			if yumeka_present else is_zero_approx(sh_day)
+	_check(bg_mat != null and blur_px >= 0.55 and blur_px <= 1.05
+			and haze_day >= 0.04 and haze_day <= 0.075
+			and haze_dusk >= 0.04 and haze_dusk <= 0.075
+			and haze_night >= 0.035 and haze_night <= 0.075
+			and shadow_ok,
+			"backdrop micro-blur/haze shader and city-wide giant looming shadow scale cleanly with day/dusk/night")
 
 	# F7 debug shortcut cycles day -> dusk -> night -> day cleanly.
 	dn.call("set_mode", "day")

@@ -513,6 +513,7 @@ static func _road_tile_mesh(scene: PackedScene, micro_ground: bool) -> ArrayMesh
 				group["indices"].append(base + 2)
 	prototype.free()
 	var merged := ArrayMesh.new()
+	var grain := surface_grain_texture() if micro_ground else null
 	for material: Material in groups:
 		var group: Dictionary = groups[material]
 		if group["indices"].is_empty():
@@ -525,7 +526,7 @@ static func _road_tile_mesh(scene: PackedScene, micro_ground: bool) -> ArrayMesh
 		arrays[Mesh.ARRAY_INDEX] = group["indices"]
 		merged.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 		merged.surface_set_material(merged.get_surface_count() - 1,
-				ground_detail(material) if micro_ground else material)
+				CityNightLights.shadowed_surface_material(material, grain))
 	_road_tile_meshes[key] = merged
 	return merged
 
@@ -653,11 +654,7 @@ static func _append_vertex(groups: Dictionary, material: Material, point: Vector
 	group["uvs"].append(uv)
 
 
-static func ground_detail(source: Material) -> Material:
-	if not source is BaseMaterial3D:
-		return source
-	if _ground_materials.has(source):
-		return _ground_materials[source]
+static func surface_grain_texture() -> NoiseTexture2D:
 	if _surface_grain == null:
 		var noise := FastNoiseLite.new()
 		noise.frequency = 0.28
@@ -670,6 +667,15 @@ static func ground_detail(source: Material) -> Material:
 		_surface_grain.generate_mipmaps = true
 		_surface_grain.color_ramp = tones
 		_surface_grain.noise = noise
+	return _surface_grain
+
+
+static func ground_detail(source: Material) -> Material:
+	if not source is BaseMaterial3D:
+		return source
+	if _ground_materials.has(source):
+		return _ground_materials[source]
+	var grain := surface_grain_texture()
 	var material := source.duplicate() as BaseMaterial3D
 	material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 	material.uv2_triplanar = true
@@ -678,7 +684,7 @@ static func ground_detail(source: Material) -> Material:
 	material.detail_enabled = true
 	material.detail_uv_layer = BaseMaterial3D.DETAIL_UV_2
 	material.detail_blend_mode = BaseMaterial3D.BLEND_MODE_MUL
-	material.detail_albedo = _surface_grain
+	material.detail_albedo = grain
 	_ground_materials[source] = material
 	return material
 
@@ -842,10 +848,11 @@ static func _add_lot_pad(pads: Dictionary[Material, Array], center: Vector3, zon
 
 
 static func _batch_lot_pads(parent: Node3D, pads: Dictionary[Material, Array], micro_ground: bool) -> void:
+	var grain := surface_grain_texture() if micro_ground else null
 	for material: Material in pads:
 		var mesh := BoxMesh.new()
 		mesh.size = Vector3(24.0, 0.14, 24.0)
-		mesh.material = ground_detail(material) if micro_ground else material
+		mesh.material = CityNightLights.shadowed_surface_material(material, grain)
 		_batch_mesh(parent, mesh, pads[material], "lot_pad/" + material.resource_name)
 
 
@@ -1169,7 +1176,7 @@ static func _build_sandbox_frame(district: Node3D, half_land: float) -> void:
 				Vector3(0.0, -base_depth + plate_h * 0.5, 0.0))
 
 	var mesh := st.commit()
-	mesh.surface_set_material(0, _mats["sandbox_wood"])
+	mesh.surface_set_material(0, CityNightLights.shadowed_surface_material(_mats["sandbox_wood"]))
 	var frame := MeshInstance3D.new()
 	frame.name = "SandboxFrame"
 	frame.mesh = mesh
@@ -1407,8 +1414,18 @@ static func _build_tree_multimesh(scenery: Node3D, transforms: Array[Transform3D
 			large.append(Transform3D(pose.basis.scaled(Vector3.ONE * (s * KIT_SCALE_TREE)), pose.origin))
 		else:
 			small.append(Transform3D(pose.basis.scaled(Vector3.ONE * (s * KIT_SCALE_TREE * 1.18)), pose.origin))
-	_batch_kit(scenery, PARK_TREES[0], large)
-	_batch_kit(scenery, PARK_TREES[1], small)
+	for pair in [[PARK_TREES[0], large], [PARK_TREES[1], small]]:
+		var spec: String = pair[0]
+		var poses: Array[Transform3D] = pair[1]
+		if poses.is_empty():
+			continue
+		var mesh := _kit_merged_mesh(spec)
+		if mesh == null:
+			continue
+		_batch_mesh(scenery, mesh, poses, spec)
+		var node := scenery.get_child(scenery.get_child_count() - 1) as MultiMeshInstance3D
+		if node != null and mesh.get_surface_count() > 0:
+			node.material_override = CityNightLights.shadowed_surface_material(mesh.surface_get_material(0))
 
 
 static func _build_lamp_multimesh(scenery: Node3D, transforms: Array[Transform3D]) -> void:

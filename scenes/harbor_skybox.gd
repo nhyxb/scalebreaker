@@ -17,12 +17,18 @@ const MOBILE_RES_RATIO := 0.55
 const DESKTOP_MIN_SIZE := Vector2i(960, 540)
 const MOBILE_MIN_SIZE := Vector2i(640, 360)
 
+## Subtle optical depth cue on the 1:6667 backdrop: single-pass micro-softening
+## (~0.78 px) + 4–7% day/dusk/night atmospheric haze separates the multi-kilometre
+## bedroom/Yumeka from crisp foreground skyscrapers without softening eye detail.
+const BACKDROP_BLUR_RADIUS_PX := 0.78
+
 var bedroom: Node3D
 var ultra_giant_anchor: Node3D
 var _sub: SubViewport
 var _sky_cam: Camera3D
 var _layer: CanvasLayer
 var _rect: TextureRect
+var _backdrop_mat: ShaderMaterial
 var _anchor: Node3D
 var _last_vp_size := Vector2i.ZERO
 ## Change-driven refresh state: the backdrop re-renders only on frames the main camera's
@@ -77,6 +83,8 @@ func _ready() -> void:
 	_rect.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 	_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_rect.texture = _sub.get_texture()
+	_backdrop_mat = _build_backdrop_shader_material()
+	_rect.material = _backdrop_mat
 	_layer.add_child(_rect)
 	_resize(get_viewport().size)
 	get_viewport().size_changed.connect(_on_size_changed)
@@ -150,8 +158,62 @@ func mark_dirty() -> void:
 	_pose_dirty = true
 
 
-## Forward day/dusk/night atmosphere weights to the bedroom world and force a redraw.
+func is_yumeka_mounted() -> bool:
+	if ultra_giant_anchor == null:
+		return false
+	var y := ultra_giant_anchor.get_node_or_null("Yumeka")
+	return y != null and y.has_method(&"debug_is_mounted") and bool(y.call(&"debug_is_mounted"))
+
+
+func get_backdrop_shader_material() -> ShaderMaterial:
+	return _backdrop_mat
+
+
+## Forward day/dusk/night atmosphere weights to the bedroom world + 2D atmospheric haze
+## shader and force a redraw.
 func apply_day_night(day_w: float, dusk_w: float, night_w: float, cycle_time: float = 0.0) -> void:
+	var sum := maxf(day_w + dusk_w + night_w, 0.0001)
+	var d := day_w / sum
+	var u := dusk_w / sum
+	var n := night_w / sum
+	if _backdrop_mat != null:
+		var haze_col := Color(0.76, 0.86, 0.96) * d \
+				+ Color(0.92, 0.64, 0.48) * u \
+				+ Color(0.20, 0.24, 0.38) * n
+		var haze_str := 0.058 * d + 0.064 * u + 0.044 * n
+		_backdrop_mat.set_shader_parameter(&"haze_color", haze_col)
+		_backdrop_mat.set_shader_parameter(&"haze_strength", haze_str)
 	if bedroom != null and bedroom.has_method(&"apply_day_night"):
 		bedroom.call(&"apply_day_night", day_w, dusk_w, night_w, cycle_time)
 	mark_dirty()
+
+
+func _build_backdrop_shader_material() -> ShaderMaterial:
+	var sh := Shader.new()
+	sh.code = """
+shader_type canvas_item;
+
+uniform float blur_radius_px = 0.78;
+uniform vec3 haze_color : source_color = vec3(0.76, 0.86, 0.96);
+uniform float haze_strength = 0.058;
+
+void fragment() {
+	vec2 px = TEXTURE_PIXEL_SIZE * blur_radius_px;
+	vec4 c0 = texture(TEXTURE, UV);
+	vec4 c1 = texture(TEXTURE, UV + vec2( px.x,  px.y * 0.5));
+	vec4 c2 = texture(TEXTURE, UV + vec2(-px.x, -px.y * 0.5));
+	vec4 c3 = texture(TEXTURE, UV + vec2(-px.x * 0.5,  px.y));
+	vec4 c4 = texture(TEXTURE, UV + vec2( px.x * 0.5, -px.y));
+	vec3 col = c0.rgb * 0.44 + (c1.rgb + c2.rgb + c3.rgb + c4.rgb) * 0.14;
+	float horizon_boost = mix(0.86, 1.14, smoothstep(0.15, 0.85, UV.y));
+	float haze = clamp(haze_strength * horizon_boost, 0.0, 0.12);
+	col = mix(col, haze_color, haze);
+	COLOR = vec4(col, c0.a);
+}
+"""
+	var mat := ShaderMaterial.new()
+	mat.shader = sh
+	mat.set_shader_parameter(&"blur_radius_px", BACKDROP_BLUR_RADIUS_PX)
+	mat.set_shader_parameter(&"haze_color", Color(0.76, 0.86, 0.96))
+	mat.set_shader_parameter(&"haze_strength", 0.058)
+	return mat

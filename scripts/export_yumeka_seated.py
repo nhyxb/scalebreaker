@@ -13,16 +13,17 @@ Pipeline (run from the repo root):
 3. Rebuild every lilToon-inspired emissive material as a Principled BSDF bound to
    the packed PNG textures (the raw files are unlit emissive node setups that do
    not survive glTF export).
-4. Pose a natural seated posture against FK world-space joint twists (see
-   POSE_TWISTS): horizontal thighs under the 0.75 m desk, near-vertical shins,
-   8–12° torso lean, ~20° head tilt gazing down at the 21.27 cm sandbox, hands
-   resting on the thighs.
-5. Measure the seated butt-contact / eye / foot heights, uniformly scale so the
-   seated eye height above the chair cushion is ~0.745 m (total seated eye height
-   1.20 m for a 0.4553 m cushion), and rebase the origin onto the cushion contact
-   plane so the GLB roots exactly at skybox_bedroom.gd's ultra_giant_anchor.
-6. Apply the pose as the rest pose and export only what the sandbox needs as
-   assets/characters/yumeka/Yumeka_seated.glb (texture PNGs embedded).
+4. Pose a forward-leaning desk-braced posture against FK twists (see POSE_TWISTS):
+   horizontal thighs well under the 0.69 m desk underside, near-vertical shins,
+   ~30° forward Spine+Chest lean, neck/head aligned onto the 21.27 cm sandbox so
+   seated eye height lands at ~0.95–1.08 m, and forearms resting wide on the oak
+   tabletop outside the sandbox.
+5. Measure the un-tilted seated cushion contact plane first (LEG_POSE_TWISTS),
+   apply the bedroom-calibrated BODY_SCALE + cushion compression, and verify
+   eye height (0.95–1.08 m) and thigh clearance (< 0.688 m) before exporting.
+6. Keyframe the 1-frame `SeatedPose` Action (NEVER call `armature_apply()`, which
+   corrupts glTF skin binding) so all 14 facial shape keys stay lossless, and
+   export assets/characters/yumeka/Yumeka_seated.glb (texture PNGs embedded).
 
 The output stays gitignored (assets/characters/yumeka/): the Yumeka model and
 textures are licensed assets and must never be pushed to the public repo.
@@ -50,43 +51,115 @@ DEFAULT_OUT = os.path.join(REPO_ROOT, "assets", "characters", "yumeka", "Yumeka_
 ## Bedroom facts mirrored from scenes/skybox_bedroom.gd (metres):
 DESK_TOP = 0.75              # desk surface
 SEAT_TOP = 0.4553            # chair cushion surface == ultra_giant_anchor height
-SEALED_EYE_TARGET = 1.20     # desired seated eye height above the bedroom floor
-TARGET_EYE_ABOVE_SEAT = SEALED_EYE_TARGET - SEAT_TOP  # 0.7447 m
+CHAIR_Z = 0.60               # ChairDesk z (moved 4.0 cm closer to desk from 0.64)
+ANCHOR_Z = CHAIR_Z - 0.047 * 1.95  # 0.50835 m (ultra_giant_anchor z in bedroom)
+# Petite anime schoolgirl body scale (1.343 m raw -> ~1.41 m seated-calibrated)
+# paired with soft swivel-chair cushion compression so thighs sit 8.7 cm below the
+# 0.69 m desk underside, elbows/palms rest flat on the 0.75 m oak tabletop flanking
+# the sandbox, and seated eye height lands at ~0.97 m (both giant eyes cleanly fill
+# the upper sky on 25 m & 100 m strictly horizontal south-facing gameplay views).
+BODY_SCALE = 1.05
+CUSHION_COMPRESSION = 0.042  # soft swivel-chair pad sink (cushion thickness is 8.5 cm)
 SANDBOX_TOP = 0.7548         # diorama tray surface (DESK_TOP + 32 * SKY_SCALE)
 
 ## Every ~2048² packed image rescales to this size (GLB stays light).
 TEXTURE_SIZE = 2048
 
-## Seated pose: ordered (bone, armature-space axis, degrees) FK twists, applied
-## parent-first. She faces Blender -Y (the desk/sandbox direction), Z is up.
-POSE_TWISTS = [
-    # -- thighs: horizontal, sinking slightly into the cushion (knees over toes)
+## Leg-only seated twists used first to measure the un-tilted pelvis/cushion plane
+## cleanly before applying upper-body forward lean.
+LEG_POSE_TWISTS = [
+    # -- thighs: horizontal under the 0.69 m desk underside with gentle natural knee splay
     ("UpperLeg_L", (1, 0, 0), -89.0),
     ("UpperLeg_R", (1, 0, 0), -89.0),
-    # -- knees: shins near vertical, toes slightly tucked under the desk front
+    ("UpperLeg_L", (0, 0, 1), -3.0),
+    ("UpperLeg_R", (0, 0, 1), 3.0),
+    # -- knees: shins near vertical under the desk
     ("LowerLeg_L", (1, 0, 0), 86.0),
     ("LowerLeg_R", (1, 0, 0), 86.0),
-    # -- feet: flat on the floor
-    ("Foot_L", (1, 0, 0), 6.0),
-    ("Foot_R", (1, 0, 0), 6.0),
-    # -- spine chain: gentle 10° forward lean focused low in the back
-    ("Spine", (1, 0, 0), 5.0),
-    ("Chest", (1, 0, 0), 5.0),
-    # -- neck relaxed, head bowed to watch the 21.27 cm diorama
-    ("Neck", (1, 0, 0), 3.0),
-    ("Head", (1, 0, 0), 18.0),
-    # -- arms: hang, then 12° forward so the hands land on the thighs
-    ("UpperArm_L", (0, 0, 1), -12.0),
-    ("UpperArm_R", (0, 0, 1), 12.0),
-    ("UpperArm_L", (0, 1, 0), 88.0),
-    ("UpperArm_R", (0, 1, 0), -88.0),
-    # -- elbows: fold forearms onto the thighs near the knees
-    ("LowerArm_L", (1, 0, 0), -52.0),
-    ("LowerArm_R", (1, 0, 0), -52.0),
-    # -- hands: rest flat-ish on the thighs
-    ("Hand_L", (1, 0, 0), -14.0),
-    ("Hand_R", (1, 0, 0), -14.0),
+    # -- feet: softly resting near the floor
+    ("Foot_L", (1, 0, 0), 10.0),
+    ("Foot_R", (1, 0, 0), 10.0),
 ]
+
+## Upper-body forward-leaning desk-resting twists: 30° lean across Spine + Chest (4° + 26°),
+## neck pitched forward and head counter-lifted so her eyes sit ~23 cm above the desk
+## gazing straight into the 21.27 cm sandbox; upper arms drop naturally along the torso
+## onto elbows resting on the oak desk (|x| ~0.22, y ~0.80, z ~0.37), and bent forearms
+## angle inward in a soft A-frame (/\) flanking the south outer edge of the sandbox.
+UPPER_POSE_TWISTS = [
+    # -- spine/chest: 30° forward lean concentrated above desk height (zero torso-desk clip)
+    ("Spine", (1, 0, 0), 4.0),
+    ("Chest", (1, 0, 0), 26.0),
+    # -- neck & head: lean face close over the diorama, chin raised for clean eye/bangs reveal
+    ("Neck", (1, 0, 0), 14.0),
+    ("Head", (1, 0, 0), -14.0),
+    # -- shoulders: relaxed natural downward drop toward the desk surface
+    ("Shoulder_L", (0, 1, 0), 8.0),
+    ("Shoulder_R", (0, 1, 0), -8.0),
+    ("Shoulder_L", (0, 0, 1), -12.0),
+    ("Shoulder_R", (0, 0, 1), 12.0),
+    # -- upper arms: tucked close beside torso, sloping down onto the oak tabletop
+    ("UpperArm_L", (0, 1, 0), 36.0),
+    ("UpperArm_R", (0, 1, 0), -36.0),
+    ("UpperArm_L", (1, 0, 0), -38.0),
+    ("UpperArm_R", (1, 0, 0), -38.0),
+    ("UpperArm_L", (0, 0, 1), 9.0),
+    ("UpperArm_R", (0, 0, 1), -9.0),
+    # -- forearms: natural A-frame (/\) resting forward along the desk south of the sandbox
+    ("LowerArm_L", (1, 0, 0), -31.0),
+    ("LowerArm_R", (1, 0, 0), -31.0),
+    ("LowerArm_L", (0, 1, 0), -4.0),
+    ("LowerArm_R", (0, 1, 0), 4.0),
+    ("LowerArm_L", (0, 0, 1), -70.0),
+    ("LowerArm_R", (0, 0, 1), 70.0),
+]
+
+## Local-axis forearm pronation (levels palms flat onto the oak tabletop), soft wrist
+## extension, and true anatomical 5-finger semi-curled relaxation (-deg about local X on
+## both _L and _R curls fingers symmetrically downward toward the palm).
+LOCAL_POSE_TWISTS = [
+    ("LowerArm_L", (0, 1, 0), 59.0),
+    ("LowerArm_R", (0, 1, 0), -59.0),
+    ("Hand_L", (1, 0, 0), 10.0),
+    ("Hand_R", (1, 0, 0), 10.0),
+    # -- relaxed thumb inward curl
+    ("ThumbProximal_L", (1, 0, 0), -10.0),
+    ("ThumbIntermediate_L", (1, 0, 0), -18.0),
+    ("ThumbDistal_L", (1, 0, 0), -22.0),
+    ("ThumbProximal_R", (1, 0, 0), -10.0),
+    ("ThumbIntermediate_R", (1, 0, 0), -18.0),
+    ("ThumbDistal_R", (1, 0, 0), -22.0),
+    # -- progressive relaxed curl from index to little finger (semi-relaxed resting hand)
+    ("IndexProximal_L", (1, 0, 0), -20.0),
+    ("IndexIntermediate_L", (1, 0, 0), -32.0),
+    ("IndexDistal_L", (1, 0, 0), -20.0),
+    ("MiddleProximal_L", (1, 0, 0), -24.0),
+    ("MiddleIntermediate_L", (1, 0, 0), -36.0),
+    ("MiddleDistal_L", (1, 0, 0), -24.0),
+    ("RingProximal_L", (1, 0, 0), -28.0),
+    ("RingIntermediate_L", (1, 0, 0), -40.0),
+    ("RingDistal_L", (1, 0, 0), -26.0),
+    ("LittleProximal_L", (1, 0, 0), -32.0),
+    ("LittleIntermediate_L", (1, 0, 0), -44.0),
+    ("LittleDistal_L", (1, 0, 0), -28.0),
+    ("IndexProximal_R", (1, 0, 0), -20.0),
+    ("IndexIntermediate_R", (1, 0, 0), -32.0),
+    ("IndexDistal_R", (1, 0, 0), -20.0),
+    ("MiddleProximal_R", (1, 0, 0), -24.0),
+    ("MiddleIntermediate_R", (1, 0, 0), -36.0),
+    ("MiddleDistal_R", (1, 0, 0), -24.0),
+    ("RingProximal_R", (1, 0, 0), -28.0),
+    ("RingIntermediate_R", (1, 0, 0), -40.0),
+    ("RingDistal_R", (1, 0, 0), -26.0),
+    ("LittleProximal_R", (1, 0, 0), -32.0),
+    ("LittleIntermediate_R", (1, 0, 0), -44.0),
+    ("LittleDistal_R", (1, 0, 0), -28.0),
+]
+
+## Subtle wrist pitch polish applied after local palm leveling.
+HAND_POSE_TWISTS = []
+
+POSE_TWISTS = LEG_POSE_TWISTS + UPPER_POSE_TWISTS + LOCAL_POSE_TWISTS + HAND_POSE_TWISTS
 
 ## Shape keys kept in the GLB (anything else is removed). Names arriving with
 ## characters that break NodePath property addressing ("vrc.looking_down" style
@@ -253,13 +326,44 @@ def bend(arm_obj: bpy.types.Object, bone_name: str, axis, deg: float) -> None:
     bpy.context.view_layer.update()
 
 
-def pose_seated(arm_obj: bpy.types.Object) -> None:
+def bend_local(arm_obj: bpy.types.Object, bone_name: str, local_axis, deg: float) -> None:
+    """Twist pose bone about one of its OWN current local axes (used for forearm pronation)."""
+    pb = arm_obj.pose.bones.get(bone_name)
+    if pb is None:
+        raise SystemExit(f"missing pose bone: {bone_name}")
+    cur = pb.matrix.copy()
+    head = cur.translation
+    arm_axis = (cur.to_3x3().normalized() @ Vector(local_axis)).normalized()
+    rot = Matrix.Rotation(radians(deg), 4, arm_axis)
+    pb.matrix = Matrix.Translation(head) @ rot @ Matrix.Translation(-head) @ cur
+    bpy.context.view_layer.update()
+
+
+def pose_seated(arm_obj: bpy.types.Object) -> float:
+    """Apply the seated legs first to read the un-tilted pelvis cushion contact,
+    then layer the upper-body leaning/elbow-prop pose, forearm pronation, and
+    relaxed hands on top. Returns raw butt_z."""
     bpy.context.view_layer.objects.active = arm_obj
     bpy.ops.object.mode_set(mode="POSE")
-    for bone_name, axis, deg in POSE_TWISTS:
+    for bone_name, axis, deg in LEG_POSE_TWISTS:
         bend(arm_obj, bone_name, axis, deg)
     bpy.ops.object.mode_set(mode="OBJECT")
     bpy.context.view_layer.update()
+
+    def seat_region(pt: Vector) -> bool:
+        return abs(pt.x) < 0.12 and -0.14 < pt.y < 0.10 and 0.45 < pt.z < 0.78
+    raw_butt_z = _mesh_lowest(arm_obj, seat_region)
+
+    bpy.ops.object.mode_set(mode="POSE")
+    for bone_name, axis, deg in UPPER_POSE_TWISTS:
+        bend(arm_obj, bone_name, axis, deg)
+    for bone_name, local_axis, deg in LOCAL_POSE_TWISTS:
+        bend_local(arm_obj, bone_name, local_axis, deg)
+    for bone_name, axis, deg in HAND_POSE_TWISTS:
+        bend(arm_obj, bone_name, axis, deg)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.context.view_layer.update()
+    return raw_butt_z
 
 
 def remove_helpers() -> None:
@@ -327,8 +431,9 @@ def _mesh_lowest(arm_obj, region=None) -> float:
     return lowest
 
 
-def measure_and_scale(arm_obj) -> dict:
-    """Scale to the seated eye-height spec and rebase the origin at the cushion."""
+def measure_and_scale(arm_obj, raw_butt_z: float) -> dict:
+    """Apply the bedroom-calibrated body scale, rebase onto the chair cushion,
+    and report exact room-space clearances (eyes, hands, elbows, thighs, feet)."""
     bpy.context.view_layer.update()
 
     def dump_lowest(count: int) -> None:
@@ -344,69 +449,77 @@ def measure_and_scale(arm_obj) -> dict:
             _log(f"  LOW: z={row[0]:.4f} mesh={row[1]} pos={row[2]}")
 
     stats = {}
-    # Eye height: mean of the posed Eye_L / Eye_R bone heads (true eye centres).
     eye_zs = []
     for side in ("Eye_L", "Eye_R"):
         pb = arm_obj.pose.bones.get(side)
         if pb is not None:
             eye_zs.append((arm_obj.matrix_world @ pb.matrix.translation).z)
     eye_z = sum(eye_zs) / max(len(eye_zs), 1)
-    # Butt contact plane: lowest seat-region vertex around the pelvis (thigh gap
-    # excluded via the x/y window; the cushion plane is a small contact patch).
-    def seat_region(pt: Vector) -> bool:
-        # Pelvis/isglial contact patch only: the pleated skirt hem drapes ~20 cm
-        # below the real cushion contact, so the z window must hug the pelvis
-        # underside and exclude that hanging fabric.
-        return abs(pt.x) < 0.12 and -0.14 < pt.y < 0.10 and 0.45 < pt.z < 0.75
-    butt_z = _mesh_lowest(arm_obj, seat_region)
-    # Foot contact: lowest toe-region vertex in front of the shin.
     def foot_region(pt: Vector) -> bool:
-        return abs(pt.x) < 0.42 and pt.y < -0.12 and pt.z < 0.20
+        return abs(pt.x) < 0.42 and pt.y < -0.12 and pt.z < 0.25
     foot_z = _mesh_lowest(arm_obj, foot_region)
 
-    scale = TARGET_EYE_ABOVE_SEAT / max(eye_z - butt_z, 1e-6)
-    stats.update(raw_eye_z=eye_z, raw_butt_z=butt_z, raw_foot_z=foot_z, scale=scale)
+    scale = BODY_SCALE
+    cushion_sink = CUSHION_COMPRESSION
+    stats.update(raw_eye_z=eye_z, raw_butt_z=raw_butt_z, raw_foot_z=foot_z, scale=scale)
 
-    # Uniform scale + origin rebase: cushion contact plane becomes z == 0.
+    # Uniform scale + origin rebase: cushion contact plane sits at z = -cushion_sink
+    # (gentle foam compression inside the 8.5 cm thick swivel-chair pad).
     arm_obj.scale = (scale, scale, scale)
-    arm_obj.location.z -= butt_z * scale
+    arm_obj.location.z -= raw_butt_z * scale + cushion_sink
     bpy.context.view_layer.update()
 
     world = arm_obj.matrix_world
-    eye_world = None
-    foot_world = None
+    eye_pts = []
     for side in ("Eye_L", "Eye_R"):
         pb = arm_obj.pose.bones.get(side)
         if pb is not None:
-            eye_world = (world @ pb.matrix.translation).z
+            eye_pts.append(world @ pb.matrix.translation)
+    eye_mid = sum(eye_pts, Vector()) / max(len(eye_pts), 1)
     foot_world = _mesh_lowest(arm_obj, foot_region)
 
-    # Petite-figure leg reach vs the 0.4553 m bench reality: her shin+shoe line
-    # measures a few centimetres short of the floor, so the sole would dig in.
-    # Soft-cushion compensation: press the pelvis INTO the chair pad just deep
-    # enough to plant the shoe soles flush on the bedroom floor. The pelvis sinks
-    # below the cushion plane (foam compress) and the eye drops by the same
-    # amount - the opposite sign (lifting) would float her off the cushion.
-    cushion_sink = 0.0
-    if foot_world is not None and foot_world + SEAT_TOP < -0.015:
-        # She clears up to 1.5 cm on heel-lift naturally; deeper shortfalls
-        # press the pelvis into the chair foam so the soles land flush.
-        cushion_sink = min(-(foot_world + SEAT_TOP) - 0.015, 0.08)
-        arm_obj.location.z -= cushion_sink
-        bpy.context.view_layer.update()
-        foot_world = _mesh_lowest(arm_obj, foot_region)
+    eye_room = Vector((-eye_mid.x, eye_mid.z + SEAT_TOP, eye_mid.y + ANCHOR_Z))
+    sb_centre = Vector((0.0, SANDBOX_TOP, 0.0))
+    face_room = eye_room + Vector((0.0, -0.04, -0.01))
 
-    stats["eye_above_cushion"] = eye_world
+    stats["eye_above_cushion"] = eye_mid.z
     stats["foot_below_cushion"] = foot_world
-    stats["eye_height_in_room"] = eye_world + SEAT_TOP - cushion_sink
+    stats["eye_height_in_room"] = eye_room.y
+    stats["eye_z_in_room"] = eye_room.z
+    stats["eye_dist_to_sandbox"] = (eye_room - sb_centre).length
+    stats["face_dist_to_sandbox"] = (face_room - sb_centre).length
     stats["foot_height_in_room"] = foot_world + SEAT_TOP
     stats["cushion_sink"] = cushion_sink
-    dump_lowest(14)
-    # Thigh-top clearance probe: highest vertex over the thighs, checked against
-    # the desk underside when mounted (desk board ~2-3 cm thick).
-    thigh_top = max((pt.z for pt in _eval_world(arm_obj)
-                     if abs(pt.x) < 0.25 and -0.62 < pt.y < -0.30), default=0.0)
-    stats["thigh_top_in_room"] = thigh_top + SEAT_TOP
+    dump_lowest(10)
+
+    # Report room-space key bone positions (elbows, hands, knees, feet) for QA.
+    for bname in ("LowerArm_L", "LowerArm_R", "Hand_L", "Hand_R", "LowerLeg_L", "Foot_L"):
+        pb = arm_obj.pose.bones.get(bname)
+        if pb is not None:
+            v = world @ pb.matrix.translation
+            stats[f"room_{bname}"] = (round(-v.x, 4), round(v.z + SEAT_TOP, 4), round(v.y + ANCHOR_Z, 4))
+
+    # Thigh-top clearance probe under the desk (leg-weighted vertices only, z_room < 0.382).
+    thigh_top_room = 0.0
+    deps = bpy.context.evaluated_depsgraph_get()
+    leg_names = {"UpperLeg_L", "UpperLeg_R", "LowerLeg_L", "LowerLeg_R"}
+    for ob in bpy.data.objects:
+        if ob.type != "MESH":
+            continue
+        leg_ids = {vg.index for vg in ob.vertex_groups if vg.name in leg_names}
+        if not leg_ids:
+            continue
+        ev = ob.evaluated_get(deps)
+        me = ev.to_mesh(preserve_all_data_layers=True, depsgraph=deps)
+        mx = ev.matrix_world
+        for i, v in enumerate(ob.data.vertices):
+            if any(g.group in leg_ids and g.weight > 0.3 for g in v.groups):
+                pt = mx @ me.vertices[i].co
+                if pt.y + ANCHOR_Z < 0.382:
+                    thigh_top_room = max(thigh_top_room, pt.z + SEAT_TOP)
+        ev.to_mesh_clear()
+    stats["thigh_top_in_room"] = thigh_top_room
+
     # Absolute posed bounds for clipping checks against the desk plane.
     lo = Vector((1e9, 1e9, 1e9))
     hi = Vector((-1e9, -1e9, -1e9))
@@ -477,12 +590,12 @@ def render_preview(out_dir: str, arm_obj: bpy.types.Object) -> None:
 
     # seat cushion block: top at SEAT_TOP
     _block((0.42, 0.30, SEAT_TOP * 0.5), (0, 0.05, SEAT_TOP * 0.5), (0.7, 0.5, 0.4))
-    # desk slab: top at DESK_TOP, front face at y = -0.35, depth 0.7
-    depth = 0.7
-    front = -0.35
-    _block((1.6, depth * 0.5, 0.035), (0, front - depth * 0.5, DESK_TOP - 0.035), (0.75, 0.6, 0.45))
-    # sandbox diorama on top of the desk: 0.2127² footprint at the desk centre
-    _block((0.2127 * 0.5, 0.2127 * 0.5, 0.0048 * 0.5), (0, -0.5484, SANDBOX_TOP + 0.0024), (0.3, 0.8, 0.35))
+    # desk slab: top at DESK_TOP, thickness 0.06 m, front face at room z = 0.3782 -> local y = 0.3782 - ANCHOR_Z
+    depth = 0.76
+    front = 0.3782 - ANCHOR_Z
+    _block((1.63, depth, 0.06), (0, front - depth * 0.5, DESK_TOP - SEAT_TOP - 0.03), (0.75, 0.6, 0.45))
+    # sandbox diorama on top of the desk: 0.2127² footprint at the desk centre (local y = -ANCHOR_Z)
+    _block((0.2127, 0.2127, 0.0048), (0, -ANCHOR_Z, SANDBOX_TOP - SEAT_TOP + 0.0024), (0.3, 0.8, 0.35))
 
     sun_data = bpy.data.lights.new("prev_sun", "SUN")
     sun_data.energy = 2.6
@@ -584,8 +697,8 @@ def main() -> None:
     remove_helpers()
     prune_shape_keys()
     rebuild_materials()
-    pose_seated(arm)
-    stats = measure_and_scale(arm)
+    raw_butt_z = pose_seated(arm)
+    stats = measure_and_scale(arm, raw_butt_z)
     for key, value in stats.items():
         _log(f"{key} = {value}")
 
@@ -594,16 +707,21 @@ def main() -> None:
         return
 
     # Validation window, then bake and export.
-    eye_ok = 1.10 <= stats["eye_height_in_room"] <= 1.30
+    eye_ok = 0.95 <= stats["eye_height_in_room"] <= 1.08
+    thigh_ok = stats["thigh_top_in_room"] < 0.688
     foot_off = stats["foot_height_in_room"]
-    _log(f"eye height in room: {stats['eye_height_in_room']:.3f} m (spec 1.15-1.25; window 1.10-1.30)")
-    _log(f"foot over floor: {foot_off:+.3f} m (natural resting; negative digs in)")
+    _log(f"eye height in room: {stats['eye_height_in_room']:.3f} m (spec 0.95-1.08)")
+    _log(f"thigh top in room:  {stats['thigh_top_in_room']:.3f} m (desk underside 0.690)")
+    _log(f"foot over floor:    {foot_off:+.3f} m (natural resting; negative digs in)")
     if not eye_ok:
-        raise SystemExit("seated eye height out of spec; adjust POSE_TWISTS")
+        raise SystemExit("seated eye height out of spec (0.95-1.08 m); adjust POSE_TWISTS")
+    if not thigh_ok:
+        raise SystemExit("thigh top exceeds desk underside clearance (0.688 m); adjust POSE_TWISTS")
 
     keyframe_seated_pose(arm)
     export_glb(out_path)
     print("[yumeka-export] DONE")
 
 
-main()
+if __name__ == "__main__":
+    main()
