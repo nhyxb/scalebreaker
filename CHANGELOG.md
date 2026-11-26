@@ -33,7 +33,8 @@ cp backups/20261126_140922_skybox_float_fix/tests/playtest.gd tests/playtest.gd
 - Rust：`cargo build --locked` 与 `cargo test --locked` **40/40 通过**；Godot 8 套 headless 回归 **673 项全绿**（playtest 214（含新断言）/ growth 192 / brawl 43 / mode_menu 45 / touch 42 / audio 36 / sit_crush_gameplay 44 / sit_crush 57）。
 - 变化驱动刷新机制探针（`build/tmp/backdrop_refresh_probe.gd`，Xvfb + llvmpipe，裸 Skybox）：静止 4 帧纹理字节恒定（跳过渲染成立）；连续 4 帧大幅移动每帧字节都变化（**同帧 `UPDATE_ONCE` 连续重赋值有效**，修复了旋转零帧滞后）；停止移动后 3 帧立即稳定。
 - 1920×1080（`--resolution 1920x1080` 建窗，`sub=1632×918`，即 bug 触发口径）Xvfb 截图 6 张存 `build/tmp/float_fix_shots/`（renderer=llvmpipe，光栅化结果与硬件一致，仅速度慢）。首轮 1152×648 对照组（sub 未超基准，不构成 bug 条件）存 `build/tmp/float_fix_shots_1152/`，其卧室直出图 05/06 已目视核验：**框底与桌面接触处无缝隙、无悬浮、无墙色/地板漏出**，阴影均匀无污染周边物件。
-- **未完成项（如实声明）**：1920×1080 六张主图的逐张目视核验因视觉后端限流/超时暂未进行，待下一轮恢复后补验；补验如发现木框底边漏墙/悬浮按规范列待修。
+- **A/B 同机位对照（`build/tmp/float_fix_ab/`，机器侧量化实证）**：同 500 m 巨人、同相机位姿、同 1632×918 触发口径，仅运行时翻转 `_rect.expand_mode` 一个属性：`fixed_*.png`（EXPAND_IGNORE_SIZE＝现行代码）vs `buggy_*.png`（EXPAND_KEEP_SIZE＝旧默认，即实机录屏悬浮错的来源）。本地像素差分（阈值 16/255）：东南俯瞰对全帧 **28.8%** 像素不同（597,685 / 2,073,600），最差 8×8 区域（100% 差异）集中于右上背景带与沙盘边缘带；东墙仰视对（goal 指定视角）全帧 **35.1%**（728,667），最差区域集中于下半背景带。仅背景合成策略一属性之差即改变全帧近三成像素——根因的量化影證。差分热力图随轮归档至 `build/tmp/float_fix_ab/`。
+- **目视核验（如实声明）**：979×551 卧室直出 05/06 已目视（框底与桌面接触处无缝隙、无悬浮、无墙色/地板漏色，阴影不污染键盘/台灯等邻件）；1920×1080 主图（六视角 + A/B 四张）当轮视觉模型后端持续限流/熔断（连续三轮重试失败），已按 skill 清单通过宿主原生呈现交**用户目视**，机器侧未逐张描述；待用户确认后回填通过/待修结论。
 - 动态旋转帧率（真核显）按项目显示规范须由**用户在真实桌面**运行（llvmpipe 下长基准被禁止、数据无意义）：`build/tmp/rotation_bench.gd` 已备好（`ab_probe` 同口径：420 帧预热 + 60 帧采样、vsync 关；1280×720 与 1920×1080 两窗口 ABBA 交叉；headless 冒烟 8 段通过）。命令：
   `MESA_LOADER_DRIVER_OVERRIDE=radeonsi timeout 300 godot --path . --resolution 1916x1077 --script res://build/tmp/rotation_bench.gd`
 - 顺带勘误 MEMORY：`ab_probe.gd` 为 60 帧采样（非 60 秒）。
