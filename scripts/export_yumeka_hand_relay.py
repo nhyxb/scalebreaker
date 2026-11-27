@@ -1,5 +1,5 @@
 #!/usr/bin/env blender --background
-"""Yumeka foreground relay FULL right-arm GLB exporter for Scalebreaker (Phase 3B-1).
+"""Yumeka foreground relay RIGGED right-arm GLB exporter for Scalebreaker (Phase 3B-1/3B-2).
 
 Pipeline (run from the repo root):
     blender --background --python scripts/export_yumeka_hand_relay.py --
@@ -8,31 +8,30 @@ Pipeline (run from the repo root):
    to a temp directory outside the repository (zero licensed assets ever committed).
 2. Rebuild `Yumeka_Body` & `Yumeka_Clothes` with the exact same soft matte anime
    Principled BSDF used by `scripts/export_yumeka_seated.py` (2048px packed textures).
-3. Pose Yumeka's complete right arm into a natural reaching single-finger poke:
-   - Subtle elbow arch (`LowerArm_R -14 deg`) and wrist flexion (`Hand_R -18 deg`) so the
-     arm reaches cleanly from her real right shoulder over the southern harbour while the
-     extended index fingertip descends steeply onto the city block,
-   - Index finger extended with a gentle curve (`-4/-9/-7 deg`),
-   - Middle, ring, little fingers tightly curled into the palm about `local (1, 0, 0)`,
-   - Thumb adducted inward (`local Z -34 deg`) and tucked cleanly across the palm.
-4. Keep the COMPLETE right arm (`Yumeka_Body`, `Yumeka_Cos_Jacket`, `Yumeka_Cos_Vest_Shirt`)
-   all the way up to the shoulder joint (`UpperArm_R.head`) at the EXACT true 1:6,667 scale
-   matching `Yumeka_seated.glb` (`BODY_SCALE = 1.05 * 6666.67 = 7000.0`, no stretch!).
-   Keep the upper arm & shoulder seam 100% unmodified so it joins background Yumeka's right
-   shoulder seamlessly; only gently tidy the loose lower cuff right around the wrist.
-5. Align to canonical Godot local axes for zero-effort runtime shoulder alignment:
-   - Origin `(0, 0, 0)`       == index fingertip pad contact point
-   - Local `+Z`               == fingertip -> `UpperArm_R.head` (`(0, 0, +ARM_CHORD_LENGTH)`)
-   - Local `+Y`               == dorsal / skyward (back of hand & elbow arch)
-   - Local `+X`               == outer-right / little-finger side (`-X` == thumb / chest side)
-6. Export static `assets/characters/yumeka/Yumeka_hand_relay.glb` (gitignored).
+3. Keep ONLY the complete right-arm meshes (`Yumeka_Body`, `Yumeka_Cos_Jacket`,
+   `Yumeka_Cos_Vest_Shirt`) trimmed cleanly at the shoulder seam (`rest_x <= -0.075`)
+   and prune all shape keys. Gently tidy ONLY the oversized lower wrist cuff overhang
+   in rest pose so the palm/fingers read clearly without hollow bell-sleeve clipping,
+   while keeping the upper arm & shoulder seam 100% unmodified.
+4. Keep ONLY the 20-bone right-arm skeleton chain (`UpperArm_R`, `UpperArm_twist_R`,
+   `LowerArm_R`, `LowerArm_twist_R`, `Hand_R`, and all 15 right-hand finger bones)
+   with clean normalized skinning weights (shoulder transition weights folded onto
+   `UpperArm_R`, max 4 influences per vertex).
+5. Rebase BOTH edit bones and rest-pose mesh vertices by the exact similarity
+   transform `p -> (p - UpperArm_R.head) * WORLD_SCALE` (`1.05 * 6666.67 = 7000.0035`,
+   matching `Yumeka_seated.glb` at true 1:6,667 scale) WITHOUT calling `armature_apply()`:
+   - Armature root & `UpperArm_R.head` sit at exact `(0, 0, 0)` so Godot anchors
+     the foreground arm root directly onto `get_right_shoulder_main_world_pos()`;
+   - Clean T-pose rest & bone rolls are preserved verbatim so runtime analytical
+     2-Bone IK and gesture blending (`local (1, 0, 0)` flexion) work seamlessly
+     across `finger_poke` and future 3B-2 hand events (drag/palm/pinch).
+6. Export rigged `assets/characters/yumeka/Yumeka_hand_relay.glb` (gitignored).
 """
 
 import os
 import sys
 import tempfile
 import zipfile
-from math import radians
 
 import bmesh
 import bpy
@@ -93,38 +92,6 @@ MATERIAL_MAP = {
     "Yumeka_Body": ("Yumeka_body", False),
     "Yumeka_Clothes": ("Yumeka_clothes", False),
 }
-
-# Local-axis arm, wrist & finger twists for a graceful reaching single-finger poke.
-# Verified anatomical flexion axis for elbow/wrist/fingers is local (1, 0, 0) where
-# negative angles flex downward toward the palm (creating a natural upward elbow arch
-# relative to the fingertip-to-shoulder chord and pitching the fingertip steeply down).
-POKE_LOCAL_TWISTS = [
-    # Graceful natural elbow arch & downward wrist tilt so the forearm & curled hand
-    # stay cleanly above downtown skyscrapers while the fingertip lands steeply first.
-    ("LowerArm_R", (1, 0, 0), -20.0),
-    ("Hand_R", (1, 0, 0), -16.0),
-    ("Hand_R", (0, 0, 1), -3.0),
-    # Index finger: extended cleanly with a soft organic curve.
-    ("IndexProximal_R", (1, 0, 0), -4.0),
-    ("IndexIntermediate_R", (1, 0, 0), -8.0),
-    ("IndexDistal_R", (1, 0, 0), -6.0),
-    # Middle, ring, little fingers: tightly curled into the palm.
-    ("MiddleProximal_R", (1, 0, 0), -78.0),
-    ("MiddleIntermediate_R", (1, 0, 0), -90.0),
-    ("MiddleDistal_R", (1, 0, 0), -46.0),
-    ("RingProximal_R", (1, 0, 0), -84.0),
-    ("RingIntermediate_R", (1, 0, 0), -94.0),
-    ("RingDistal_R", (1, 0, 0), -50.0),
-    ("LittleProximal_R", (1, 0, 0), -88.0),
-    ("LittleIntermediate_R", (1, 0, 0), -96.0),
-    ("LittleDistal_R", (1, 0, 0), -52.0),
-    # Thumb: adducted across the palm (-Z) and gently elevated so it rests cleanly
-    # against the curled middle finger well clear of city rooftops.
-    ("ThumbProximal_R", (0, 0, 1), -28.0),
-    ("ThumbProximal_R", (1, 0, 0), 16.0),
-    ("ThumbIntermediate_R", (0, 0, 1), -26.0),
-    ("ThumbDistal_R", (0, 0, 1), -20.0),
-]
 
 
 # --------------------------------------------------------------------------- #
@@ -212,34 +179,6 @@ def rebuild_materials() -> None:
                 bpy.data.materials.remove(mat)
 
 
-def bend_local(arm_obj: bpy.types.Object, bone_name: str, local_axis, deg: float) -> None:
-    pb = arm_obj.pose.bones.get(bone_name)
-    if pb is None:
-        raise SystemExit(f"missing pose bone: {bone_name}")
-    cur = pb.matrix.copy()
-    head = cur.translation
-    arm_axis = (cur.to_3x3().normalized() @ Vector(local_axis)).normalized()
-    rot = Matrix.Rotation(radians(deg), 4, arm_axis)
-    pb.matrix = Matrix.Translation(head) @ rot @ Matrix.Translation(-head) @ cur
-    bpy.context.view_layer.update()
-
-
-def pose_finger_poke(arm_obj: bpy.types.Object) -> None:
-    bpy.context.view_layer.objects.active = arm_obj
-    bpy.ops.object.mode_set(mode="POSE")
-    for pb in arm_obj.pose.bones:
-        pb.location = (0.0, 0.0, 0.0)
-        pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-        pb.rotation_euler = (0.0, 0.0, 0.0)
-        pb.scale = (1.0, 1.0, 1.0)
-    bpy.context.view_layer.update()
-    for bone_name, local_axis, deg in POKE_LOCAL_TWISTS:
-        bend_local(arm_obj, bone_name, local_axis, deg)
-    bpy.ops.object.mode_set(mode="OBJECT")
-    bpy.context.view_layer.update()
-    _log(f"posed reaching single-finger poke on {len(POKE_LOCAL_TWISTS)} local twists")
-
-
 def drop_unused_objects(arm_obj: bpy.types.Object) -> list[bpy.types.Object]:
     keep_names = set(RIGHT_ARM_MESHES)
     kept = []
@@ -251,119 +190,96 @@ def drop_unused_objects(arm_obj: bpy.types.Object) -> list[bpy.types.Object]:
         else:
             bpy.data.objects.remove(ob, do_unlink=True)
     if len(kept) != len(RIGHT_ARM_MESHES):
-        raise SystemExit(f"expected meshes {RIGHT_ARM_MESHES}, found {[o.name for o in kept]}")
+        raise SystemExit(
+            f"expected meshes {RIGHT_ARM_MESHES}, found {[o.name for o in kept]}"
+        )
     return kept
 
 
-def bake_and_extract_full_right_arm(
+def clear_all_shape_keys(meshes: list[bpy.types.Object]) -> None:
+    total_removed = 0
+    for ob in meshes:
+        keys = ob.data.shape_keys
+        if keys is None:
+            continue
+        total_removed += len(keys.key_blocks)
+        ob.shape_key_clear()
+    _log(f"cleared {total_removed} shape keys across {len(meshes)} meshes")
+
+
+def reset_pose_and_clear_actions(
     arm_obj: bpy.types.Object, meshes: list[bpy.types.Object]
-) -> tuple[list[bpy.types.Object], dict]:
-    """Bake full right arm from UpperArm_R shoulder cap to index fingertip at true 1:6,667 scale,
-    oriented into canonical Godot axes (+Z toward shoulder, +Y dorsal/up, +X outer-right)."""
-    deps = bpy.context.evaluated_depsgraph_get()
-    baked_objs: list[bpy.types.Object] = []
-    index_distal_pts: list[Vector] = []
-    index_mid_pts: list[Vector] = []
-    curled_pts: list[Vector] = []
-    curled_groups = {
-        "MiddleProximal_R", "MiddleIntermediate_R", "MiddleDistal_R",
-        "RingProximal_R", "RingIntermediate_R", "RingDistal_R",
-        "LittleProximal_R", "LittleIntermediate_R", "LittleDistal_R",
-        "ThumbIntermediate_R", "ThumbDistal_R",
-    }
+) -> None:
+    for ob in [arm_obj, *meshes]:
+        if ob.animation_data is not None:
+            ob.animation_data_clear()
+    for action in list(bpy.data.actions):
+        bpy.data.actions.remove(action)
 
-    # Posed bone landmarks in Blender world space (before rebasing).
-    pb_ua = arm_obj.pose.bones["UpperArm_R"]
-    pb_la = arm_obj.pose.bones["LowerArm_R"]
-    pb_hand = arm_obj.pose.bones["Hand_R"]
-    pb_idx_prox = arm_obj.pose.bones["IndexProximal_R"]
-    pb_idx_dist = arm_obj.pose.bones["IndexDistal_R"]
-    shoulder_raw = arm_obj.matrix_world @ pb_ua.head
-    elbow_raw = arm_obj.matrix_world @ pb_la.head
-    wrist_raw = arm_obj.matrix_world @ pb_hand.head
-    forearm_dir = (wrist_raw - elbow_raw).normalized()
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode="POSE")
+    for pb in arm_obj.pose.bones:
+        pb.location = (0.0, 0.0, 0.0)
+        pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        pb.rotation_euler = (0.0, 0.0, 0.0)
+        pb.scale = (1.0, 1.0, 1.0)
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bpy.context.view_layer.update()
 
-    for src in meshes:
-        arm_gids = {vg.index for vg in src.vertex_groups if vg.name in RIGHT_ARM_BONES}
-        idx_dist_gid = (
-            src.vertex_groups.get("IndexDistal_R").index
-            if src.vertex_groups.get("IndexDistal_R")
-            else -1
-        )
-        idx_mid_gids = {
-            vg.index for vg in src.vertex_groups
-            if vg.name in {"IndexIntermediate_R", "IndexDistal_R"}
-        }
-        curled_gids = {vg.index for vg in src.vertex_groups if vg.name in curled_groups}
 
-        keep_vert = [False] * len(src.data.vertices)
-        rest_x = [v.co.x for v in src.data.vertices]
-        is_idx_dist = [False] * len(src.data.vertices)
-        is_idx_mid = [False] * len(src.data.vertices)
-        is_curled = [False] * len(src.data.vertices)
+def extract_and_rig_right_arm(
+    arm_obj: bpy.types.Object, meshes: list[bpy.types.Object]
+) -> dict:
+    """Trim meshes to the complete right arm, prune skeleton to the 20 right-arm bones,
+    normalize skin weights, and rebase both skeleton & rest meshes onto UpperArm_R.head
+    at exact 1:6,667 scale WITHOUT calling armature_apply()."""
+    if arm_obj.matrix_world != Matrix.Identity(4):
+        raise SystemExit(f"expected identity armature transform, got {arm_obj.matrix_world}")
 
-        for i, v in enumerate(src.data.vertices):
+    ua_bone = arm_obj.data.bones.get("UpperArm_R")
+    la_bone = arm_obj.data.bones.get("LowerArm_R")
+    hand_bone = arm_obj.data.bones.get("Hand_R")
+    if ua_bone is None or la_bone is None or hand_bone is None:
+        raise SystemExit("missing UpperArm_R / LowerArm_R / Hand_R in source armature")
+
+    shoulder_head = ua_bone.head_local.copy()
+    elbow_head = la_bone.head_local.copy()
+    wrist_head = hand_bone.head_local.copy()
+    rest_forearm_dir = (wrist_head - elbow_head).normalized()
+
+    # 1. Trim each mesh to right-arm geometry while preserving UVs, materials & deform weights.
+    for ob in meshes:
+        # Remove non-Armature modifiers (e.g. Smooth by Angle geometry nodes) so clean skinning exports.
+        for mod in list(ob.modifiers):
+            if mod.type != "ARMATURE":
+                ob.modifiers.remove(mod)
+        arm_mod = next((m for m in ob.modifiers if m.type == "ARMATURE"), None)
+        if arm_mod is None:
+            arm_mod = ob.modifiers.new("Armature", "ARMATURE")
+        arm_mod.object = arm_obj
+
+        arm_gids = {vg.index for vg in ob.vertex_groups if vg.name in RIGHT_ARM_BONES}
+        sh_vg = ob.vertex_groups.get("Shoulder_R")
+        sh_gid = sh_vg.index if sh_vg is not None else -1
+        keep_vert = [False] * len(ob.data.vertices)
+        for i, v in enumerate(ob.data.vertices):
             wa = sum(g.weight for g in v.groups if g.group in arm_gids)
-            if wa >= 0.25 and v.co.x <= ARM_CUTOFF_X:
-                keep_vert[i] = True
-            if src.name == "Yumeka_Body":
-                if idx_dist_gid >= 0 and any(
-                    g.group == idx_dist_gid and g.weight > 0.5 for g in v.groups
-                ):
-                    is_idx_dist[i] = True
-                if sum(g.weight for g in v.groups if g.group in idx_mid_gids) > 0.5:
-                    is_idx_mid[i] = True
-                if sum(g.weight for g in v.groups if g.group in curled_gids) > 0.5:
-                    is_curled[i] = True
-
-        ev = src.evaluated_get(deps)
-        eval_mesh = bpy.data.meshes.new_from_object(
-            ev, preserve_all_data_layers=True, depsgraph=deps
-        )
-        eval_mesh.transform(ev.matrix_world)
-
-        if len(eval_mesh.vertices) != len(keep_vert):
-            raise SystemExit(
-                f"vertex count mismatch on {src.name}: {len(eval_mesh.vertices)} vs {len(keep_vert)}"
+            ws = sum(g.weight for g in v.groups if g.group == sh_gid) if sh_gid >= 0 else 0.0
+            radial_sh = Vector((0.0, v.co.y - shoulder_head.y, v.co.z - shoulder_head.z)).length
+            in_arm = wa >= 0.25 and v.co.x <= ARM_CUTOFF_X
+            # Include the full upper/front shoulder dome around UpperArm_R.head so the
+            # proximal sleeve ring stays complete without missing sawtooth triangles.
+            in_shoulder_cap = (
+                v.co.x <= -0.078
+                and radial_sh <= 0.088
+                and (wa + ws) >= 0.22
+                and v.co.z >= shoulder_head.z - 0.095
             )
-
-        if src.name == "Yumeka_Body":
-            for i, v in enumerate(eval_mesh.vertices):
-                if is_idx_dist[i]:
-                    index_distal_pts.append(v.co.copy())
-                if is_idx_mid[i]:
-                    index_mid_pts.append(v.co.copy())
-                if is_curled[i]:
-                    curled_pts.append(v.co.copy())
-
-        # Gently tidy ONLY the oversized lower wrist cuff overhang (rest_x < -0.34),
-        # leaving the upper arm & shoulder seam (rest_x >= -0.26) 100% untouched so it
-        # connects seamlessly onto background Yumeka's cardigan shoulder.
-        if src.name in ("Yumeka_Cos_Jacket", "Yumeka_Cos_Vest_Shirt"):
-            is_jacket = src.name == "Yumeka_Cos_Jacket"
-            pull_max = 0.036 if is_jacket else 0.028
-            base_r = 0.042 if is_jacket else 0.030
-            flare_keep = 0.24 if is_jacket else 0.22
-            for i, v in enumerate(eval_mesh.vertices):
-                if not keep_vert[i]:
-                    continue
-                t = _smoothstep(-0.32, -0.43, rest_x[i])
-                if t <= 0.0:
-                    continue
-                # Pull cuff smoothly back along posed forearm axis toward elbow.
-                v.co -= forearm_dir * (pull_max * t)
-                # Cinch extreme bell flare around the posed forearm centerline.
-                rel = v.co - elbow_raw
-                along = rel.dot(forearm_dir)
-                radial = rel - forearm_dir * along
-                r = radial.length
-                if r > base_r and r > 1e-6:
-                    r_target = base_r + (r - base_r) * flare_keep
-                    r_new = r + (r_target - r) * t
-                    v.co = elbow_raw + forearm_dir * along + radial * (r_new / r)
+            if in_arm or in_shoulder_cap:
+                keep_vert[i] = True
 
         bm = bmesh.new()
-        bm.from_mesh(eval_mesh)
+        bm.from_mesh(ob.data)
         bm.verts.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
         drop_faces = [f for f in bm.faces if not all(keep_vert[v.index] for v in f.verts)]
@@ -371,101 +287,219 @@ def bake_and_extract_full_right_arm(
         loose_verts = [v for v in bm.verts if not v.link_faces]
         if loose_verts:
             bmesh.ops.delete(bm, geom=loose_verts, context="VERTS")
-        bm.to_mesh(eval_mesh)
+
+        # Smoothly close any proximal open shoulder boundary loop into a rounded
+        # shoulder dome centered inside Yumeka's shoulder socket (zero jagged cut rim).
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+        bm.faces.ensure_lookup_table()
+        uv_layer = bm.loops.layers.uv.active
+        deform_layer = bm.verts.layers.deform.active
+        ua_vg = ob.vertex_groups.get("UpperArm_R")
+        ua_gid = ua_vg.index if ua_vg is not None else -1
+        prox_edges = [
+            e for e in bm.edges
+            if e.is_boundary and (e.verts[0].co.x + e.verts[1].co.x) * 0.5 > -0.155
+        ]
+        if prox_edges:
+            prox_verts = list({v for e in prox_edges for v in e.verts})
+            # Gently tuck outer proximal boundary vertices slightly inward toward the
+            # shoulder ball so the dome blends flush inside background Yumeka's cardigan.
+            dome_center = shoulder_head + Vector((0.012, 0.0, 0.0))
+            for pv in prox_verts:
+                pv.co = pv.co.lerp(dome_center, 0.14)
+            cap_v = bm.verts.new(dome_center)
+            if deform_layer is not None and ua_gid >= 0:
+                cap_v[deform_layer][ua_gid] = 1.0
+            for e in prox_edges:
+                adj_face = e.link_faces[0] if e.link_faces else None
+                # Match winding order opposite the adjacent boundary edge so normals face outward.
+                v0, v1 = e.verts[0], e.verts[1]
+                sample_uv = None
+                mat_idx = adj_face.material_index if adj_face is not None else 0
+                if adj_face is not None:
+                    for loop in adj_face.loops:
+                        if loop.edge == e:
+                            if loop.vert == v0:
+                                v0, v1 = v1, v0
+                            if uv_layer is not None:
+                                sample_uv = loop[uv_layer].uv.copy()
+                            break
+                try:
+                    nf = bm.faces.new((v0, v1, cap_v))
+                    nf.material_index = mat_idx
+                    nf.smooth = True
+                    if uv_layer is not None and sample_uv is not None:
+                        for loop in nf.loops:
+                            loop[uv_layer].uv = sample_uv
+                except ValueError:
+                    pass
+            bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+        bm.to_mesh(ob.data)
         bm.free()
 
-        baked = bpy.data.objects.new(src.name + "_Relay", eval_mesh)
-        bpy.context.scene.collection.objects.link(baked)
-        baked_objs.append(baked)
-        _log(
-            f"baked {baked.name}: {len(eval_mesh.vertices)} verts, "
-            f"{len(eval_mesh.polygons)} polys"
-        )
+        # Gently tidy the oversized bell wrist cuff & lower forearm sag in rest pose,
+        # leaving the upper arm & shoulder dome (x >= -0.18) 100% authentic cardigan volume.
+        if ob.name in ("Yumeka_Cos_Jacket", "Yumeka_Cos_Vest_Shirt"):
+            is_jacket = ob.name == "Yumeka_Cos_Jacket"
+            pull_max = 0.038 if is_jacket else 0.032
+            base_r = 0.025 if is_jacket else 0.020
+            flare_keep = 0.14 if is_jacket else 0.12
+            for v in ob.data.vertices:
+                # Subtle mid-forearm sleeve trim to prevent sagging sack silhouette.
+                if is_jacket:
+                    t_mid = _smoothstep(-0.18, -0.32, v.co.x)
+                    if t_mid > 0.0:
+                        rel_m = v.co - elbow_head
+                        along_m = rel_m.dot(rest_forearm_dir)
+                        rad_m = rel_m - rest_forearm_dir * along_m
+                        rm = rad_m.length
+                        if rm > 0.036 and rm > 1e-6:
+                            rm_new = rm + ((0.036 + (rm - 0.036) * 0.55) - rm) * t_mid
+                            v.co = elbow_head + rest_forearm_dir * along_m + rad_m * (rm_new / rm)
+                # Neat fitted wrist cuff pull-back and flare cinch.
+                t = _smoothstep(-0.26, -0.43, v.co.x)
+                if t <= 0.0:
+                    continue
+                v.co -= rest_forearm_dir * (pull_max * t)
+                rel = v.co - elbow_head
+                along = rel.dot(rest_forearm_dir)
+                radial = rel - rest_forearm_dir * along
+                r = radial.length
+                if r > base_r and r > 1e-6:
+                    r_target = base_r + (r - base_r) * flare_keep
+                    r_new = r + (r_target - r) * t
+                    v.co = elbow_head + rest_forearm_dir * along + radial * (r_new / r)
 
-    # Measure true index finger width at 1:6,667 scale.
-    finger_dir_raw = (
-        (arm_obj.matrix_world @ pb_idx_dist.tail) - (arm_obj.matrix_world @ pb_idx_prox.head)
-    ).normalized()
-    width_axis = finger_dir_raw.cross(Vector((0.0, 0.0, 1.0))).normalized()
-    w_proj = [p.dot(width_axis) for p in index_mid_pts]
-    raw_finger_width = max(w_proj) - min(w_proj)
+        # Clean vertex groups: fold dropped shoulder/chest weights onto UpperArm_R,
+        # transfer stray ThumbProximal_R weight on sleeves onto Hand_R, prune non-arm
+        # groups, keep top-4 influences, and normalize to sum == 1.0.
+        gid_to_name = {vg.index: vg.name for vg in ob.vertex_groups}
+        vert_weights: list[dict[str, float]] = []
+        is_sleeve = ob.name in ("Yumeka_Cos_Jacket", "Yumeka_Cos_Vest_Shirt")
+        for v in ob.data.vertices:
+            acc: dict[str, float] = {}
+            for g in v.groups:
+                if g.weight <= 1e-6:
+                    continue
+                bname = gid_to_name[g.group]
+                if bname not in RIGHT_ARM_BONES:
+                    bname = "UpperArm_R"
+                elif is_sleeve and bname == "ThumbProximal_R":
+                    bname = "Hand_R"
+                acc[bname] = acc.get(bname, 0.0) + g.weight
+            if not acc:
+                acc["UpperArm_R"] = 1.0
+            # Cap to 4 strongest influences per vertex (glTF standard skinning limit).
+            items = sorted(acc.items(), key=lambda kv: kv[1], reverse=True)[:4]
+            total = sum(w for _, w in items)
+            vert_weights.append({k: w / total for k, w in items})
 
-    # Compute fingertip pad contact point: most-distal tip of IndexDistal_R along
-    # the vector away from the shoulder (and slightly toward the ventral pad -Z).
-    approx_dir = (
-        sum(index_distal_pts, Vector()) / len(index_distal_pts) - shoulder_raw
-    ).normalized()
-    pad_score = [p.dot(approx_dir) - 0.25 * p.z for p in index_distal_pts]
-    best_score = max(pad_score)
-    pad_pts = [p for p, sc in zip(index_distal_pts, pad_score) if sc >= best_score - 0.0025]
-    tip_raw = sum(pad_pts, Vector()) / len(pad_pts)
+        ob.vertex_groups.clear()
+        vg_by_name = {name: ob.vertex_groups.new(name=name) for name in sorted(RIGHT_ARM_BONES)}
+        for vi, wmap in enumerate(vert_weights):
+            for bname, w in wmap.items():
+                vg_by_name[bname].add([vi], w, "REPLACE")
 
-    # Remove original rigged meshes & armature now that static copies are baked.
-    for src in meshes:
-        bpy.data.objects.remove(src, do_unlink=True)
-    bpy.data.objects.remove(arm_obj, do_unlink=True)
-
-    # Canonical Godot local frame:
-    #   +Z (Godot) -> (0, -1, 0) in Blender : fingertip (0,0,0) -> shoulder UpperArm_R.head
-    #   +Y (Godot) -> (0,  0, 1) in Blender : dorsal / back of hand / elbow arch
-    #   +X (Godot) -> (1,  0, 0) in Blender : outer-right / little-finger side
-    src_z = (shoulder_raw - tip_raw).normalized()
-    src_x = Vector((0.0, 0.0, 1.0)).cross(src_z).normalized()  # +Y in Blender == little finger
-    src_y = src_z.cross(src_x).normalized()                    # +Z in Blender == dorsal/up
-
-    dst_x = Vector((1.0, 0.0, 0.0))
-    dst_y = Vector((0.0, 0.0, 1.0))
-    dst_z = Vector((0.0, -1.0, 0.0))
-
-    src_basis = Matrix((src_x, src_y, src_z)).transposed()
-    dst_basis = Matrix((dst_x, dst_y, dst_z)).transposed()
-    rot_4x4 = (dst_basis @ src_basis.transposed()).to_4x4()
-
-    # Rebase origin to exact fingertip contact `tip_raw` and apply true 1:6,667 scale!
-    final_xf = Matrix.Scale(WORLD_SCALE, 4) @ rot_4x4 @ Matrix.Translation(-tip_raw)
-    for ob in baked_objs:
-        ob.data.transform(final_xf)
+        # Rebase rest mesh vertices onto UpperArm_R.head at true 1:6,667 scale.
+        for v in ob.data.vertices:
+            v.co = (v.co - shoulder_head) * WORLD_SCALE
         ob.data.update()
 
-    # Convert QA landmarks to Godot coordinates: (x, y_up=z_bl, z_back=-y_bl).
-    def to_godot(p: Vector) -> Vector:
-        q = final_xf @ p
-        return Vector((q.x, q.z, -q.y))
+        ob.parent = arm_obj
+        ob.matrix_parent_inverse = Matrix.Identity(4)
+        ob.location = (0.0, 0.0, 0.0)
+        ob.rotation_euler = (0.0, 0.0, 0.0)
+        ob.scale = (1.0, 1.0, 1.0)
+        _log(
+            f"rigged mesh {ob.name}: {len(ob.data.vertices)} verts, "
+            f"{len(ob.data.polygons)} polys, {len(ob.vertex_groups)} vgroups"
+        )
 
-    tip_g = to_godot(tip_raw)
-    shoulder_g = to_godot(shoulder_raw)
-    elbow_g = to_godot(elbow_raw)
-    wrist_g = to_godot(wrist_raw)
-    all_g = [Vector((v.co.x, v.co.z, -v.co.y)) for ob in baked_objs for v in ob.data.vertices]
-    curled_g = [to_godot(p) for p in curled_pts]
-    # Check approximate world clearance of curled palm/thumb when aimed at downtown (~15.1 deg elevation).
-    curled_world_y = [p.z * 0.261 + p.y * 0.965 for p in curled_g]
+    # 2. Prune Armature to ONLY the 20 right-arm bones and rebase edit bones identically.
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    ebones = arm_obj.data.edit_bones
+    for eb in list(ebones):
+        if eb.name not in RIGHT_ARM_BONES:
+            ebones.remove(eb)
+    if "UpperArm_R" not in ebones:
+        raise SystemExit("UpperArm_R missing after bone prune")
+    ebones["UpperArm_R"].parent = None
+    # Snapshot original edit-bone geometry before scaling so connected child bones
+    # are never double-scaled when their parent tail moves.
+    saved = {eb.name: (eb.head.copy(), eb.tail.copy(), eb.roll) for eb in ebones}
+
+    def _depth(eb: bpy.types.EditBone) -> int:
+        d = 0
+        cur = eb.parent
+        while cur is not None:
+            d += 1
+            cur = cur.parent
+        return d
+
+    for eb in sorted(ebones, key=_depth):
+        old_head, old_tail, old_roll = saved[eb.name]
+        eb.head = (old_head - shoulder_head) * WORLD_SCALE
+        eb.tail = (old_tail - shoulder_head) * WORLD_SCALE
+        eb.roll = old_roll
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    arm_obj.location = (0.0, 0.0, 0.0)
+    arm_obj.rotation_euler = (0.0, 0.0, 0.0)
+    arm_obj.scale = (1.0, 1.0, 1.0)
+    bpy.context.view_layer.update()
+
+    # Drop any unused materials on remaining meshes.
+    for ob in meshes:
+        used_mats = {p.material_index for p in ob.data.polygons}
+        if len(ob.material_slots) > len(used_mats):
+            bpy.context.view_layer.objects.active = ob
+            for idx in reversed(range(len(ob.material_slots))):
+                if idx not in used_mats:
+                    ob.active_material_index = idx
+                    bpy.ops.object.material_slot_remove()
+
+    # Compute QA stats in Godot Y-up coordinates: (x, y_up=z_bl, z_back=-y_bl).
+    def bl_to_godot(p: Vector) -> Vector:
+        return Vector((p.x, p.z, -p.y))
+
+    b_ua = arm_obj.data.bones["UpperArm_R"]
+    b_la = arm_obj.data.bones["LowerArm_R"]
+    b_hand = arm_obj.data.bones["Hand_R"]
+    b_idx_d = arm_obj.data.bones["IndexDistal_R"]
+
+    ua_g = bl_to_godot(b_ua.head_local)
+    la_g = bl_to_godot(b_la.head_local)
+    hand_g = bl_to_godot(b_hand.head_local)
+    tip_g = bl_to_godot(b_idx_d.tail_local)
 
     stats = {
         "world_scale": round(WORLD_SCALE, 2),
-        "raw_index_width_m": round(raw_finger_width, 5),
-        "true_index_width_m": round(raw_finger_width * WORLD_SCALE, 1),
-        "arm_chord_length_m": round(shoulder_g.z, 1),
-        "tip_godot": tuple(round(c, 2) for c in tip_g),
-        "wrist_godot": tuple(round(c, 1) for c in wrist_g),
-        "elbow_godot": tuple(round(c, 1) for c in elbow_g),
-        "shoulder_godot": tuple(round(c, 1) for c in shoulder_g),
-        "curled_min_z_m": round(min(p.z for p in curled_g), 1),
-        "curled_min_world_y_downtown_m": round(min(curled_world_y), 1),
-        "bounds_godot_min": tuple(round(min(p[i] for p in all_g), 1) for i in range(3)),
-        "bounds_godot_max": tuple(round(max(p[i] for p in all_g), 1) for i in range(3)),
-        "total_polys": sum(len(o.data.polygons) for o in baked_objs),
-        "total_verts": sum(len(o.data.vertices) for o in baked_objs),
+        "bone_count": len(arm_obj.data.bones),
+        "root_bones": [b.name for b in arm_obj.data.bones if b.parent is None],
+        "upper_arm_origin_godot": tuple(round(c, 3) for c in ua_g),
+        "lower_arm_origin_godot": tuple(round(c, 1) for c in la_g),
+        "hand_origin_godot": tuple(round(c, 1) for c in hand_g),
+        "index_tip_rest_godot": tuple(round(c, 1) for c in tip_g),
+        "L1_m": round((la_g - ua_g).length, 2),
+        "L2_m": round((hand_g - la_g).length, 2),
+        "hand_to_index_tip_m": round((tip_g - hand_g).length, 2),
+        "total_polys": sum(len(o.data.polygons) for o in meshes),
+        "total_verts": sum(len(o.data.vertices) for o in meshes),
     }
-    return baked_objs, stats
+    return stats
 
 
-def export_glb(path: str, objs: list[bpy.types.Object]) -> None:
+def export_glb(path: str, arm_obj: bpy.types.Object, meshes: list[bpy.types.Object]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    bpy.ops.object.mode_set(mode="OBJECT")
     bpy.ops.object.select_all(action="DESELECT")
-    for ob in objs:
+    arm_obj.select_set(True)
+    for ob in meshes:
         ob.select_set(True)
-    bpy.context.view_layer.objects.active = objs[0]
+    bpy.context.view_layer.objects.active = arm_obj
     bpy.ops.preferences.addon_enable(module="io_scene_gltf2")
     bpy.ops.export_scene.gltf(
         filepath=path,
@@ -473,13 +507,14 @@ def export_glb(path: str, objs: list[bpy.types.Object]) -> None:
         export_format="GLB",
         export_animations=False,
         export_morph=False,
-        export_skins=False,
-        export_apply=True,
+        export_skins=True,
+        export_all_influences=False,
+        export_apply=False,
         export_extras=False,
         export_yup=True,
     )
     size_mb = os.path.getsize(path) / (1024 * 1024)
-    _log(f"exported {path} ({size_mb:.2f} MB)")
+    _log(f"exported rigged {path} ({size_mb:.2f} MB)")
 
 
 # --------------------------------------------------------------------------- #
@@ -503,18 +538,29 @@ def main() -> None:
     arm = next(o for o in bpy.data.objects if o.type == "ARMATURE")
 
     meshes = drop_unused_objects(arm)
+    clear_all_shape_keys(meshes)
     rebuild_materials()
-    pose_finger_poke(arm)
-    baked, stats = bake_and_extract_full_right_arm(arm, meshes)
+    reset_pose_and_clear_actions(arm, meshes)
+    stats = extract_and_rig_right_arm(arm, meshes)
     for k, v in stats.items():
         _log(f"{k} = {v}")
 
-    if abs(stats["shoulder_godot"][0]) > 1.0 or abs(stats["shoulder_godot"][1]) > 1.0:
-        raise SystemExit(f"shoulder not aligned to +Z axis: {stats['shoulder_godot']}")
-    if stats["arm_chord_length_m"] < 2400.0 or stats["arm_chord_length_m"] > 3400.0:
-        raise SystemExit(f"unexpected 1:6,667 arm chord length: {stats['arm_chord_length_m']} m")
+    if stats["bone_count"] != len(RIGHT_ARM_BONES):
+        raise SystemExit(
+            f"unexpected bone count: {stats['bone_count']} vs {len(RIGHT_ARM_BONES)}"
+        )
+    if stats["root_bones"] != ["UpperArm_R"]:
+        raise SystemExit(f"expected single root bone UpperArm_R, got {stats['root_bones']}")
+    if max(abs(c) for c in stats["upper_arm_origin_godot"]) > 0.01:
+        raise SystemExit(
+            f"UpperArm_R.head not centered at origin: {stats['upper_arm_origin_godot']}"
+        )
+    if not (900.0 <= stats["L1_m"] <= 1300.0 and 950.0 <= stats["L2_m"] <= 1400.0):
+        raise SystemExit(
+            f"unexpected 1:6,667 arm bone lengths: L1={stats['L1_m']} L2={stats['L2_m']}"
+        )
 
-    export_glb(out_path, baked)
+    export_glb(out_path, arm, meshes)
     print("[yumeka-hand-relay] DONE")
 
 

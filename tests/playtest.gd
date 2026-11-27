@@ -2522,7 +2522,8 @@ func _desk_hazards_finger_poke() -> void:
 	_check(blocked_when_off and blocked_when_paused,
 			"desk_hazards toggle OFF and pause state both block F8 finger_poke triggers")
 
-	# 4. Growth mode F8 trigger: unattackable foreground hand, AI evasion, building destruction, full reset.
+	# 4. Growth mode F8 trigger: zero-teleport 5-phase IK arm, smooth gesture blend, AI evasion,
+	#    unattackable foreground arm, touchdown destruction, smooth desk return & background restore.
 	_game.start_growth()
 	await _ticks(6)
 	var round := _round()
@@ -2533,38 +2534,58 @@ func _desk_hazards_finger_poke() -> void:
 	var destroyed_before: int = round.snapshot().destroyed
 
 	_key(KEY_F8)
-	await _ticks(2)
-	var s_windup: Dictionary = hazards.debug_state()
+	var s_start: Dictionary = hazards.debug_state()
+	var rest_hand_start: Vector3 = s_start.rest_hand_pos
+	var start_wrist_err: float = (s_start.wrist_pos as Vector3).distance_to(rest_hand_start)
 	var hand_has_no_colliders := _count_collisions_in(hazards) == 0
 	var giants_unchanged := int(round.snapshot().giant_count) == giants_before
-	_check(bool(s_windup.active) and String(s_windup.phase) == "windup"
-			and String(s_windup.hazard) == "finger_poke"
-			and bool(s_windup.hand_visible) and bool(s_windup.warning_visible)
-			and bool(s_windup.shadow_visible)
-			and int(round.hazard_warning_count()) == 1,
-			"F8 starts finger_poke windup with visible foreground hand, ground shadow, warning circle and Rust warning")
+	var rig_ok := bool(s_start.using_placeholder) or (bool(s_start.has_skeleton)
+			and int(s_start.bone_count) == 20
+			and float(s_start.arm_l1) > 900.0 and float(s_start.arm_l1) < 1300.0
+			and float(s_start.arm_l2) > 950.0 and float(s_start.arm_l2) < 1400.0)
+	_check(bool(s_start.active) and String(s_start.phase) == "raise"
+			and String(s_start.hazard) == "finger_poke"
+			and bool(s_start.hand_visible) and bool(s_start.warning_visible)
+			and bool(s_start.shadow_visible)
+			and int(round.hazard_warning_count()) == 1
+			and start_wrist_err < 15.0 and float(s_start.gesture_weight) < 0.05
+			and rig_ok,
+			"F8 starts finger_poke in RAISE directly from desk rest_pos (zero teleport, 20-bone rig & L1/L2 measured)")
 	_check(hand_has_no_colliders and giants_unchanged,
 			"foreground hand carries zero colliders and never registers into giants/rivals (strictly unattackable)")
 
-	# Place the rival AI inside the 110 m warning circle and verify Phase 4 AI switches to evade.
+	# Place the rival AI inside the 110 m warning circle; during RAISE verify smooth elbow lift,
+	# natural elbow bend, smooth gesture interpolation (0 -> 1) and immediate Phase 4 AI evasion.
 	var rival: CharacterBody3D = round.get_node("OtherGiants").get_child(0) as CharacterBody3D
-	var target: Vector3 = s_windup.target
+	var target: Vector3 = s_start.target
 	rival.global_position = Vector3(target.x + 28.0, 0.05, target.z)
 	var ai_evaded := false
-	for _f in 24:
+	var saw_raise_mid_blend := false
+	var saw_raise_elbow_bend := false
+	for f in 24:
 		await physics_frame
 		var actors: Array = round.growth_actors()
 		if actors.size() > 1 and String(actors[1].intent) == "evade":
 			ai_evaded = true
-			break
+		var st_r: Dictionary = hazards.debug_state()
+		if String(st_r.phase) == "raise":
+			var g_now: float = float(st_r.gesture_weight)
+			var bend_now: float = float(st_r.elbow_bend_deg)
+			if g_now > 0.15 and g_now < 0.88:
+				saw_raise_mid_blend = true
+			if bend_now > 25.0 and bend_now < 115.0 and (st_r.elbow_pos as Vector3).y > (s_start.elbow_pos as Vector3).y + 150.0:
+				saw_raise_elbow_bend = true
+	_check(saw_raise_mid_blend and saw_raise_elbow_bend,
+			"RAISE lifts elbow naturally with smooth bend and continuous finger gesture blend (0 -> 1)")
 	_check(ai_evaded, "Phase 4 AI inside the desk hazard warning circle immediately switches to evade")
 
-	# Verify background Yumeka hides her right arm from UpperArm_R (zero double-hand/hollow-cuff)
-	# and foreground arm root aligns cleanly onto her real main-world right shoulder.
+	# Verify background Yumeka hides her right arm from UpperArm_R (zero double-hand/hollow-cuff),
+	# exposes valid desk rest Hand_R coordinates, and foreground arm root anchors onto real right shoulder.
 	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
-		await _ticks(6)
+		await _ticks(4)
 		var relay: Dictionary = yumeka.call("debug_hazard_relay_state")
 		var sh_main: Vector3 = yumeka.call("get_right_shoulder_main_world_pos")
+		var hand_rest_main: Vector3 = yumeka.call("get_right_hand_rest_main_world_pos")
 		var ua_room: Vector3 = yumeka.call("debug_bone_pos", "UpperArm_R")
 		var hand_room: Vector3 = yumeka.call("debug_bone_pos", "Hand_R")
 		var st_now: Dictionary = hazards.debug_state()
@@ -2573,65 +2594,97 @@ func _desk_hazards_finger_poke() -> void:
 				and float(relay.right_arm_scale) < 0.01
 				and hand_room.distance_to(ua_room) < 0.01
 				and sh_main.z > 2000.0 and sh_main.y > 500.0
-				and arm_root.distance_to(sh_main) < 25.0,
-				"background Yumeka collapses her right arm into UpperArm_R and foreground arm aligns to real right shoulder")
+				and hand_rest_main.x > 800.0 and hand_rest_main.z > 900.0
+				and arm_root.distance_to(sh_main) < 10.0,
+				"background Yumeka collapses UpperArm_R, exports desk Hand_R rest, and foreground arm anchors to shoulder")
 
-	# Advance to touchdown (windup = 2.4 s = 144 ticks at 60 fps) and verify impact resolution.
-	# Right before touchdown, place the rival back near the center to also verify crush damage.
+	# Advance through WINDUP (1.75 s) to touchdown (HOLD) and verify impact resolution & fingertip accuracy.
+	var saw_windup := false
 	var hit_hold := false
 	for _f in 180:
 		var st: Dictionary = hazards.debug_state()
-		if String(st.phase) == "windup" and float(st.phase_time) >= 2.25:
-			rival.global_position = Vector3(target.x + 12.0, 0.05, target.z)
+		if String(st.phase) == "windup":
+			saw_windup = true
+			if float(st.phase_time) >= 1.60:
+				rival.global_position = Vector3(target.x + 12.0, 0.05, target.z)
 		await physics_frame
 		if String(hazards.debug_state().phase) == "hold":
 			hit_hold = true
 			break
 	var s_hold: Dictionary = hazards.debug_state()
 	var impact_info: Dictionary = s_hold.last_impact
-	_check(hit_hold and int(round.hazard_warning_count()) == 0
+	var tip_err: float = (s_hold.fingertip_pos as Vector3).distance_to(target)
+	_check(saw_windup and hit_hold and int(round.hazard_warning_count()) == 0
 			and not bool(s_hold.warning_visible) and bool(s_hold.hand_visible)
+			and tip_err < 25.0
 			and int(impact_info.get("buildings_destroyed", 0)) > 0
 			and int(round.snapshot().destroyed) > destroyed_before
 			and int(impact_info.get("giants_hit", 0)) >= 1
 			and int(impact_info.get("giants_defeated", 0)) >= 1,
-			"finger_poke touchdown clears warning, destroys buildings in ~110 m radius and crushes units inside")
+			"finger_poke touchdown lands fingertip on target, clears warning, destroys buildings and crushes units")
 
-	# Advance through hold (0.5 s) + retract (1.2 s) and verify full hide & reset.
+	# Advance through HOLD (0.5 s) -> RETRACT (0.65 s) -> RETURN (0.75 s) and verify smooth landing back at rest_pos.
+	var saw_retract := false
+	var saw_return := false
+	var last_return_wrist := Vector3.INF
+	var last_return_rest := Vector3.ZERO
+	var last_return_gesture := 1.0
 	var returned_idle := false
-	for _f in 160:
+	for _f in 180:
 		await physics_frame
-		if not bool(hazards.debug_state().active):
+		var st_p: Dictionary = hazards.debug_state()
+		if String(st_p.phase) == "retract":
+			saw_retract = true
+		elif String(st_p.phase) == "return":
+			saw_return = true
+			last_return_wrist = st_p.wrist_pos
+			last_return_rest = st_p.rest_hand_pos
+			last_return_gesture = float(st_p.gesture_weight)
+		elif not bool(st_p.active):
 			returned_idle = true
 			break
 	var s_idle: Dictionary = hazards.debug_state()
-	_check(returned_idle and String(s_idle.phase) == "idle"
+	_check(saw_retract and saw_return and returned_idle and String(s_idle.phase) == "idle"
+			and last_return_wrist.distance_to(last_return_rest) < 40.0
+			and last_return_gesture < 0.15
 			and not bool(s_idle.hand_visible) and not bool(s_idle.warning_visible)
 			and not bool(s_idle.shadow_visible) and int(round.hazard_warning_count()) == 0,
-			"after retract the foreground hand and warning visuals hide and reset cleanly")
+			"arm glides back to desk rest_pos (gesture -> 0.0) in RETURN before hiding and resetting cleanly")
 
 	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
-		await _ticks(60)
+		await _ticks(6)
 		var relay_done: Dictionary = yumeka.call("debug_hazard_relay_state")
 		var ua_rest: Vector3 = yumeka.call("debug_bone_pos", "UpperArm_R")
 		var hand_rest: Vector3 = yumeka.call("debug_bone_pos", "Hand_R")
 		_check(not bool(relay_done.active) and not bool(relay_done.arm_hidden)
 				and float(relay_done.right_arm_scale) > 0.98
 				and hand_rest.distance_to(ua_rest) > 0.15,
-				"background Yumeka right arm smoothly restores to full scale and seated desk rest after poke")
+				"background Yumeka right arm restores seamlessly to full scale and seated desk rest after RETURN")
 
-	# 5. Missing Yumeka GLB graceful placeholder fallback (zero errors, valid mesh, zero colliders).
+	# 5. Missing Yumeka GLB graceful placeholder fallback runs the identical 5-phase zero-teleport curve.
 	hazards.debug_force_placeholder(true)
 	var ph_started: bool = bool(hazards.trigger_finger_poke(Vector3(0.0, 0.0, 0.0)))
-	await _ticks(2)
 	var s_ph: Dictionary = hazards.debug_state()
 	var ph_meshes: Array = hazards.find_children("*", "MeshInstance3D", true, false)
+	var ph_phases := {}
+	for _f in 290:
+		var st_ph: Dictionary = hazards.debug_state()
+		ph_phases[String(st_ph.phase)] = true
+		if not bool(st_ph.active):
+			break
+		await physics_frame
 	_check(ph_started and bool(s_ph.active) and bool(s_ph.using_placeholder)
+			and String(s_ph.phase) == "raise"
+			and (s_ph.wrist_pos as Vector3).distance_to(s_ph.rest_hand_pos as Vector3) < 15.0
 			and bool(s_ph.hand_visible) and ph_meshes.size() >= 6
-			and _count_collisions_in(hazards) == 0,
-			"missing Yumeka_hand_relay.glb gracefully falls back to collision-free stylized placeholder hand")
+			and _count_collisions_in(hazards) == 0
+			and ph_phases.has("raise") and ph_phases.has("windup") and ph_phases.has("hold")
+			and ph_phases.has("retract") and ph_phases.has("return") and ph_phases.has("idle"),
+			"missing Yumeka_hand_relay.glb placeholder runs full 5-phase zero-teleport curve with zero colliders")
 
 	# Leaving round mid-hazard cleans up cleanly back to title & resets Yumeka relay.
+	hazards.trigger_finger_poke(Vector3(0.0, 0.0, 0.0))
+	await _ticks(4)
 	_game.save_all_mode_settings(
 			_game.default_mode_settings(0), _game.default_mode_settings(1),
 			_game.default_mode_settings(2), _game.default_mode_settings(3))

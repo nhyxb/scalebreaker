@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-11-27 — 阶段 3B-1 方案 2 升级：带骨骼蒙皮前景右臂 + 实时解析 2-Bone IK + 5 段无瞬移连续动画
+
+备份：`backups/20261127_125252_phase3b1_rigged_ik_arm/{rust_src,scenes,scripts,tests,CHANGELOG.md,MEMORY.md}`（`assets/characters/yumeka/Yumeka_hand_relay.glb` 位于 gitignored 目录）。
+回滚：
+
+```sh
+cp -a backups/20261127_125252_phase3b1_rigged_ik_arm/rust_src/. rust/src/
+cp -a backups/20261127_125252_phase3b1_rigged_ik_arm/scenes/. scenes/
+cp -a backups/20261127_125252_phase3b1_rigged_ik_arm/scripts/. scripts/
+cp -a backups/20261127_125252_phase3b1_rigged_ik_arm/tests/. tests/
+cp backups/20261127_125252_phase3b1_rigged_ik_arm/{CHANGELOG.md,MEMORY.md} .
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+# 如需回退旧版静态 GLB，重跑回滚后的 scripts/export_yumeka_hand_relay.py 并执行 godot --headless --path . --editor --import --quit
+```
+
+### 一、Blender 导出带右臂骨骼的蒙皮 GLB（`scripts/export_yumeka_hand_relay.py`）
+
+- 取消静态烘焙，改为导出保留完整 20 根右臂骨骼链（`UpperArm_R`、`UpperArm_twist_R`、`LowerArm_R`、`LowerArm_twist_R`、`Hand_R` 与 15 根右手指骨）及蒙皮权重的 `assets/characters/yumeka/Yumeka_hand_relay.glb`（3 网格 `Yumeka_Body`/`Yumeka_Cos_Jacket`/`Yumeka_Cos_Vest_Shirt`，3,723 多边形 / 3,523 顶点，4.59 MB，0 形态键，继续受 `.gitignore` 保护）。
+- 保持原始干净 T-Pose Rest Pose（严禁调用 `armature_apply()`），对编辑骨（先快照原几何防止 `use_connect` 子骨二次缩放）与网格顶点施加完全一致的相似变换 `p -> (p - UpperArm_R.head) * 7000.0`：Armature 根与 `UpperArm_R.head` 精确落在原点 `(0, 0, 0)`，实测 `L1 = 1090.28 m`、`L2 = 1171.96 m` 与 `Yumeka_seated.glb` 真 1:6,667 比例误差 `< 0.001 m`；平滑闭合近端肩帽圆顶并收紧腕部宽松袖口，消除空桶袖口与锯齿切边。
+
+### 二、实时解析 2-Bone IK + 可复用手势混合 + 5 段无瞬移状态机（`scenes/yumeka_ultra_giant.gd`、`scenes/desk_hazards.gd`）
+
+- **主世界锚点扩展**（`scenes/yumeka_ultra_giant.gd`）：保留 `get_right_shoulder_main_world_pos()`，新增基于 `59c8440` 未折叠 `SeatedPose` 链换算的 `get_right_hand_rest_main_world_pos()`（约 `(1125.5, 289.9, 1351.1) m`）、`get_right_elbow_rest_main_world_pos()` 与 `get_right_hand_rest_main_world_basis()`；当 `RETURN` 完全落回桌面休息点并隐藏前景臂时，背景 `UpperArm_R` 当帧无缝恢复至 `1.0` 缩放。
+- **解析 2-Bone IK 与手势库**（`scenes/desk_hazards.gd`）：`_ready()` 预加载隐藏前景臂并动态从 `Skeleton3D` 量取 `L1`、`L2` 与单指食指指腹局部偏移 `_poke_tip_in_hand_local`；每帧将 `_hand_root.global_position` 钉在实时右肩，给定 `wrist_target` 与自然外展极向量（桌面休息极向量 ↔ 外展微抬 `RAISED_ELBOW_POLE`）用余弦定理解出肘部位置与无扭曲肘铰链基（前臂旋前按 55%/45% 分配至 `LowerArm_R` / `LowerArm_twist_R`，超自然臂长 `95.5%` 时仅对上/前臂做柔和等比延展、`Hand_R` 始终保持纯 1:6,667 原始比例）；封装可复用手势混合接口 `set_hand_gesture_blend()`（基于验证过的 `local (1, 0, 0)` 真屈指轴，`REST_RELAXED ↔ FINGER_POKE` 平滑四元数球面插值，并预置 `OPEN_PALM`、`PINCH_GRIP` 供 3B-2 直接复用）。
+- **5 段无瞬移连续动画**：`RAISE`（0.65 s，触发首帧腕部位于 `rest_pos` 误差 `0.0 m`，手肘率先自然抬离桌面、五指 `0.0 → 1.0` 展开、预警圈淡入）→ `WINDUP`（1.75 s，高位短暂蓄力后平滑下压，阶段 4 AI 正常 `evade`）→ `HOLD`（0.50 s，食指指腹精准压入目标街区并带受压手腕微后仰缓冲，结算 110 m 拆楼/碾压/震屏/柔边尘雾）→ `RETRACT`（0.65 s，平滑抬离废墟）→ `RETURN`（0.75 s，五指 `1.0 → 0.0` 放松微屈沿弧线落回 `rest_pos`，落定后再隐藏前景臂并恢复背景 `UpperArm_R`）。同步给前景臂材质加入 `DIFFUSE_LAMBERT_WRAP` 与随昼夜联动的柔和贴图暖色反弹补光，消除主世界背光偏暗。
+- **占位回退兼容**：缺失 `Yumeka_hand_relay.glb` 时自动构造三段关节式无碰撞占位臂，完整复用同一 2-Bone IK 求解器与 5 段无瞬移曲线。
+
+### 三、同口径验证与隔离 Xvfb 视觉核验（严格 2 轮 × 3 张关键帧）
+
+| 指标 | 口径 | 数据源 | 基准值（`fc6eea5`） | 当前值 |
+|---|---|---|---|---|
+| 前景右臂资产 | Blender 导出网格多边形 / 顶点 / 骨骼数 | `export_yumeka_hand_relay.py` | 3,555 polys / 3,450 verts / 0 bones（静态，4.48 MB） | **3,723 polys / 3,523 verts / 20 bones（蒙皮，4.59 MB）** |
+| 触发首帧位移误差 | `RAISE t=0` 腕部到 `59c8440` 桌面 `Hand_R` 休息位距离 | `probe_ik_5phase.gd` / `playtest.gd` | 瞬移至半空高位（>1,300 m） | **`0.0 m`**（`RETURN` 终帧 `2.2 m`） |
+| 触地指尖误差 & 卷指净空 | `HOLD` 食指指腹到目标水平误差 / 卷指最低离地高度 | `probe_ik_5phase.gd` / `capture_ik_3shots.gd` | 0.0 m / `+81.9 m` | **`0.0002 m` / `+152.7 m`** |
+| Rust 单元测试 | `cargo test --locked` | `cargo test` | 54/54 | **54/54** |
+| Godot 回归断言 | 8 套 `--headless` playtest（新增首帧休息位/`RAISE` 屈肘与手势过渡/`RETURN` 回落/占位全 5 段断言） | `tests/*_playtest.gd` | 715/715 | **716/716** |
+| 实机 GPU 帧率 | 未测（隔离 `Xvfb :99` 为纯 `llvmpipe`，仅截 2 轮 × 3 帧验视觉，未跑 FPS 基准） | — | 未测 | 未测 |
+
+- **8 套 Godot `--headless` 回归全绿**：`playtest` 249 / `growth` 200 / `mode_menu` 45 / `touch` 42 / `sit_crush_gameplay` 44 / `sit_crush` 57 / `brawl` 43 / `audio` 36；`--quit-after 5` 启动校验通过；`git ls-files assets/characters/yumeka/` 为空。
+- **视觉核验（严格 2 轮、隔离 `Xvfb :99`，`1280×720`，renderer=`llvmpipe (LLVM 23.1.5)`，零占用真实桌面）**：
+  - 第 1 轮（`build/tmp/ik_r1_*.png`）定位出肩部 `wa>=0.25` 裁剪留锯齿、腕部袖口偏宽成空桶、主世界背光导致前景开衫发暗及手肘偏高（`y=1154 m`）四项问题，随后一次性精修肩帽闭合、袖口收紧、暖色反弹补光与肩平外展极向量；
+  - 第 2 轮最终核验：
+    1. `build/tmp/ik_r2_1_raise_mid.png`（`RAISE` 中段，`t=0.34 s`，`bend=56.2°`，`gesture=0.54`）：前景暖棕开衫与肤色同背景无缝一致，手肘自然外展弯曲抬离桌面，五指处于放松到点戳的平滑过渡态，无穿模无扭曲——**通过**；
+    2. `build/tmp/ik_r2_2_windup_high.png`（`WINDUP` 高位瞄准，`t=0.80 s`，`bend=34.5°`，`gesture=1.00`）：整臂从真实右肩自然连贯伸出、食指清晰展开对准下方 110 m 琥珀预警圈，紧凑袖口不再遮脸（注：前臂外侧棕色开衫处有 2 处极小内衬白衬衫微透斑，以及肩缝内侧极细微接边，记为 3B-2 后续小抛光项）——**通过**；
+    3. `build/tmp/ik_r2_3_hold_impact.png`（`HOLD` 触地瞬间，`t=2.48 s`，`buildings_destroyed=43`）：食指指腹精准压入 `(0.0, -2.38, -48.0)` 废墟中心，前排蓝灰高楼、工业罐与绿树深度遮挡正确，卷握四指与拇指悬空净空 `+152.7 m` 无穿楼，尘雾柔和自然——**通过**。
+
+---
+
 ## 2026-11-27 — 阶段 3B-1 精准修复：消除双右手/空袖筒穿帮 + 前景完整右臂真实 1:6,667 对准 Yumeka 右肩
 
 备份：`backups/20261127_122400_phase3b1_arm_seam_fix/{rust_src,scenes,scripts,tests,CHANGELOG.md,MEMORY.md}`（`assets/characters/yumeka/Yumeka_hand_relay.glb` 位于 gitignored 目录）。
