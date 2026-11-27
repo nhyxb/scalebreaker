@@ -41,7 +41,7 @@ margin = 0.16
 position = Vector3(0, 0, 5)
 fov = 69.0
 near = 0.09
-far = 560.0
+far = 50000.0
 
 [node name="Effects" type="Node3D" parent="."]
 script = ExtResource("Effects")

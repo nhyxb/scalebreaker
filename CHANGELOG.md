@@ -4,6 +4,57 @@
 
 ---
 
+## 2026-11-27 — 渲染架构统一升级：Vulkan `mobile` 单世界卧室 + Layer 1/2 光照隔离 + Yumeka 真身骨架 2-Bone IK
+
+备份：`backups/20261127_132637_vulkan_mobile_single_world/{project.godot,rust_src,scenes,scripts,tests,CHANGELOG.md,MEMORY.md}`。
+回滚：
+
+```sh
+cp backups/20261127_132637_vulkan_mobile_single_world/{project.godot,CHANGELOG.md,MEMORY.md} .
+cp -a backups/20261127_132637_vulkan_mobile_single_world/rust_src/. rust/src/
+cp -a backups/20261127_132637_vulkan_mobile_single_world/scenes/. scenes/
+cp -a backups/20261127_132637_vulkan_mobile_single_world/scripts/. scripts/
+cp -a backups/20261127_132637_vulkan_mobile_single_world/tests/. tests/
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+```
+
+### 一、切换 Vulkan `mobile` 与单一主 3D 世界卧室挂载
+- **`project.godot`**：`renderer/rendering_method` 与 `renderer/rendering_method.mobile` 正式切换为 `"mobile"`（`config/features` 同步更新为 `Mobile`）。
+- **移除双相机 SubViewport 合成（`scenes/harbor_skybox.gd`、`scenes/skybox_bedroom.gd`）**：彻底移除 `BedroomViewport`、`BedroomCamera`、`CanvasLayer -64`、`TextureRect` 及 2D 柔焦薄雾合成层；将 `Bedroom`（含坐姿 `Yumeka_seated.glb`）直接挂载到主 3D 世界 `Skybox/Bedroom`，统一缩放 `scale = Vector3.ONE * 6666.67` 并对齐位置使 `sandbox_anchor.global_position == (0, 0, 0)`（卧室与 Yumeka 零物理碰撞体）。
+- **合并唯一 `WorldEnvironment` 与相机远/近裁（`scenes/main.tscn`、`scenes/round.tscn`、`scenes/day_night_cycle.gd`、`rust/src/round.rs`、`rust/src/game.rs`）**：删除卧室独立 `BedroomEnvironment`，主世界 `Atmosphere.environment.background_mode` 由 `BG_CANVAS` 改为 `BG_SKY` 并由 `day_night_cycle.gd` 统一驱动动态昼夜天空 Shader（白天蓝天白云、黄昏落日、夜晚繁星透过北窗直视）；主相机、过场 `Overview`（含 Android 分支）与 `round.rs::apply_camera_distance()` 远裁 `far` 下限抬至 `50000.0`（覆盖 30 km 卧室四壁）；第一人称与旁观相机 `near` 下限收敛至 `0.05 m`（`far/near <= 1,000,000`），彻底消除 Godot `RenderingLightCuller::create_frustum_points()` 浮点退化报错。
+- **远墙装饰抗 Z-fighting 加固（`scenes/skybox_bedroom.gd`）**：针对 24-bit 移动深度缓冲（`D24_UNORM_S8_UINT`）在 `22 km` 南/东/西远墙处的深度步长，在 `Shell` 墙体内为 6 幅挂画与软木板挖出 `10 cm`（世界空间 `667 m`）浅凹槽（墙背仍留 `4 cm` 实心防漏天），并将挂画衬板与画芯合并为单张带白边纹理的 `QuadMesh`（同步将南墙搁板小相框改为无重叠四边框），消除远墙挂画条带 Z-fighting。
+
+### 二、Layer 1 / Layer 2 原生光照分层隔离
+- **城市层（Layer 1）**：`District`、建筑、道路、沙盘木框、所有巨人/人类、金币、特效保持 `layers = 1`，主世界 `Sun` 锁定 `light_cull_mask = 1`。
+- **卧室与 Yumeka 层（Layer 2）**：递归将 `Bedroom` 与 `Yumeka` 全部 `VisualInstance3D` 设为 `layers = 2`；`Bedroom/Lights` 反向缩放 `1 / 6666.67` 以保持所有光源严格 `1.0` 全局缩放，`WindowSun`（`SHADOW_PARALLEL_2_SPLITS`、`directional_shadow_max_distance = 40000 m`）、`InteriorBounce`、`CeilingFill`（`omni_range = 43333 -> 13333 m`）与 `DeskLampLight`（`omni_range = 29333 m`）全部锁定 `light_cull_mask = 2`。
+- **Vulkan `Forward Mobile` 点光源 FP16 防溢出校准**：`Forward Mobile` 对 `OmniLight3D` 执行 `pow(distance, -omni_attenuation)` 衰减并将 `linear_color * energy * PI` 压缩进 FP16（上限 `65,504`）；将 `DeskLampLight` / 夜间 `CeilingFill` 的 `omni_attenuation` 校准至 `0.75`（白天 `CeilingFill` `0.50`）、`DeskLampLight` 夜间能量 `1,118`（UBO 峰值 `3,512 << 65,504`）、夜间 `CeilingFill` `320`，在 `4.3 km` 距离上精准还原 `1:1` 卧室暖金台灯与柔冷补光，且 Layer 1 深蓝夜景城市零串黄。
+
+### 三、废除 `Yumeka_hand_relay.glb` 断手接力，直接驱动 Yumeka 真身骨架
+- 彻底删除 `scripts/export_yumeka_hand_relay.py` 与本地 gitignored 产物 `assets/characters/yumeka/Yumeka_hand_relay.*`，`scenes/desk_hazards.gd` 不再加载任何独立断手 GLB（保留缺失 `Yumeka_seated.glb` 时的无碰撞关节占位臂回退以兼容公开仓库）。
+- 在 `scenes/yumeka_ultra_giant.gd` 中直接基于 `Yumeka_seated.glb` 完整骨架（317 骨，`extra_cull_margin = 2.0` 防止伸臂时视锥裁剪）实现 `apply_right_arm_ik()` / `clear_right_arm_ik()`：动态量取骨架空间 `L1`/`L2`（换算主世界 `1090.28 m / 1171.96 m`）与食指指腹偏移，基于 `SeatedPose` 相对四元数增量（`q_rest_relaxed^-1 * q_target`，验证屈指轴 `local (1,0,0)`）实现 `0.0` 搭桌微屈 ↔ `1.0` 单指点戳平滑混合，叠加极轻微 `Chest`（`+3°` 前探 / `±2.5°` 转向）与 `Shoulder_R`（`+4.5°` 前伸 / `3°` 轻抬）联动，并在每帧 IK 后立即重算 `Neck`/`Head`/`Eye_L`/`Eye_R` 与 `LowerArm_twist_R` 45% 旋前分配。
+- `scenes/desk_hazards.gd` 完整保留 `desk_hazards` 开关、`45–90 s` 自动周期、`F8` 快捷键、不可攻击合约、AI 预警圈躲避与 `110 m` 破坏结算，直接驱动真身骨架完成 `RAISE (0.65 s) → WINDUP (1.75 s) → HOLD (0.50 s) → RETRACT (0.65 s) → RETURN (0.75 s)` 五段无缝连贯动画。
+
+### 四、同口径验证与隔离虚拟屏视觉核验（严格 2 轮 × 3 张）
+
+| 指标 | 口径 | 数据源 | 基准值（上一版 `gl_compatibility` + 断手接力） | 当前值（Vulkan `mobile` 单世界真身） |
+|---|---|---|---|---|
+| 渲染后端与视口数 | 渲染方法 / 3D 视口数 / 独立卧室环境数 | `project.godot` / `playtest.gd` | `gl_compatibility` / 2 视口（含 `SubViewport`） / 2 个 `WorldEnvironment` | **`mobile` / 1 主视口 / 1 个 `WorldEnvironment`（`BG_SKY`）** |
+| 点戳驱动资产 | 独立前景断手 GLB / 驱动骨架骨数 | `desk_hazards.gd` / `yumeka_ultra_giant.gd` | `Yumeka_hand_relay.glb`（4.59 MB，20 骨）+ 背景折叠 | **0 独立断手 GLB，直接驱动 `Yumeka_seated.glb` 真身 317 骨** |
+| `RAISE t=0` 腕部误差 / `HOLD` 水平误差 / 卷指净空 | 主世界距离（m） | `probe_single_world.gd`（`--headless --fixed-fps 60`） | `0.0 m` / `0.0002 m` / `+152.7 m` | **`0.00012 m` / `0.0008 m` / `+233.0 m`** |
+| Rust 单元测试 | `cargo test --locked` | `cargo test` | 54/54 | **54/54** |
+| Godot 回归断言 | 8 套 `--headless` playtest（更新单世界/分层/真身 IK 断言） | `tests/*playtest.gd` | 716/716 | **715/715**（`playtest` 248 / `growth` 200 / `mode_menu` 45 / `touch` 42 / `sit_crush_gameplay` 44 / `sit_crush` 57 / `brawl` 43 / `audio` 36） |
+| 授权资产入库校验 | `git ls-files assets/characters/yumeka/` | `git ls-files` | 空 | **空** |
+| 实机 GPU 帧率 | 未测（未跑长帧率 ABBA 基准，隔离 `Xvfb :99` 仅截 2 轮 × 3 帧验视觉） | — | 未测 | 未测 |
+
+- **隔离虚拟屏视觉核验（严格 2 轮 × 3 张，`Xvfb :99`，`1280×720`，`Vulkan 1.4.357 - Forward Mobile - NVIDIA GeForce RTX 3050 Ti Laptop GPU`，零占用用户真实桌面）**：
+  - **第 1 轮（`build/tmp/vkr1_*.png`）**：确认单世界肩袖臂 100% 无缝一体、食指触地 3D 遮挡与拆楼正常、Yumeka 脸部睫毛零 Z-fighting、Layer 1/2 隔离有效；同时定位出 3 处待修：① `1.8 m` 人视 `near=0.0012` 导致 `create_frustum_points` 报错；② 22 km 南墙 `ArtSouthHarbor` 在 `D24_UNORM` 下与墙面/衬板产生 4 条垂直 Z-fighting 条带；③ `Forward Mobile` 下 `OmniLight3D` 随 `6666.67×` 距离幂次衰减使夜间 `DeskLampLight` 偏暗、白天室内偏冷。
+  - **第 2 轮（`build/tmp/vkr2_*.png`）**：
+    1. `vkr2_1_day_windup.png`（白天 `WINDUP` 侧前视角）：零 `create_frustum_points` 报错，Yumeka 双眼清晰、暖色调自然，肩袖与右臂 100% 一体无缝、无双右手、无色差，后墙 `ArtSouthHarbor` 与左墙 `ArtEastLandscape` 零 Z-fighting，沙盘木框零视差贴合桌面——**通过**；
+    2. `vkr2_2_day_hold_impact.png`（白天 `HOLD` 触地近中景）：真身食指精准压入 `110 m` 爆破废墟中心，摩天楼群真实 3D 深度遮挡、瓦砾/扬尘/冲击波环正常，卷指远离楼顶——**通过**；
+    3. `vkr2_3_night_city_view.png`（夜晚 `50 m` 大道视角，`near=0.05`）：深蓝城内万家灯火与路灯 100% 干净零串黄，Yumeka 脸部睫毛与远墙零 Z-fighting；但同时暴露了 `Forward Mobile` 点光源 `light_energy * PI > 65,504` 的 FP16 红通道溢出（导致 Yumeka 与书桌呈青绿色）。按严格 2 轮截图上限未再拍第 3 轮，直接基于实测像素辐照度将 `DeskLampLight` / `CeilingFill` 校准为 `omni_attenuation = 0.75` + `light_energy = 1118 / 320`（UBO 峰值 `3,512 << 65,504`，数学等价还原暖金光色，并已加入 `playtest.gd` FP16 上限断言；该项暖金色偏可在真机运行 F7 切夜目视确认）。
+
+---
+
 ## 2026-11-27 — 阶段 3B-1 方案 2 升级：带骨骼蒙皮前景右臂 + 实时解析 2-Bone IK + 5 段无瞬移连续动画
 
 备份：`backups/20261127_125252_phase3b1_rigged_ik_arm/{rust_src,scenes,scripts,tests,CHANGELOG.md,MEMORY.md}`（`assets/characters/yumeka/Yumeka_hand_relay.glb` 位于 gitignored 目录）。

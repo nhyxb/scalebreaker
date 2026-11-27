@@ -1,19 +1,24 @@
 extends Node3D
-## 1:1 soft Japanese cream & light natural-wood bedroom rendered inside the harbour skybox
-## SubViewport (scenes/harbor_skybox.gd). Uses real Kenney Furniture Kit GLB assets
+## 1:1 soft Japanese cream & light natural-wood bedroom mounted directly into the
+## main 3D world by `scenes/harbor_skybox.gd` at `BEDROOM_SCALE = 6666.67` (Vulkan
+## mobile, 32-bit Reversed-Z). Uses real Kenney Furniture Kit GLB assets
 ## (assets/kenney/furniture/, visual-only, zero physics collision), an airtight CSG room
 ## shell with baseboards and a recessed sunlit two-pane window framed by sheer curtains,
 ## procedural wall art / corkboard / floating shelf / live desktop monitor texture, a
-## 21.27 cm desktop harbour sandbox centred at (0, DESK_TOP, 0), dynamic day/dusk/night
-## outdoor sky + automatic warm desk-lamp linkage, and an exported `ultra_giant_anchor`
-## above the swivel chair cushion where the Phase 3 seated anime Yumeka mounts.
+## 21.27 cm desktop harbour sandbox centred at (0, DESK_TOP, 0), Layer 2 isolated
+## interior lighting (window sun + interior bounce + ceiling fill + automatic warm night
+## desk lamp), and an exported `ultra_giant_anchor` above the swivel chair cushion where
+## the seated anime Yumeka mounts.
 
 const FLOOR_WOOD_DIFF := "res://assets/textures/polyhaven/floor_wood_diff.jpg"
 const FURNITURE_DIR := "res://assets/kenney/furniture/"
 const YUMEKA_GLB := "res://assets/characters/yumeka/Yumeka_seated.glb"
 const YumekaSeated := preload("res://scenes/yumeka_ultra_giant.gd")
-## 1 m of harbour ↔ 0.15 mm of bedroom (1:6667). Kept in one place with the skybox sync.
-const SKY_SCALE := 1.0 / 6666.67
+## 1 m of harbour ↔ 0.15 mm of bedroom (1:6667). Kept in one place with `harbor_skybox.gd`.
+const BEDROOM_SCALE := 6666.67
+const SKY_SCALE := 1.0 / BEDROOM_SCALE
+## Visual & light isolation layer for Bedroom + Yumeka (Layer 1 = city, Layer 2 = bedroom).
+const BEDROOM_LAYER := 2
 ## Inner tray side for the default 1418 m harbour, in metres.
 const SANDBOX_SIDE := 0.2127
 ## Matches `district_expansion.gd::_build_sandbox_frame()` default base depth (32 m -> 4.8 mm)
@@ -53,8 +58,6 @@ var _desk_lamp_shade_mat: StandardMaterial3D
 var _ceiling_lamp_shade_mat: StandardMaterial3D
 var _monitor_mat: StandardMaterial3D
 var _curtain_mat: StandardMaterial3D
-var _sky_mat: ShaderMaterial
-var _bedroom_env: Environment
 
 var _window_sun: DirectionalLight3D
 var _interior_bounce: DirectionalLight3D
@@ -63,7 +66,7 @@ var _desk_lamp_light: OmniLight3D
 
 var sandbox_anchor: Node3D
 ## Anchor perched directly above the chairDesk.glb cushion, facing `sandbox_anchor`, for
-## attaching the Phase 3 seated ultra-giant Yumeka model.
+## attaching the seated ultra-giant Yumeka model.
 @export var ultra_giant_anchor: Node3D
 var ultra_giant_seat_y := 0.0
 
@@ -75,12 +78,19 @@ func _ready() -> void:
 	_build_furniture()
 	_build_decor()
 	_build_lights()
-	_build_environment()
+	_apply_visual_layer(self, BEDROOM_LAYER)
 	apply_day_night(1.0, 0.0, 0.0, 0.0)
 
 
 func _is_mobile_platform() -> bool:
 	return OS.has_feature("mobile") or OS.has_feature("android") or OS.has_feature("ios")
+
+
+func _apply_visual_layer(node: Node, mask: int) -> void:
+	if node is VisualInstance3D:
+		(node as VisualInstance3D).layers = mask
+	for child in node.get_children():
+		_apply_visual_layer(child, mask)
 
 
 func set_shadows_enabled(enabled: bool) -> void:
@@ -96,8 +106,12 @@ func get_window_sun() -> DirectionalLight3D:
 	return _window_sun
 
 
-func get_environment() -> Environment:
-	return _bedroom_env
+func get_interior_bounce() -> DirectionalLight3D:
+	return _interior_bounce
+
+
+func get_ceiling_fill() -> OmniLight3D:
+	return _ceiling_fill
 
 
 func _build_materials() -> void:
@@ -296,6 +310,29 @@ func _build_shell() -> void:
 	_box(shell, Vector3(0.045, 0.025, 0.11),
 		Vector3(half_x - 0.035, 0.96, door_z - door_w * 0.36), _mat_metal)
 
+	# Carve shallow 10 cm recesses (667 m in single-world scale, leaving 4 cm airtight outer
+	# wall backing) behind every wall painting & corkboard so far walls at 15-22 km never
+	# Z-fight with thin wall decor even on 24-bit mobile depth buffers at near = 0.05 m.
+	var recess_d := 0.10
+	# South wall art recesses
+	_box(shell, Vector3(0.77, 0.51, recess_d),
+		Vector3(-0.82, 1.66, ROOM_Z_MAX + recess_d * 0.5 - 0.010), _mat_wall, CSGBox3D.OPERATION_SUBTRACTION)
+	_box(shell, Vector3(0.43, 0.57, recess_d),
+		Vector3(1.66, 1.66, ROOM_Z_MAX + recess_d * 0.5 - 0.010), _mat_wall, CSGBox3D.OPERATION_SUBTRACTION)
+	# West wall art recesses
+	_box(shell, Vector3(recess_d, 0.55, 0.41),
+		Vector3(-half_x - recess_d * 0.5 + 0.010, 1.54, 0.54), _mat_wall, CSGBox3D.OPERATION_SUBTRACTION)
+	_box(shell, Vector3(recess_d, 0.45, 0.57),
+		Vector3(-half_x - recess_d * 0.5 + 0.010, 1.62, 1.48), _mat_wall, CSGBox3D.OPERATION_SUBTRACTION)
+	_box(shell, Vector3(recess_d, 0.45, 0.57),
+		Vector3(-half_x - recess_d * 0.5 + 0.010, 1.62, 2.26), _mat_wall, CSGBox3D.OPERATION_SUBTRACTION)
+	# East wall art recess
+	_box(shell, Vector3(recess_d, 0.39, 0.63),
+		Vector3(half_x + recess_d * 0.5 - 0.010, 2.02, 0.58), _mat_wall, CSGBox3D.OPERATION_SUBTRACTION)
+	# North-west corkboard recess
+	_box(shell, Vector3(0.61, 0.45, recess_d),
+		Vector3(-1.62, 1.54, ROOM_Z_MIN - recess_d * 0.5 + 0.010), _mat_wall, CSGBox3D.OPERATION_SUBTRACTION)
+
 
 func _build_sandbox() -> void:
 	var sandbox := Node3D.new()
@@ -391,11 +428,13 @@ func _build_furniture() -> void:
 	)
 	ultra_giant_anchor.set_meta(&"seat_y", ultra_giant_seat_y)
 	ultra_giant_anchor.set_meta(&"faces", &"SandboxAnchor")
-	add_child(ultra_giant_anchor)
-	ultra_giant_anchor.look_at(
+	# Use local Transform3D.looking_at so the horizontal orientation stays invariant
+	# under the parent Bedroom's 6666.67x single-world scale and world offset.
+	ultra_giant_anchor.transform = Transform3D(Basis.IDENTITY, ultra_giant_anchor.position).looking_at(
 		Vector3(sandbox_anchor.position.x, ultra_giant_seat_y, sandbox_anchor.position.z),
 		Vector3.UP,
 	)
+	add_child(ultra_giant_anchor)
 
 	if ResourceLoader.exists(YUMEKA_GLB, "PackedScene"):
 		var seated: Node3D = YumekaSeated.new()
@@ -676,31 +715,34 @@ func _add_framed_art(parent: Node3D, node_name: String, pos: Vector3, rot_y: flo
 		bar.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		root.add_child(bar)
 
-	# Warm-white mat board backing.
-	var backing := MeshInstance3D.new()
-	var back_mesh := BoxMesh.new()
-	back_mesh.size = Vector3(w - border * 1.6, h - border * 1.6, 0.006)
-	backing.mesh = back_mesh
-	backing.position = Vector3(0.0, 0.0, -0.004)
-	backing.material_override = _matte(Color(0.965, 0.952, 0.925), 0.90)
-	backing.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	root.add_child(backing)
-
-	# Crisp matte illustration inset inside the cream mat border.
-	var mat_pad := 0.036
+	# Single non-overlapping mat + illustration quad (avoids coplanar backing/art Z-fighting
+	# at 22 km distance on 24-bit mobile depth buffers while preserving the cream mat border).
 	var art := MeshInstance3D.new()
 	var qm := QuadMesh.new()
-	qm.size = Vector2(maxf(w - border * 2.0 - mat_pad * 2.0, 0.08), maxf(h - border * 2.0 - mat_pad * 2.0, 0.08))
+	qm.size = Vector2(maxf(w - border * 1.9, 0.08), maxf(h - border * 1.9, 0.08))
 	art.mesh = qm
-	art.position = Vector3(0.0, 0.0, 0.001)
+	art.position = Vector3(0.0, 0.0, 0.002)
 	var art_mat := StandardMaterial3D.new()
-	art_mat.albedo_texture = tex
+	art_mat.albedo_texture = _add_mat_border_to_texture(tex)
 	art_mat.roughness = 0.86
 	art_mat.metallic = 0.0
 	art_mat.metallic_specular = 0.14
 	art.material_override = art_mat
 	art.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(art)
+
+
+func _add_mat_border_to_texture(inner_tex: ImageTexture) -> ImageTexture:
+	var src := inner_tex.get_image()
+	if src == null:
+		return inner_tex
+	var pad := 12
+	var w := src.get_width() + pad * 2
+	var h := src.get_height() + pad * 2
+	var out := Image.create(w, h, false, Image.FORMAT_RGBA8)
+	out.fill(Color(0.965, 0.952, 0.925))
+	out.blit_rect(src, Rect2i(0, 0, src.get_width(), src.get_height()), Vector2i(pad, pad))
+	return ImageTexture.create_from_image(out)
 
 
 func _build_corkboard(parent: Node3D) -> void:
@@ -816,22 +858,31 @@ func _build_wall_shelf(parent: Node3D) -> void:
 	plant_ball.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(plant_ball)
 
-	# Small leaning mini-photo frame on the right half of the shelf.
-	var mini := MeshInstance3D.new()
-	var mini_mesh := BoxMesh.new()
-	mini_mesh.size = Vector3(0.135, 0.165, 0.012)
-	mini.mesh = mini_mesh
+	# Small leaning mini-photo frame on the right half of the shelf (non-overlapping border).
+	var mini := Node3D.new()
 	mini.position = Vector3(0.26, top_y + 0.081, -0.01)
 	mini.rotation = Vector3(deg_to_rad(-11.0), deg_to_rad(-12.0), 0.0)
-	mini.material_override = _mat_wood_trim
-	mini.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	root.add_child(mini)
+	for bar_spec in [
+		[Vector3(0.135, 0.015, 0.012), Vector3(0.0, 0.075, 0.0)],
+		[Vector3(0.135, 0.015, 0.012), Vector3(0.0, -0.075, 0.0)],
+		[Vector3(0.015, 0.135, 0.012), Vector3(-0.06, 0.0, 0.0)],
+		[Vector3(0.015, 0.135, 0.012), Vector3(0.06, 0.0, 0.0)],
+	]:
+		var mb := MeshInstance3D.new()
+		var mbm := BoxMesh.new()
+		mbm.size = bar_spec[0]
+		mb.mesh = mbm
+		mb.position = bar_spec[1]
+		mb.material_override = _mat_wood_trim
+		mb.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mini.add_child(mb)
 
 	var mini_pic := MeshInstance3D.new()
 	var mq := QuadMesh.new()
 	mq.size = Vector2(0.105, 0.135)
 	mini_pic.mesh = mq
-	mini_pic.position = Vector3(0.0, 0.0, 0.007)
+	mini_pic.position = Vector3(0.0, 0.0, 0.002)
 	var mmat := StandardMaterial3D.new()
 	mmat.albedo_texture = _make_art_texture("misty_harbor")
 	mmat.roughness = 0.84
@@ -927,7 +978,7 @@ func _attach_monitor_display(monitor_pivot: Node3D) -> void:
 	quad.size = Vector2(0.372, 0.225)
 	screen.mesh = quad
 	var normal := Vector3(0.0, 0.139, 0.990).normalized()
-	screen.position = Vector3(0.0, 0.1713, -0.0001) + normal * 0.0024
+	screen.position = Vector3(0.0, 0.1713, -0.0001) + normal * 0.0045
 	screen.rotation.x = -atan2(0.139, 0.990)
 	var tex := _make_monitor_texture()
 	_monitor_mat = StandardMaterial3D.new()
@@ -1345,235 +1396,125 @@ func _transform_aabb(xf: Transform3D, box: AABB) -> AABB:
 
 
 # ---------------------------------------------------------------------------
-# Lights, Sky Shader & Day/Dusk/Night Linkage
+# Layer 2 Isolated Lights & Day/Dusk/Night Linkage
 # ---------------------------------------------------------------------------
 
 func _build_lights() -> void:
+	# Counter-scale the Lights pivot by SKY_SCALE (1 / 6666.67) so every Light3D runs
+	# at exact unit global scale (1, 1, 1) with world-metre positions, omni_range, and
+	# directional_shadow_max_distance calibrated to the 6666.67x single-world bedroom.
 	var lights := Node3D.new()
 	lights.name = "Lights"
+	lights.scale = Vector3.ONE * SKY_SCALE
 	add_child(lights)
 
 	# Primary window directional light (sunlight -> golden dusk -> cool moonlight).
 	_window_sun = DirectionalLight3D.new()
 	_window_sun.name = "WindowSun"
+	_window_sun.light_cull_mask = BEDROOM_LAYER
 	_window_sun.light_color = Color(1.0, 0.93, 0.82)
-	_window_sun.light_energy = 0.76
+	_window_sun.light_energy = 0.72
 	_window_sun.shadow_enabled = not _is_mobile_platform()
-	_window_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
-	_window_sun.directional_shadow_max_distance = 6.0
-	_window_sun.shadow_bias = 0.02
-	_window_sun.shadow_normal_bias = 1.2
-	_window_sun.shadow_blur = 2.2
-	_window_sun.shadow_opacity = 0.56
+	_window_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	_window_sun.directional_shadow_split_1 = 0.22
+	_window_sun.directional_shadow_max_distance = 6.0 * BEDROOM_SCALE
+	_window_sun.shadow_bias = 0.03
+	_window_sun.shadow_normal_bias = 1.6
+	_window_sun.shadow_blur = 2.0
+	_window_sun.shadow_opacity = 0.54
+	_window_sun.transform = Transform3D(
+		Basis.IDENTITY, Vector3(1.3, 3.1, -3.8) * BEDROOM_SCALE
+	).looking_at(Vector3(-0.35, 0.55, 1.0) * BEDROOM_SCALE, Vector3.UP)
 	lights.add_child(_window_sun)
-	_window_sun.look_at_from_position(Vector3(1.3, 3.1, -3.8), Vector3(-0.35, 0.55, 1.0), Vector3.UP)
 
 	# Soft interior bounce fill.
 	_interior_bounce = DirectionalLight3D.new()
 	_interior_bounce.name = "InteriorBounce"
+	_interior_bounce.light_cull_mask = BEDROOM_LAYER
 	_interior_bounce.light_color = Color(0.96, 0.92, 0.86)
-	_interior_bounce.light_energy = 0.22
+	_interior_bounce.light_energy = 0.20
 	_interior_bounce.shadow_enabled = false
+	_interior_bounce.transform = Transform3D(
+		Basis.IDENTITY, Vector3(-0.8, 2.2, 3.0) * BEDROOM_SCALE
+	).looking_at(Vector3(0.2, 1.0, -0.5) * BEDROOM_SCALE, Vector3.UP)
 	lights.add_child(_interior_bounce)
-	_interior_bounce.look_at_from_position(Vector3(-0.8, 2.2, 3.0), Vector3(0.2, 1.0, -0.5), Vector3.UP)
 
-	# Subtle warm fill near the ceiling pendant (dims at night so the desk lamp dominates).
+	# Subtle warm fill near the ceiling pendant (repurposed at night as short-range monitor bounce).
 	_ceiling_fill = OmniLight3D.new()
 	_ceiling_fill.name = "CeilingFill"
-	_ceiling_fill.position = Vector3(0.0, ROOM.y - 0.52, 1.20)
+	_ceiling_fill.light_cull_mask = BEDROOM_LAYER
+	_ceiling_fill.position = Vector3(0.0, ROOM.y - 0.52, 1.20) * BEDROOM_SCALE
 	_ceiling_fill.light_color = Color(1.0, 0.92, 0.80)
 	_ceiling_fill.light_energy = 0.14
-	_ceiling_fill.omni_range = 6.5
+	_ceiling_fill.omni_range = 6.5 * BEDROOM_SCALE
 	_ceiling_fill.shadow_enabled = false
 	lights.add_child(_ceiling_fill)
 
 	# Single warm table lamp OmniLight3D inside LampRoundTable: automatically switches on
-	# at dusk/night to softly illuminate Yumeka's face, shoulders, and the desktop diorama.
+	# at dusk/night to softly illuminate Layer 2 Yumeka and the desk without ever yellowing
+	# the Layer 1 city below. Uses omni_attenuation = 0.75 so scaled light_energy (~1118)
+	# stays 18x below Vulkan Forward Mobile's FP16 light-UBO ceiling (65,504).
 	_desk_lamp_light = OmniLight3D.new()
 	_desk_lamp_light.name = "DeskLampLight"
-	_desk_lamp_light.position = Vector3(0.42, DESK_TOP + 0.34, -0.10)
+	_desk_lamp_light.light_cull_mask = BEDROOM_LAYER
+	_desk_lamp_light.position = Vector3(0.42, DESK_TOP + 0.34, -0.10) * BEDROOM_SCALE
 	_desk_lamp_light.light_color = Color(1.0, 0.76, 0.44)
 	_desk_lamp_light.light_energy = 0.0
-	_desk_lamp_light.omni_range = 4.4
-	_desk_lamp_light.omni_attenuation = 1.15
+	_desk_lamp_light.omni_range = 4.4 * BEDROOM_SCALE
+	_desk_lamp_light.omni_attenuation = 0.75
 	_desk_lamp_light.shadow_enabled = false
 	_desk_lamp_light.visible = false
 	lights.add_child(_desk_lamp_light)
 
 
-func _build_environment() -> void:
-	# Dynamic outdoor sky shader visible through the north window (clouds, sun/sunset halo,
-	# and starry night sky), paired with explicit interior ambient color control.
-	var sky_shader := Shader.new()
-	sky_shader.code = """
-shader_type sky;
-
-uniform vec3 sky_top : source_color = vec3(0.26, 0.56, 0.90);
-uniform vec3 sky_mid : source_color = vec3(0.58, 0.80, 0.96);
-uniform vec3 sky_horizon : source_color = vec3(0.95, 0.94, 0.90);
-uniform vec3 ground_color : source_color = vec3(0.56, 0.62, 0.68);
-uniform vec3 sun_dir = vec3(0.26, 0.28, -0.92);
-uniform vec3 sun_color : source_color = vec3(1.0, 0.95, 0.82);
-uniform float sun_strength = 0.75;
-uniform vec3 cloud_color : source_color = vec3(1.0, 0.99, 0.97);
-uniform float cloud_opacity = 0.50;
-uniform float star_strength = 0.0;
-uniform float cloud_drift = 0.0;
-
-float hash21(vec2 p) {
-	p = fract(p * vec2(123.34, 456.21));
-	p += dot(p, p + 45.32);
-	return fract(p.x * p.y);
-}
-
-float vnoise(vec2 p) {
-	vec2 i = floor(p);
-	vec2 f = fract(p);
-	f = f * f * (3.0 - 2.0 * f);
-	float a = hash21(i);
-	float b = hash21(i + vec2(1.0, 0.0));
-	float c = hash21(i + vec2(0.0, 1.0));
-	float d = hash21(i + vec2(1.0, 1.0));
-	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-float fbm(vec2 p) {
-	float v = 0.0;
-	v += 0.55 * vnoise(p);
-	v += 0.30 * vnoise(p * 2.13 + vec2(3.7, 1.9));
-	v += 0.15 * vnoise(p * 4.41 + vec2(8.2, 5.1));
-	return v;
-}
-
-void sky() {
-	vec3 dir = normalize(EYEDIR);
-	// Bias the effective sky horizon slightly downward (upper-floor bedroom viewpoint) so
-	// looking straight through the north window always shows expansive sky, clouds, and stars.
-	float y = dir.y + 0.16;
-	vec3 col;
-	if (y >= 0.0) {
-		float t_mid = smoothstep(0.0, 0.22, y);
-		float t_top = smoothstep(0.14, 0.70, y);
-		col = mix(sky_horizon, sky_mid, t_mid);
-		col = mix(col, sky_top, t_top);
-	} else {
-		col = mix(sky_horizon, ground_color, smoothstep(0.0, -0.35, y));
-	}
-
-	// Soft sun / sunset / moon halo visible through the north window.
-	vec3 sdir = normalize(sun_dir);
-	float sdot = max(dot(dir, sdir), 0.0);
-	float halo = pow(sdot, 8.0) * 0.45 + pow(sdot, 54.0) * 0.68;
-	float disc = smoothstep(0.9965, 0.9992, sdot) * 1.15;
-	col += sun_color * (halo + disc) * sun_strength * smoothstep(-0.08, 0.06, y);
-
-	// Airy sunlit / sunset clouds visible cleanly across the window panes.
-	if (y > 0.02 && cloud_opacity > 0.01) {
-		vec2 cp = dir.xz / (y + 0.20) * 0.72 + vec2(cloud_drift, cloud_drift * 0.35);
-		float n = fbm(cp * vec2(1.10, 1.75));
-		float mask = smoothstep(0.43, 0.70, n) * smoothstep(0.02, 0.16, y) * smoothstep(0.95, 0.38, y);
-		vec3 lit_cloud = cloud_color + sun_color * pow(sdot, 4.0) * 0.24 * sun_strength;
-		col = mix(col, lit_cloud, clamp(mask * cloud_opacity, 0.0, 0.88));
-	}
-
-	// Crisp twinkling starfield at dusk/night across all window panes.
-	if (y > 0.02 && star_strength > 0.01) {
-		vec2 sp = dir.xz / (y + 0.26) * 44.0;
-		vec2 cell = floor(sp);
-		vec2 f = fract(sp) - 0.5;
-		float rnd = hash21(cell);
-		if (rnd > 0.962) {
-			vec2 off = vec2(hash21(cell + 17.3), hash21(cell + 53.7)) - 0.5;
-			float d = length(f - off * 0.52);
-			float star = smoothstep(0.20, 0.02, d) * smoothstep(0.02, 0.14, y);
-			float twinkle = 0.72 + 0.28 * sin(rnd * 62.0 + cloud_drift * 14.0);
-			col += vec3(0.90, 0.94, 1.0) * star * twinkle * star_strength * 1.45;
-		}
-	}
-
-	COLOR = col;
-}
-"""
-	_sky_mat = ShaderMaterial.new()
-	_sky_mat.shader = sky_shader
-	var sky := Sky.new()
-	sky.sky_material = _sky_mat
-
-	_bedroom_env = Environment.new()
-	_bedroom_env.background_mode = Environment.BG_SKY
-	_bedroom_env.sky = sky
-	_bedroom_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	_bedroom_env.ambient_light_color = Color(0.96, 0.91, 0.84)
-	_bedroom_env.ambient_light_energy = 0.28
-	_bedroom_env.tonemap_mode = Environment.TONE_MAPPER_AGX
-	_bedroom_env.tonemap_exposure = 0.82
-	var we := WorldEnvironment.new()
-	we.name = "BedroomEnvironment"
-	we.environment = _bedroom_env
-	add_child(we)
-
-
-func apply_day_night(day_w: float, dusk_w: float, night_w: float, cycle_time: float = 0.0) -> void:
+func apply_day_night(day_w: float, dusk_w: float, night_w: float, _cycle_time: float = 0.0) -> void:
 	var sum := maxf(day_w + dusk_w + night_w, 0.0001)
 	var d := day_w / sum
 	var u := dusk_w / sum
 	var n := night_w / sum
 
-	if _sky_mat != null:
-		var top_col := Color(0.19, 0.50, 0.90) * d + Color(0.18, 0.21, 0.44) * u + Color(0.025, 0.045, 0.13) * n
-		var mid_col := Color(0.48, 0.76, 0.97) * d + Color(0.86, 0.44, 0.38) * u + Color(0.055, 0.095, 0.22) * n
-		var hor_col := Color(0.88, 0.93, 0.97) * d + Color(1.00, 0.58, 0.24) * u + Color(0.10, 0.15, 0.29) * n
-		var gnd_col := Color(0.74, 0.84, 0.93) * d + Color(0.68, 0.42, 0.32) * u + Color(0.05, 0.08, 0.17) * n
-		var sdir := (Vector3(0.22, 0.16, -0.96) * d + Vector3(0.24, 0.04, -0.97) * u + Vector3(-0.20, 0.14, -0.97) * n).normalized()
-		var scol := Color(1.0, 0.96, 0.84) * d + Color(1.0, 0.62, 0.26) * u + Color(0.76, 0.86, 1.0) * n
-		var sstr := 0.78 * d + 1.15 * u + 0.52 * n
-		var ccol := Color(1.0, 0.995, 0.985) * d + Color(1.0, 0.76, 0.58) * u + Color(0.22, 0.30, 0.48) * n
-		var cop := 0.62 * d + 0.60 * u + 0.18 * n
-		var stars := 0.0 * d + 0.16 * u + 1.0 * n
-		_sky_mat.set_shader_parameter(&"sky_top", top_col)
-		_sky_mat.set_shader_parameter(&"sky_mid", mid_col)
-		_sky_mat.set_shader_parameter(&"sky_horizon", hor_col)
-		_sky_mat.set_shader_parameter(&"ground_color", gnd_col)
-		_sky_mat.set_shader_parameter(&"sun_dir", sdir)
-		_sky_mat.set_shader_parameter(&"sun_color", scol)
-		_sky_mat.set_shader_parameter(&"sun_strength", sstr)
-		_sky_mat.set_shader_parameter(&"cloud_color", ccol)
-		_sky_mat.set_shader_parameter(&"cloud_opacity", cop)
-		_sky_mat.set_shader_parameter(&"star_strength", stars)
-		_sky_mat.set_shader_parameter(&"cloud_drift", cycle_time * 0.02)
-
 	if _window_sun != null:
+		_window_sun.light_cull_mask = BEDROOM_LAYER
 		_window_sun.light_color = Color(1.0, 0.93, 0.82) * d + Color(1.0, 0.56, 0.28) * u + Color(0.46, 0.62, 0.94) * n
-		_window_sun.light_energy = 0.76 * d + 0.84 * u + 0.16 * n
+		_window_sun.light_energy = 0.86 * d + 0.84 * u + 0.14 * n
 		# Keep night moonlight shadow very soft so bangs/window frame never cut a hard dark line across Yumeka's eyes.
-		_window_sun.shadow_opacity = 0.56 * d + 0.64 * u + 0.12 * n
+		_window_sun.shadow_opacity = 0.54 * d + 0.62 * u + 0.12 * n
 		# Dusk sun slants low through the north window across Yumeka's side face and sandbox.
-		var from_p := Vector3(1.3, 3.1, -3.8) * d + Vector3(1.8, 2.45, -3.2) * u + Vector3(-0.3, 2.8, -3.6) * n
-		var to_p := Vector3(-0.35, 0.55, 1.0) * d + Vector3(-0.15, 0.90, 0.65) * u + Vector3(0.05, 0.75, 0.85) * n
-		_window_sun.look_at_from_position(from_p, to_p, Vector3.UP)
+		var from_p := (Vector3(1.3, 3.1, -3.8) * d + Vector3(1.8, 2.45, -3.2) * u + Vector3(-0.3, 2.8, -3.6) * n) * BEDROOM_SCALE
+		var to_p := (Vector3(-0.35, 0.55, 1.0) * d + Vector3(-0.15, 0.90, 0.65) * u + Vector3(0.05, 0.75, 0.85) * n) * BEDROOM_SCALE
+		_window_sun.transform = Transform3D(Basis.IDENTITY, from_p).looking_at(to_p, Vector3.UP)
 
 	if _interior_bounce != null:
+		_interior_bounce.light_cull_mask = BEDROOM_LAYER
 		# Keep global interior bounce gentle at night so far bedroom walls retain deep midnight-blue depth.
-		_interior_bounce.light_color = Color(0.96, 0.92, 0.86) * d + Color(0.92, 0.64, 0.54) * u + Color(0.32, 0.40, 0.62) * n
-		_interior_bounce.light_energy = 0.22 * d + 0.18 * u + 0.09 * n
-		_interior_bounce.look_at_from_position(Vector3(-0.8, 2.2, 3.0), Vector3(0.2, 1.0, -0.5), Vector3.UP)
+		_interior_bounce.light_color = Color(0.98, 0.93, 0.86) * d + Color(0.92, 0.64, 0.54) * u + Color(0.32, 0.40, 0.62) * n
+		_interior_bounce.light_energy = 0.28 * d + 0.18 * u + 0.08 * n
+		_interior_bounce.transform = Transform3D(
+			Basis.IDENTITY, Vector3(-0.8, 2.2, 3.0) * BEDROOM_SCALE
+		).looking_at(Vector3(0.2, 1.0, -0.5) * BEDROOM_SCALE, Vector3.UP)
 
+	# Godot 4.7 Vulkan Forward Mobile applies `pow(distance, -omni_attenuation)` and packs
+	# `linear_color * light_energy * PI` into FP16 (max 65,504). Keeping omni_attenuation
+	# in [0.50, 0.75] lets calibrated energy (~16..1,118) deliver the exact 1:1 bedroom
+	# radiance at 4 km distance while staying 18x-60x below the FP16 overflow ceiling.
 	if _ceiling_fill != null:
-		# During day/dusk this stays near the ceiling pendant; at night the ceiling lamp is off,
-		# so we repurpose this zero-shadow OmniLight3D as a short-range monitor + tabletop bounce
-		# fill on Yumeka's front-left (-X, -Z) to smoothly soften her left eye/cheek without
-		# washing out the deep blue bedroom walls behind her.
-		var ceil_pos := Vector3(0.0, ROOM.y - 0.52, 1.20)
-		var desk_fill_pos := Vector3(-0.38, DESK_TOP + 0.38, -0.06)
+		_ceiling_fill.light_cull_mask = BEDROOM_LAYER
+		var ceil_pos := Vector3(0.0, ROOM.y - 0.52, 1.20) * BEDROOM_SCALE
+		var desk_fill_pos := Vector3(-0.38, DESK_TOP + 0.38, -0.06) * BEDROOM_SCALE
+		var ceil_atten := lerpf(0.50, 0.75, n)
 		_ceiling_fill.position = ceil_pos.lerp(desk_fill_pos, n)
-		_ceiling_fill.omni_range = lerpf(6.5, 2.0, n)
-		_ceiling_fill.omni_attenuation = lerpf(1.0, 1.55, n)
-		_ceiling_fill.light_color = Color(1.0, 0.92, 0.80) * d + Color(1.0, 0.76, 0.56) * u + Color(0.92, 0.88, 0.96) * n
-		_ceiling_fill.light_energy = 0.14 * d + 0.10 * u + 0.52 * n
+		_ceiling_fill.omni_range = lerpf(6.5, 2.0, n) * BEDROOM_SCALE
+		_ceiling_fill.omni_attenuation = ceil_atten
+		_ceiling_fill.light_color = Color(1.0, 0.92, 0.80) * d + Color(1.0, 0.76, 0.56) * u + Color(0.88, 0.86, 0.98) * n
+		_ceiling_fill.light_energy = 16.0 * d + 12.0 * u + 320.0 * n
 
-	# Warm table lamp lights up automatically through dusk into night.
-	var lamp_energy := 0.0 * d + 0.48 * u + 1.32 * n
+	# Warm table lamp lights up automatically through dusk into night (Layer 2 ONLY).
+	# At d = 4,323 m & omni_attenuation = 0.75, energy 1,118 delivers exact ~2.10 warm
+	# tungsten irradiance on Yumeka's right cheek (R_ubo = 3,512 << 65,504, zero overflow).
+	var lamp_energy := 0.0 * d + 420.0 * u + 1118.0 * n
 	if _desk_lamp_light != null:
+		_desk_lamp_light.light_cull_mask = BEDROOM_LAYER
+		_desk_lamp_light.omni_attenuation = 0.75
 		_desk_lamp_light.light_energy = lamp_energy
 		_desk_lamp_light.visible = lamp_energy > 0.01
 	if _desk_lamp_shade_mat != null:
@@ -1591,9 +1532,3 @@ func apply_day_night(day_w: float, dusk_w: float, night_w: float, cycle_time: fl
 	if _window_glass_mat != null:
 		_window_glass_mat.albedo_color = Color(0.92, 0.96, 1.0, 0.11) * d \
 				+ Color(1.0, 0.82, 0.66, 0.13) * u + Color(0.18, 0.26, 0.46, 0.18) * n
-
-	if _bedroom_env != null:
-		_bedroom_env.ambient_light_color = Color(0.96, 0.91, 0.84) * d \
-				+ Color(0.88, 0.64, 0.58) * u + Color(0.25, 0.31, 0.49) * n
-		_bedroom_env.ambient_light_energy = 0.28 * d + 0.24 * u + 0.21 * n
-		_bedroom_env.tonemap_exposure = 0.82 * d + 0.84 * u + 0.88 * n

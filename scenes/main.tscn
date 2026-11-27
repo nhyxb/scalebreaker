@@ -20,7 +20,7 @@ sky_material = SubResource("SkyMaterial")
 
 [sub_resource type="Environment" id="Coast"]
 resource_local_to_scene = true
-background_mode = 3
+background_mode = 2
 sky = SubResource("Sky")
 ambient_light_source = 3
 ambient_light_color = Color(0.66, 0.78, 0.94, 1)
@@ -63,6 +63,7 @@ script = ExtResource("DayNight")
 rotation_degrees = Vector3(-42, -36, 0)
 light_color = Color(1, 0.94, 0.85, 1)
 light_energy = 0.98
+light_cull_mask = 1
 shadow_enabled = true
 shadow_opacity = 0.68
 directional_shadow_mode = 1
@@ -73,7 +74,7 @@ position = Vector3(148, 102, 162)
 rotation = Vector3(-0.48, 0.72, 0)
 current = true
 fov = 50.0
-far = 950.0
+far = 50000.0
 metadata/district_draw_distance = 460.0
 
 [node name="Interface" type="CanvasLayer" parent="."]

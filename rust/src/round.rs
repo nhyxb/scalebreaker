@@ -1176,7 +1176,7 @@ impl INode3D for HarborRound {
                 .keep_global_transform(false)
                 .done();
             camera.set_position(Vector3::ZERO);
-            camera.set_near((orbit.get_global_position().y * 0.025).clamp(0.002, 0.09));
+            camera.set_near((orbit.get_global_position().y * 0.025).clamp(0.05, 0.09));
         } else {
             let is_observer = self.player == PlayerRole::HumanObserver;
             let safe_spawn = |point: Vector3| {
@@ -2506,9 +2506,9 @@ impl HarborRound {
             } else {
                 eye_height
             };
-            // The far plane covers the whole island, the tallest body, and foreground
-            // desk-hazard arms reaching all the way back to Yumeka's right shoulder (~3.7 km).
-            let regular_far = (self.world_limit * 6.5 + height * 3.0).max(4600.0);
+            // The far plane covers the whole island, the tallest body, and the 30 km
+            // single-world bedroom walls & seated Yumeka (Vulkan mobile 32-bit Reversed-Z).
+            let regular_far = (self.world_limit * 6.5 + height * 3.0).max(50000.0);
             if regular_far != self.regular_camera_far {
                 self.regular_camera_far = regular_far;
                 camera.set_far(regular_far);
@@ -2615,7 +2615,7 @@ impl HarborRound {
             self.camera
                 .as_mut()
                 .unwrap()
-                .set_near((next.y * 0.025).clamp(0.002, 0.09));
+                .set_near((next.y * 0.025).clamp(0.05, 0.09));
             self.apply_camera_distance(0.0);
         }
     }
@@ -2771,8 +2771,10 @@ impl HarborRound {
             }
             camera.set_near(if first_person {
                 let height = GIANT_START_HEIGHT * scale;
+                // Keep far/near <= 1,000,000 (with far >= 50,000 m) so Godot's float32
+                // RenderingLightCuller::create_frustum_points() never degenerates.
                 (height * 0.12)
-                    .clamp(0.001, 0.012)
+                    .clamp(0.05, 0.06)
                     .max((height * 0.005).min(3.0))
             } else {
                 // Near plane scales with the arm so a 500 m pull-back never clips the world.

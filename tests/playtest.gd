@@ -69,34 +69,36 @@ func _run() -> void:
 
 func _bedroom_skybox() -> void:
 	var sky: Node = _game.get_node_or_null("Skybox")
-	var sub: SubViewport = sky.get_node_or_null("BedroomViewport") if sky != null else null
-	var rect: TextureRect = sky.get_node_or_null("BedroomBackdrop/BedroomPicture") if sky != null else null
-	var bedroom: Node3D = sub.get_node_or_null("Bedroom") if sub != null else null
-	_check(sky != null and sub != null and rect != null and bedroom != null,
-			"bedroom skybox viewport, backdrop and shell initialize with the main scene")
+	var bedroom: Node3D = sky.get_node_or_null("Bedroom") if sky != null else null
+	var sub: Node = sky.get_node_or_null("BedroomViewport") if sky != null else null
+	var backdrop: Node = sky.get_node_or_null("BedroomBackdrop") if sky != null else null
+	var sun: DirectionalLight3D = _game.get_node_or_null("Sun") as DirectionalLight3D
+	var overview: Camera3D = _game.get_node_or_null("Overview") as Camera3D
+	var atmo: WorldEnvironment = _game.get_node_or_null("Atmosphere") as WorldEnvironment
+	_check(sky != null and bedroom != null and sub == null and backdrop == null,
+			"single-world bedroom mounts directly under Skybox with SubViewport and 2D backdrop removed")
 	if bedroom == null:
 		return
-	var win := root.size
-	var expected_min := int(round(win.x * 0.75))
-	_check(rect.texture_filter == CanvasItem.TEXTURE_FILTER_LINEAR
-			and sub.size.x >= mini(win.x, expected_min) and sub.msaa_3d == Viewport.MSAA_2X,
-			"desktop skybox renders with linear filtering, high resolution ratio and 2x MSAA")
-	# Regression guard for the real-recording sandbox-float bug (2026-11-26): the backdrop
-	# rect must ignore the viewport texture's size and stay exactly the visible canvas even
-	# when the 0.85-ratio texture exceeds the 1280x720 base (1920x1080 -> 1632x918).
-	sky.set_process(false)
-	sky._resize(Vector2(1920.0, 1080.0))
-	await process_frame
-	await process_frame
-	_check(rect.expand_mode == TextureRect.EXPAND_IGNORE_SIZE
-			and rect.stretch_mode == TextureRect.STRETCH_SCALE,
-			"backdrop rect ignores texture size and scales it (no min-size overflow)")
-	_check(sub.size.x > int(root.get_visible_rect().size.x)
-			and rect.size == root.get_visible_rect().size,
-			"backdrop rect equals the visible canvas even with a larger texture (sandbox not floating)")
-	sky.set_process(true)
-	await process_frame
-	await process_frame
+	var anchor_world_err: float = (bedroom.sandbox_anchor as Node3D).global_position.length() if bedroom.sandbox_anchor != null else 999.0
+	_check(bedroom.scale.is_equal_approx(Vector3.ONE * 6666.67)
+			and anchor_world_err < 0.05
+			and overview != null and overview.far >= 45000.0 and (overview.cull_mask & 3) == 3,
+			"single-world bedroom scales 6666.67x with sandbox_anchor at (0,0,0) and Overview far >= 45000")
+	# Layer 1 (city) / Layer 2 (bedroom + Yumeka) lighting & visibility isolation.
+	var win_sun: DirectionalLight3D = bedroom.call("get_window_sun") if bedroom.has_method(&"get_window_sun") else null
+	var bounce: DirectionalLight3D = bedroom.call("get_interior_bounce") if bedroom.has_method(&"get_interior_bounce") else null
+	var ceil_l: OmniLight3D = bedroom.call("get_ceiling_fill") if bedroom.has_method(&"get_ceiling_fill") else null
+	var desk_l: OmniLight3D = bedroom.call("get_desk_lamp_light") if bedroom.has_method(&"get_desk_lamp_light") else null
+	var all_bedroom_layer2 := _count_non_layer_in(bedroom, 2) == 0
+	var lights_isolated := sun != null and sun.light_cull_mask == 1 \
+			and win_sun != null and win_sun.light_cull_mask == 2 \
+			and win_sun.directional_shadow_max_distance >= 35000.0 \
+			and bounce != null and bounce.light_cull_mask == 2 \
+			and ceil_l != null and ceil_l.light_cull_mask == 2 \
+			and desk_l != null and desk_l.light_cull_mask == 2 \
+			and desk_l.omni_range >= 25000.0
+	_check(all_bedroom_layer2 and lights_isolated,
+			"city Sun isolates to Layer 1 while Bedroom/Yumeka meshes and calibrated lights isolate to Layer 2")
 	var furniture := bedroom.get_node_or_null("Furniture")
 	var required := [
 		"Desk", "ChairDesk", "ComputerScreen", "ComputerKeyboard", "ComputerMouse",
@@ -116,11 +118,11 @@ func _bedroom_skybox() -> void:
 			and district.get_node_or_null("SandboxFrame") != null
 	_check(all_present and diorama_ok and _count_collisions_in(bedroom) == 0,
 			"all Kenney furniture landmarks load without BearDesk/Water, with SandboxFrame and zero collisions")
-	# Soft interior decor + true north-window sky + real desktop monitor display (zero collisions).
+	# Soft interior decor + unified main-world BG_SKY dynamic sky + real desktop monitor display.
 	var decor := bedroom.get_node_or_null("Decor")
 	var monitor_disp := furniture.get_node_or_null("ComputerScreen/MonitorDisplay") as MeshInstance3D if furniture != null else null
 	var monitor_mat := monitor_disp.material_override as StandardMaterial3D if monitor_disp != null else null
-	var bedroom_env: Environment = bedroom.call("get_environment") if bedroom.has_method(&"get_environment") else null
+	var main_env: Environment = atmo.environment if atmo != null else null
 	var decor_ok := decor != null \
 			and decor.get_node_or_null("Curtains/CurtainLeft") != null \
 			and decor.get_node_or_null("Curtains/CurtainRight") != null \
@@ -133,8 +135,10 @@ func _bedroom_skybox() -> void:
 			and decor.get_node_or_null("DeskMat") != null \
 			and decor.get_node_or_null("DeskMug") != null
 	_check(decor_ok and monitor_mat != null and monitor_mat.albedo_texture != null and monitor_mat.emission_enabled
-			and bedroom_env != null and bedroom_env.background_mode == Environment.BG_SKY,
-			"bedroom upgrades add dynamic sky, sheer curtains, framed art, corkboard, shelf, desk accents and real monitor screen")
+			and bedroom.get_node_or_null("BedroomEnvironment") == null
+			and main_env != null and main_env.background_mode == Environment.BG_SKY
+			and main_env.sky != null and main_env.sky.sky_material is ShaderMaterial,
+			"unified BG_SKY dynamic sky and bedroom decor (curtains, art, corkboard, shelf, desk accents, monitor) load cleanly")
 	var sandbox_anchor: Node3D = bedroom.sandbox_anchor
 	var ug_anchor: Node3D = bedroom.ultra_giant_anchor
 	var to_sandbox := Vector3.ZERO
@@ -197,9 +201,9 @@ func _bedroom_skybox() -> void:
 					break
 			_check(saw_blink and yumeka.debug_eye_close() < 0.01,
 					"forced blink closes and reopens the eyelids morph")
-			# Gaze: both head/neck and Eye_L/Eye_R bones smoothly track override
+			# Gaze: both head/neck and Eye_L/Eye_R bones smoothly track main-world override
 			# targets left/right and stay clamped within anatomical limits.
-			yumeka.debug_set_gaze_override(Vector3(-0.62, 0.85, 0.0))
+			yumeka.debug_set_gaze_override(Vector3(-4000.0, 600.0, 0.0))
 			var yaw_left := 0.0
 			var eye_left := 0.0
 			for frame in 120:
@@ -208,7 +212,7 @@ func _bedroom_skybox() -> void:
 				eye_left = yumeka.debug_eye_swing().x
 				if absf(yaw_left) > 5.0 and absf(eye_left) > 4.0:
 					break
-			yumeka.debug_set_gaze_override(Vector3(0.62, 0.85, 0.0))
+			yumeka.debug_set_gaze_override(Vector3(4000.0, 600.0, 0.0))
 			var yaw_right := 0.0
 			var eye_right := 0.0
 			for frame in 120:
@@ -229,18 +233,22 @@ func _bedroom_skybox() -> void:
 					and absf(eye_left) > 3.0 and absf(eye_right) > 3.0
 					and absf(eye_swing.x) <= 14.5 and absf(eye_swing.y) <= 10.5,
 					"Eye_L and Eye_R bones track left/right gaze targets smoothly within anatomical clamp")
-			# Change-driven refresh wiring: every animation tick ends with a
-			# mark_dirty() call, so asserting the skybox reference plus live
-			# ticking proves the bedroom re-renders while the camera rests.
 			var anim_t0: float = yumeka.debug_anim_time()
 			for frame in 90:
 				await physics_frame
 			_check(yumeka.debug_sky_wired()
 					and yumeka.debug_anim_time() - anim_t0 > 0.12,
-					"Yumeka breathing/blink ticks run at low frequency wired to mark_dirty")
+					"Yumeka breathing/blink ticks run continuously in the single 3D world")
 	else:
 		_check(yumeka == null,
 				"missing licensed Yumeka asset skips the mount silently")
+
+
+func _count_non_layer_in(node: Node, expected_layer: int) -> int:
+	var bad := 1 if (node is VisualInstance3D and (node as VisualInstance3D).layers != expected_layer) else 0
+	for child in node.get_children():
+		bad += _count_non_layer_in(child, expected_layer)
+	return bad
 
 
 func _count_collisions_in(node: Node) -> int:
@@ -262,12 +270,13 @@ func _day_night_and_settings() -> void:
 	var dn: Node = _game.get_node_or_null("DayNight")
 	var sun: DirectionalLight3D = _game.get_node_or_null("Sun") as DirectionalLight3D
 	var atmo: WorldEnvironment = _game.get_node_or_null("Atmosphere") as WorldEnvironment
-	var bedroom: Node3D = _game.get_node_or_null("Skybox/BedroomViewport/Bedroom") as Node3D
+	var bedroom: Node3D = _game.get_node_or_null("Skybox/Bedroom") as Node3D
 	var desk_lamp: OmniLight3D = bedroom.call("get_desk_lamp_light") if bedroom != null else null
 	_check(dn != null and sun != null and atmo != null and atmo.environment != null
 			and atmo.environment.tonemap_mode == Environment.TONE_MAPPER_AGX
+			and atmo.environment.background_mode == Environment.BG_SKY
 			and desk_lamp != null,
-			"DayNight controller, AGX main environment, and bedroom DeskLampLight initialize")
+			"DayNight controller, unified AGX BG_SKY environment, and bedroom DeskLampLight initialize")
 	if dn == null or sun == null or desk_lamp == null:
 		return
 
@@ -318,42 +327,39 @@ func _day_night_and_settings() -> void:
 				and String(dn.call("get_mode")) == "night",
 				"time_of_day persists to gameplay.cfg across all modes and restores on reload")
 
-	# Verify day / dusk / night transitions, city emission mask precision, F7 shortcut,
-	# giant looming shadow linkage, backdrop atmospheric haze shader, and zero city dynamic lights.
+	# Verify day / dusk / night transitions, unified BG_SKY clouds/stars, F7 shortcut,
+	# giant looming shadow linkage, Layer 2 FP16-safe desk lamp energy, and zero city dynamic lights.
 	var sky: Node = _game.get_node_or_null("Skybox")
-	var bg_mat: ShaderMaterial = sky.call("get_backdrop_shader_material") if sky != null and sky.has_method(&"get_backdrop_shader_material") else null
+	var sky_mat: ShaderMaterial = dn.call("get_sky_shader_material") if dn.has_method(&"get_sky_shader_material") else null
 	var yumeka_present: bool = sky != null and sky.has_method(&"is_yumeka_mounted") and bool(sky.call(&"is_yumeka_mounted"))
 	dn.call("set_mode", "day")
 	await process_frame
 	var sh_day: float = float(dn.call("get_giant_shadow_strength"))
-	var haze_day: float = float(bg_mat.get_shader_parameter(&"haze_strength")) if bg_mat != null else -1.0
+	var clouds_day: float = float(sky_mat.get_shader_parameter(&"cloud_opacity")) if sky_mat != null else -1.0
+	var stars_day: float = float(sky_mat.get_shader_parameter(&"star_strength")) if sky_mat != null else -1.0
 	var day_ok: bool = is_zero_approx(float(dn.call("get_night_glow"))) \
 			and not desk_lamp.visible and sun.light_energy > 0.85
 	dn.call("set_mode", "dusk")
 	await process_frame
 	var sh_dusk: float = float(dn.call("get_giant_shadow_strength"))
-	var haze_dusk: float = float(bg_mat.get_shader_parameter(&"haze_strength")) if bg_mat != null else -1.0
 	var dusk_glow: float = float(dn.call("get_night_glow"))
 	var dusk_ok: bool = dusk_glow > 0.25 and dusk_glow < 0.65 \
 			and desk_lamp.visible and sun.light_color.r > sun.light_color.b + 0.35
 	dn.call("set_mode", "night")
 	await process_frame
 	var sh_night: float = float(dn.call("get_giant_shadow_strength"))
-	var haze_night: float = float(bg_mat.get_shader_parameter(&"haze_strength")) if bg_mat != null else -1.0
+	var stars_night: float = float(sky_mat.get_shader_parameter(&"star_strength")) if sky_mat != null else -1.0
 	var night_ok: bool = float(dn.call("get_night_glow")) > 0.95 \
-			and desk_lamp.visible and desk_lamp.light_energy > 1.0 \
+			and desk_lamp.visible and desk_lamp.light_energy > 100.0 and desk_lamp.light_energy * PI < 20000.0 \
+			and desk_lamp.light_cull_mask == 2 \
 			and sun.light_color.b > sun.light_color.r + 0.25
 	_check(day_ok and dusk_ok and night_ok,
-			"day, dusk, and night presets synchronize Sun, city night glow, and bedroom DeskLampLight")
-	var blur_px: float = float(bg_mat.get_shader_parameter(&"blur_radius_px")) if bg_mat != null else -1.0
+			"day, dusk, and night presets synchronize Sun, city night glow, and FP16-safe Layer 2 DeskLampLight")
 	var shadow_ok := (sh_day > 0.50 and sh_dusk > 0.50 and sh_night > 0.05 and sh_night < sh_day * 0.6) \
 			if yumeka_present else is_zero_approx(sh_day)
-	_check(bg_mat != null and blur_px >= 0.55 and blur_px <= 1.05
-			and haze_day >= 0.04 and haze_day <= 0.075
-			and haze_dusk >= 0.04 and haze_dusk <= 0.075
-			and haze_night >= 0.035 and haze_night <= 0.075
+	_check(sky_mat != null and clouds_day > 0.4 and stars_day < 0.05 and stars_night > 0.9
 			and shadow_ok,
-			"backdrop micro-blur/haze shader and city-wide giant looming shadow scale cleanly with day/dusk/night")
+			"unified dynamic sky shader (clouds/stars) and city-wide giant looming shadow scale cleanly with day/dusk/night")
 
 	# F7 debug shortcut cycles day -> dusk -> night -> day cleanly.
 	dn.call("set_mode", "day")
@@ -2539,8 +2545,9 @@ func _desk_hazards_finger_poke() -> void:
 	var start_wrist_err: float = (s_start.wrist_pos as Vector3).distance_to(rest_hand_start)
 	var hand_has_no_colliders := _count_collisions_in(hazards) == 0
 	var giants_unchanged := int(round.snapshot().giant_count) == giants_before
-	var rig_ok := bool(s_start.using_placeholder) or (bool(s_start.has_skeleton)
-			and int(s_start.bone_count) == 20
+	var rig_ok := bool(s_start.using_placeholder) or (bool(s_start.using_real_yumeka)
+			and not bool(s_start.placeholder_visible)
+			and bool(s_start.has_skeleton) and int(s_start.bone_count) > 100
 			and float(s_start.arm_l1) > 900.0 and float(s_start.arm_l1) < 1300.0
 			and float(s_start.arm_l2) > 950.0 and float(s_start.arm_l2) < 1400.0)
 	_check(bool(s_start.active) and String(s_start.phase) == "raise"
@@ -2550,9 +2557,9 @@ func _desk_hazards_finger_poke() -> void:
 			and int(round.hazard_warning_count()) == 1
 			and start_wrist_err < 15.0 and float(s_start.gesture_weight) < 0.05
 			and rig_ok,
-			"F8 starts finger_poke in RAISE directly from desk rest_pos (zero teleport, 20-bone rig & L1/L2 measured)")
+			"F8 starts finger_poke in RAISE on Yumeka's real full Skeleton3D from desk rest_pos (zero teleport, no detached relay)")
 	_check(hand_has_no_colliders and giants_unchanged,
-			"foreground hand carries zero colliders and never registers into giants/rivals (strictly unattackable)")
+			"desk hazard arm carries zero colliders and never registers into giants/rivals (strictly unattackable)")
 
 	# Place the rival AI inside the 110 m warning circle; during RAISE verify smooth elbow lift,
 	# natural elbow bend, smooth gesture interpolation (0 -> 1) and immediate Phase 4 AI evasion.
@@ -2579,24 +2586,20 @@ func _desk_hazards_finger_poke() -> void:
 			"RAISE lifts elbow naturally with smooth bend and continuous finger gesture blend (0 -> 1)")
 	_check(ai_evaded, "Phase 4 AI inside the desk hazard warning circle immediately switches to evade")
 
-	# Verify background Yumeka hides her right arm from UpperArm_R (zero double-hand/hollow-cuff),
-	# exposes valid desk rest Hand_R coordinates, and foreground arm root anchors onto real right shoulder.
+	# Verify Yumeka's REAL full-body skeleton drives the arm directly (no collapsed UpperArm_R,
+	# no placeholder arm shown, real Hand_R tracks IK wrist target with subtle Chest/Shoulder lean).
 	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
 		await _ticks(4)
-		var relay: Dictionary = yumeka.call("debug_hazard_relay_state")
-		var sh_main: Vector3 = yumeka.call("get_right_shoulder_main_world_pos")
-		var hand_rest_main: Vector3 = yumeka.call("get_right_hand_rest_main_world_pos")
-		var ua_room: Vector3 = yumeka.call("debug_bone_pos", "UpperArm_R")
-		var hand_room: Vector3 = yumeka.call("debug_bone_pos", "Hand_R")
+		var ik_st: Dictionary = yumeka.call("debug_right_arm_ik_state")
+		var ua_world: Vector3 = yumeka.call("debug_bone_world_pos", "UpperArm_R")
+		var hand_world: Vector3 = yumeka.call("debug_bone_world_pos", "Hand_R")
 		var st_now: Dictionary = hazards.debug_state()
-		var arm_root: Vector3 = st_now.arm_root_pos
-		_check(bool(relay.active) and bool(relay.arm_hidden)
-				and float(relay.right_arm_scale) < 0.01
-				and hand_room.distance_to(ua_room) < 0.01
-				and sh_main.z > 2000.0 and sh_main.y > 500.0
-				and hand_rest_main.x > 800.0 and hand_rest_main.z > 900.0
-				and arm_root.distance_to(sh_main) < 10.0,
-				"background Yumeka collapses UpperArm_R, exports desk Hand_R rest, and foreground arm anchors to shoulder")
+		_check(bool(ik_st.active) and float(ik_st.lean) > 0.05
+				and not bool(st_now.placeholder_visible)
+				and ua_world.z > 2000.0 and ua_world.y > 500.0
+				and hand_world.distance_to(ua_world) > 1000.0
+				and hand_world.distance_to(st_now.wrist_pos as Vector3) < 10.0,
+				"Yumeka's real Skeleton3D drives UpperArm_R -> LowerArm_R -> Hand_R directly with subtle lean (zero relay collapse)")
 
 	# Advance through WINDUP (1.75 s) to touchdown (HOLD) and verify impact resolution & fingertip accuracy.
 	var saw_windup := false
@@ -2614,14 +2617,19 @@ func _desk_hazards_finger_poke() -> void:
 	var s_hold: Dictionary = hazards.debug_state()
 	var impact_info: Dictionary = s_hold.last_impact
 	var tip_err: float = (s_hold.fingertip_pos as Vector3).distance_to(target)
+	var curled_clear := true
+	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
+		for bn in ["MiddleDistal_R", "RingDistal_R", "LittleDistal_R", "ThumbDistal_R"]:
+			if (yumeka.call("debug_bone_world_pos", bn) as Vector3).y < 100.0:
+				curled_clear = false
 	_check(saw_windup and hit_hold and int(round.hazard_warning_count()) == 0
 			and not bool(s_hold.warning_visible) and bool(s_hold.hand_visible)
-			and tip_err < 25.0
+			and tip_err < 25.0 and curled_clear
 			and int(impact_info.get("buildings_destroyed", 0)) > 0
 			and int(round.snapshot().destroyed) > destroyed_before
 			and int(impact_info.get("giants_hit", 0)) >= 1
 			and int(impact_info.get("giants_defeated", 0)) >= 1,
-			"finger_poke touchdown lands fingertip on target, clears warning, destroys buildings and crushes units")
+			"finger_poke touchdown lands real fingertip on target with curled fingers clear, destroys buildings and crushes units")
 
 	# Advance through HOLD (0.5 s) -> RETRACT (0.65 s) -> RETURN (0.75 s) and verify smooth landing back at rest_pos.
 	var saw_retract := false
@@ -2649,19 +2657,18 @@ func _desk_hazards_finger_poke() -> void:
 			and last_return_gesture < 0.15
 			and not bool(s_idle.hand_visible) and not bool(s_idle.warning_visible)
 			and not bool(s_idle.shadow_visible) and int(round.hazard_warning_count()) == 0,
-			"arm glides back to desk rest_pos (gesture -> 0.0) in RETURN before hiding and resetting cleanly")
+			"arm glides back to desk rest_pos (gesture -> 0.0) in RETURN and resets cleanly to idle")
 
 	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
 		await _ticks(6)
-		var relay_done: Dictionary = yumeka.call("debug_hazard_relay_state")
-		var ua_rest: Vector3 = yumeka.call("debug_bone_pos", "UpperArm_R")
-		var hand_rest: Vector3 = yumeka.call("debug_bone_pos", "Hand_R")
-		_check(not bool(relay_done.active) and not bool(relay_done.arm_hidden)
-				and float(relay_done.right_arm_scale) > 0.98
-				and hand_rest.distance_to(ua_rest) > 0.15,
-				"background Yumeka right arm restores seamlessly to full scale and seated desk rest after RETURN")
+		var ik_done: Dictionary = yumeka.call("debug_right_arm_ik_state")
+		var hand_rest_room: Vector3 = yumeka.call("debug_bone_pos", "Hand_R")
+		_check(not bool(ik_done.active) and is_zero_approx(float(ik_done.lean))
+				and hand_rest_room.y > 0.74 and hand_rest_room.y < 0.88
+				and hand_rest_room.x > 0.12,
+				"Yumeka real right arm restores seamlessly to SeatedPose desk rest after RETURN")
 
-	# 5. Missing Yumeka GLB graceful placeholder fallback runs the identical 5-phase zero-teleport curve.
+	# 5. Missing Yumeka_seated.glb graceful placeholder fallback runs the identical 5-phase zero-teleport curve.
 	hazards.debug_force_placeholder(true)
 	var ph_started: bool = bool(hazards.trigger_finger_poke(Vector3(0.0, 0.0, 0.0)))
 	var s_ph: Dictionary = hazards.debug_state()
@@ -2674,15 +2681,17 @@ func _desk_hazards_finger_poke() -> void:
 			break
 		await physics_frame
 	_check(ph_started and bool(s_ph.active) and bool(s_ph.using_placeholder)
+			and bool(s_ph.placeholder_visible)
 			and String(s_ph.phase) == "raise"
 			and (s_ph.wrist_pos as Vector3).distance_to(s_ph.rest_hand_pos as Vector3) < 15.0
 			and bool(s_ph.hand_visible) and ph_meshes.size() >= 6
 			and _count_collisions_in(hazards) == 0
 			and ph_phases.has("raise") and ph_phases.has("windup") and ph_phases.has("hold")
 			and ph_phases.has("retract") and ph_phases.has("return") and ph_phases.has("idle"),
-			"missing Yumeka_hand_relay.glb placeholder runs full 5-phase zero-teleport curve with zero colliders")
+			"missing Yumeka_seated.glb placeholder runs full 5-phase zero-teleport curve with zero colliders")
 
-	# Leaving round mid-hazard cleans up cleanly back to title & resets Yumeka relay.
+	# Leaving round mid-hazard cleans up cleanly back to title & releases Yumeka IK.
+	hazards.debug_force_placeholder(false)
 	hazards.trigger_finger_poke(Vector3(0.0, 0.0, 0.0))
 	await _ticks(4)
 	_game.save_all_mode_settings(
@@ -2691,8 +2700,8 @@ func _desk_hazards_finger_poke() -> void:
 	_game.show_menu()
 	await _ticks(4)
 	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
-		_check(not bool(yumeka.call("debug_hazard_relay_state").active),
-				"returning to title mid-hazard immediately clears background Yumeka relay")
+		_check(not bool(yumeka.call("debug_right_arm_ik_state").active),
+				"returning to title mid-hazard immediately releases Yumeka real-skeleton right-arm IK")
 
 
 func _ankle(giant: CharacterBody3D, side: String) -> Vector3:

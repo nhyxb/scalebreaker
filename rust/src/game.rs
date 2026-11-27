@@ -101,7 +101,7 @@ impl INode3D for HarborGame {
                 .set_param(godot::classes::light_3d::Param::SHADOW_MAX_DISTANCE, 95.0);
             let mut overview = self.base().get_node_as::<Camera3D>("Overview");
             overview.set_meta("district_draw_distance", &280.0_f32.to_variant());
-            overview.set_far(590.0);
+            overview.set_far(50000.0);
         }
         self.present("menu");
     }
