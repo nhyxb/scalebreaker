@@ -382,7 +382,7 @@ func _idle_sit_stands_when_someone_appears() -> void:
 	})
 	_place(0, FAR_AWAY)
 	_place(1, OPEN_STREET)
-	var sat := await _wait_phase(1, "hold", 520)
+	var sat := await _wait_phase(1, "hold", 660)
 	_check(sat, "A maxed-out AI giant with an empty horizon sits down to idle")
 	_check(bool(_actor(1).get("sit_idle", false)), "The idle sit is flagged separately from a sit-crush")
 	_place(0, OPEN_STREET + Vector3(0.0, 0.0, -60.0))

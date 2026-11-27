@@ -701,7 +701,7 @@ func _verify_preview_scene_end_to_end() -> void:
 		preview.set_camera_preset(preset)
 	preview.start_walk_transition_test()
 	var walk_saw_turn := false
-	for f in 340:
+	for f in 380:
 		var stw: Dictionary = preview.step_preview(dt)
 		if String(stw["phase"]) == "turn":
 			walk_saw_turn = true

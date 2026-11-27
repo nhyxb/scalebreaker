@@ -121,15 +121,19 @@ func _check_demolition() -> void:
 			and not round.has_node("Human") and round.get_node("Civilians").get_child_count() == 0,
 			"The harbor menu opens an all-giant round with Growth building durability")
 	var building: Node3D = round.get_node("District/Targets/DockPress1")
-	for hit in 14:
-		await FootfallFixture.strike_building(round, building)
+	await FootfallFixture.strike_building(round, building)
+	_check(building.get_node("BlockingBody").collision_layer == 8 and not building.get("_cracked")
+			and round.snapshot().giant_destroyed == 0,
+			"Below touch-crush height walking does not damage a building in Brawl")
+	for hit in 10:
+		await FootfallFixture.sit_building(round, building)
 		if building.get_node("BlockingBody").collision_layer == 0:
 			break
 	state = round.snapshot()
 	_check(building.get_node("BlockingBody").collision_layer == 0
 			and state.giant_destroyed == 1 and state.growth_count == 0
 			and is_equal_approx(state.giant_height, 3.0) and round.get_node("Coins").get_child_count() == 0,
-			"Footfall demolition awards neither height nor a coin")
+			"Active demolition awards neither height nor a coin")
 	_game.pause()
 	_game.restart()
 	await _ticks(2)

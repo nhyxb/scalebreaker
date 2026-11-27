@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-11-27 — 巨人重步贴墙/转向修正、轴心换步、后退行走与如履平地规则重构
+
+备份位置：`backups/20261127_191625_heavy_step_fixes/`（`BASE_COMMIT` 记录基准提交 `7d9d44044d4858095c1469683e00e53c9e9890a6`，含 `rust_src`、`scenes`、`scripts`、`tests`、`CHANGELOG.md`、`MEMORY.md` 等完整快照）。提交后可用 `git revert <本次提交>` 回滚整组改动，或从备份目录手动恢复。
+
+- **顶墙与障碍物站姿防扭曲**（`scenes/giant_visual.gd`）：当移动受阻或实际水平位移远低于期望输入时，衰减步态侧倾（`roll`）与前倾（`lean`）；`_constrain_ankle_ik()` 在角色局部空间强制限制左右脚防跨中线（并仅在 `_blocked_weight > 0.05` 时有限度回写被顶偏的锚点），避免贴墙或顶建筑时骨盆和支撑腿严重歪斜扭曲。
+- **轴心换步转弯（Pivot-and-Step）与低速防小碎步**（`scenes/giant_visual.gd`、`rust/src/round.rs`）：
+  - 严禁随身体旋转滑动已踩地的支撑脚锚点（保持真实世界踩地不打滑）；`stance_turn_target()` 在单脚撑地期把骨盆相对撑地脚的扭转角限制在 `±STANCE_PELVIS_TWIST_MAX`（`0.52 rad ≈ 29.8°`），主要在摆动腿前摆与换脚落地的转移窗口（`smoothstep(0.28, 0.88, ...)`）顺势将躯干与下一脚落点转正（最大转向角 `PIVOT_STEP_MAX_YAW = 1.25 rad`）。
+  - 迈步相位仅由沿身体前后轴的实际有效位移驱动，禁止原地转向、低速扭转或长按异向方向键触发高频小碎步和密集重叠脚印；`score_intents()` 同步修正未锁定人类目标时进攻权重与文档注释的一致性。
+- **如履平地分段建筑穿行与拆楼规则**（`rust/src/round.rs`、`rust/src/round/hands.rs`、`rust/src/round/growth.rs`、`rust/src/rules.rs`、`rust/src/round/sit.rs`）：
+  - 达到如履平地阈值（`can_crush_buildings` 解锁）后，从巨人 `collision_mask` 排除 `BUILDING_LAYER`（`8`）与 `RUBBLE_LAYER`（`16`），迈步直接无阻挡穿过建筑并由 `crush_touched_buildings()` 触发倒塌。
+  - 未达如履平地高度时，步行落脚（`DefeatMethod::Step`）不再伤害或摧毁建筑（对小体型人类/对手仍可正常踩击），拆楼改由 `E` 挥拳、`Q` 抓取、`X` 坐压主动攻击完成，并新增 `start_ai_scenery_hand_move()` 供未解锁如履平地高度的 AI 挥拳/抓压拆楼；同步修复连续重步期间 `idle_sit` 因 `actor.footfall.is_some()` 仅在双支撑少数帧判定导致触发率骤降的问题。
+- **大体型改为抬脚最高点悬停延长与 `S` 真倒退行走**（`rust/src/rules.rs`、`scenes/giant_visual.gd`、`rust/src/round.rs`、`rust/src/round/growth.rs`）：
+  - 新增 `giant_size_speed_factor(scale)` 取消“体型越大整体移速一味变慢”，改为高体型通过 `_swing_hover_bounds(body_ratio)` 拉长抬腿至最高点时的悬停滞空占比，下落踩地保持干脆重力节奏。
+  - 玩家按 `S` 后退时保持正面朝前（对齐相机朝向、不瞬间 180° 转身），按 `GIANT_BACKWARD_MULT`（`0.74`）移动，并由 `giant_visual.gd`（`BACKWARD_STEP_RATIO = 0.82`）驱动反向交替倒退步态与落脚判定。
+
+### 回归（最新代码运行结果）
+
+- 零 Yumeka 资产：`git ls-files assets/characters/yumeka/` 为空（`YUMEKA=0`）。
+- Rust：`cargo build --locked` 通过；`cargo test --locked` **55/55** 通过；`godot --headless --path . --quit-after 5` 退出码 `0`。
+- 8 套 Godot `--headless` 回归总计 **720/720** 通过：`audio_playtest` 35/35、`brawl_playtest` 48/48、`growth_playtest` 203/203、`mode_menu_playtest` 45/45、`playtest` 245/245、`sit_crush_gameplay_playtest` 44/44、`sit_crush_playtest` 58/58、`touch_playtest` 42/42（测试同步覆盖：贴墙不歪、急转/长按异向无小碎步与零撑地打滑、未达门槛走路不拆楼、达门槛穿楼倒塌、`S` 倒退不转身、大体型悬停更久及空视野闲置坐下）。
+
+### 隔离视觉核验
+
+在 Pivot-and-Step 收敛及两项测试/闲置坐下微调之前，已用完本轮上限 **2 轮**（第 2 轮 3 张）隔离 `Xvfb :97` 实机 GPU 截图核验（`1280×720`，`Vulkan 1.4.357 - Forward Mobile`，`NVIDIA GeForce RTX 3050 Ti Laptop GPU`，未占用真实桌面、未测帧率）：第 2 轮确认 25.20 m 顶墙站姿端正（`blocked=1.0, roll=0.0035, lean=0.0`）、88.20 m 高体型抬脚最高点悬停自然（`lift=17.83 m, hover_secs=0.607 s`）以及 Growth >=40 m `"触碰碾压已解锁"` 直接穿楼倒塌无卡脚（`mask=7`）；后续 Pivot-and-Step 与 `idle_sit` 改动则通过上述全部 `--headless` 回归验证（`playtest.gd` 实测 149° 异向按键 2 步完成、高速旋转镜头期间支撑脚零打滑且双腿无跨中线）。
+
+---
+
 ## 2026-11-27 — 巨人重步、鞋底命中与地面鞋印
 
 改动前快照在 `backups/20261127_182226_heavy_footfalls/`，含场景、Rust 源码、测试和文档。`BASE_COMMIT` 记录改动前提交。已提交后可用 `git revert <本次提交>` 回滚整组改动。

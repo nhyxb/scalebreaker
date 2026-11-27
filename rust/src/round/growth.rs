@@ -1062,9 +1062,9 @@ impl HarborRound {
         }
         let speed = if player { GIANT_WALK } else { AI_WALK };
         let size = if self.growth_rules.is_some() {
-            actor.scale.min(1.0)
+            giant_size_speed_factor(actor.scale)
         } else {
-            1.0
+            giant_size_speed_factor(actor.scale.max(1.0))
         };
         speed * size * self.settings.giant_speed
     }

@@ -3,7 +3,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::time::Instant;
 
 use godot::classes::{
-    Camera3D, CapsuleShape3D, CharacterBody3D, CollisionObject3D, CollisionShape3D, Input, InputEvent,
+    Camera3D, CapsuleShape3D, CharacterBody3D, CollisionShape3D, Input, InputEvent,
     InputEventMouseButton, InputEventMouseMotion, KinematicCollision3D, PackedScene,
     PhysicsDirectSpaceState3D, PhysicsRayQueryParameters3D, SphereShape3D, SpringArm3D,
     StaticBody3D,
@@ -727,6 +727,8 @@ impl Giant {
         stride: u8,
         turn_target: f32,
         allow_standing_turn: bool,
+        backward: bool,
+        blocked: bool,
     ) -> AnimateStep {
         self.visual_wait = self.visual_wait.saturating_sub(1);
         if stride <= 1 {
@@ -754,6 +756,8 @@ impl Giant {
                     delta.to_variant(),
                     turn_target.to_variant(),
                     allow_standing_turn.to_variant(),
+                    backward.to_variant(),
+                    blocked.to_variant(),
                 ],
             )
         };
@@ -1272,7 +1276,12 @@ impl INode3D for HarborRound {
                 None
             }
         });
+        let camera_forward = Vector3::FORWARD.rotated(Vector3::UP, self.yaw);
         let direction = Vector3::new(axes.x, 0.0, axes.y).rotated(Vector3::UP, self.yaw);
+        let backward_input = self.player == PlayerRole::Giant
+            && direction.length_squared() > 0.0001
+            && axes.y > 0.20
+            && direction.normalized_or_zero().dot(camera_forward) < -0.20;
         if self.state.outcome == Outcome::Active {
             if self.player == PlayerRole::Spectator {
                 self.move_spectator(axes, dt);
@@ -1378,6 +1387,7 @@ impl INode3D for HarborRound {
                 actor,
                 player,
                 direction,
+                player && backward_input,
                 hand_pressed,
                 stand_pressed,
                 dt,
@@ -1492,17 +1502,40 @@ impl HarborRound {
         actor: &mut Giant,
         player: bool,
         direction: Vector3,
+        backward_input: bool,
         hand_pressed: Option<HandMove>,
         stand_pressed: bool,
         dt: f32,
     ) {
         if self.state.outcome != Outcome::Active {
-            actor.animate(0.0, dt, 1, f32::NAN, false);
+            actor.animate(0.0, dt, 1, f32::NAN, false, false, false);
             actor.footfall = None;
             return;
         }
         let mut giant = actor.body.clone();
         actor.sit_in = (actor.sit_in - dt).max(0.0);
+        let can_demolish = self.can_demolish(actor);
+        let can_crush = self.can_crush_buildings(actor);
+        {
+            let current_mask = giant.get_collision_mask();
+            // Once touch-crush is unlocked, ignore building colliders completely so footsteps
+            // pass straight through instead of snagging on facades.
+            let mut new_mask = if can_crush {
+                current_mask & !BUILDING_LAYER
+            } else {
+                current_mask | BUILDING_LAYER
+            };
+            if self.growth_rules.is_some() {
+                new_mask = if can_crush {
+                    new_mask & !RUBBLE_LAYER
+                } else {
+                    new_mask | RUBBLE_LAYER
+                };
+            }
+            if new_mask != current_mask {
+                giant.set_collision_mask(new_mask);
+            }
+        }
 
         // Sitting (or being sat on) owns the whole body: no input, no AI, no other attack.
         if actor.sit.is_some() || self.maybe_start_sit(actor, player, stand_pressed, dt) {
@@ -1537,36 +1570,82 @@ impl HarborRound {
                 actor.scale,
                 1.0,
             );
-            actor.animate(0.0, dt, 1, f32::NAN, false);
+            actor.animate(0.0, dt, 1, f32::NAN, false, false, false);
             actor.footfall = None;
             return;
         }
         let mut giant_direction = direction;
         let giant_speed = self.giant_speed(actor, player);
-        let can_demolish = self.can_demolish(actor);
-        if self.growth_rules.is_some() {
-            let current_mask = giant.get_collision_mask();
-            let new_mask = if self.can_crush_buildings(actor) {
-                current_mask & !RUBBLE_LAYER
-            } else {
-                current_mask | RUBBLE_LAYER
-            };
-            if new_mask != current_mask {
-                giant.set_collision_mask(new_mask);
-            }
-        }
         let fixed_walk_tempo = !can_demolish;
         if actor.fixed_walk_tempo != fixed_walk_tempo {
             actor.fixed_walk_tempo = fixed_walk_tempo;
             giant.set("fixed_walk_tempo", &fixed_walk_tempo.to_variant());
         }
+        let mut ai_hold_for_scenery: Option<Vector3> = None;
         if !player {
             giant_direction = self.pursue(actor, giant_speed, dt);
+            if self.ai_attacks_scenery(actor)
+                && !can_crush
+                && actor.intent != Intent::Evade
+                && actor.chase_target.is_none()
+                && let Some(scenery_idx) = actor.blocking_target.or(actor.building_target)
+                && self.targets[scenery_idx].footprint.building
+                && self.targets[scenery_idx].integrity.blocks()
+                && !self.targets[scenery_idx].grabbed
+            {
+                let pos = giant.get_global_position();
+                let height = actor.height(self.max_height);
+                let target_fp = self.targets[scenery_idx].footprint;
+                let surface = closest_surface_point(target_fp, pos);
+                let dist = horizontal(surface - pos).length();
+                let to_surface = horizontal(surface - pos).normalized_or_zero();
+                let hand_range = if target_fp.size.y * 0.93 >= height * 0.27 {
+                    height * 0.34
+                } else if height + 0.05 >= 3.0 * target_fp.size.y {
+                    height * 0.25
+                } else {
+                    0.0
+                };
+                let sit_range = actor.sit_radius() * 1.05;
+                let engage_range = hand_range
+                    .max(sit_range)
+                    .max(GIANT_RADIUS * actor.scale + 0.45 * actor.scale);
+                if dist <= engage_range && to_surface.length_squared() > 0.0001 {
+                    if self.start_ai_scenery_hand_move(actor, scenery_idx) {
+                        actor.standing_pivot_active = false;
+                        actor.was_walking = false;
+                        return;
+                    }
+                    let forward = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
+                    let aligned_for_hand = forward.dot(to_surface) >= 0.78;
+                    if !aligned_for_hand && hand_range > 0.0 && dist <= hand_range && Self::ready_for_hand_move(actor) {
+                        ai_hold_for_scenery = Some(to_surface);
+                    } else if actor.sit_in <= 0.0
+                        && dist <= sit_range
+                        && self.maybe_start_ai_building_sit(actor, surface)
+                    {
+                        actor.standing_pivot_active = false;
+                        actor.was_walking = false;
+                        actor.footfall = None;
+                        actor.pending_hand = None;
+                        self.drive_sit(actor, dt, false);
+                        return;
+                    } else if dist <= GIANT_RADIUS * actor.scale + 0.35 * actor.scale
+                        || actor.blocking_target.is_some()
+                        || (!Self::ready_for_hand_move(actor) && dist <= hand_range.max(sit_range))
+                    {
+                        // Stand ready facing the facade while a swing finishes or before punching,
+                        // rather than grinding pelvis/legs into an indestructible wall.
+                        ai_hold_for_scenery = Some(to_surface);
+                    }
+                }
+            }
         } else if actor.human {
             // Humans have no active attacks; smaller humans can take a body check.
             actor.pending_hand = None;
         } else {
-            actor.pending_hand = hand_pressed.or(actor.pending_hand);
+            let floored = giant.is_on_floor();
+            actor.pending_hand = hand_pressed.or(actor.pending_hand.filter(|_| floored));
             if let Some(kind) = actor.pending_hand {
                 actor.standing_pivot_active = false;
                 if Self::ready_for_hand_move(actor) {
@@ -1624,9 +1703,22 @@ impl HarborRound {
         } else {
             None
         };
-        let turn_intent = steer_dir.unwrap_or(giant_direction);
+        let camera_fwd = Vector3::FORWARD.rotated(Vector3::UP, self.yaw);
+        let backpedal = player
+            && !actor.human
+            && backward_input
+            && actor.pending_hand.is_none()
+            && ai_hold_for_scenery.is_none();
+        if ai_hold_for_scenery.is_some() {
+            giant_direction = Vector3::ZERO;
+        }
+        let turn_intent = if backpedal {
+            camera_fwd
+        } else {
+            ai_hold_for_scenery.or(steer_dir).unwrap_or(giant_direction)
+        };
         let mut standing_pivot_target: Option<f32> = None;
-        if actor.human {
+        if actor.human || backpedal {
             actor.standing_pivot_active = false;
         } else if turn_intent.length_squared() > 0.0001 {
             let target_yaw = (-turn_intent.x).atan2(-turn_intent.z);
@@ -1661,6 +1753,19 @@ impl HarborRound {
         } else {
             (Vector3::ZERO, Vector3::ZERO)
         };
+        let drive_turn_dir = if !actor.human
+            && standing_pivot_target.is_none()
+            && turn_dir.length_squared() > 0.0001
+        {
+            let raw_yaw = (-turn_dir.x).atan2(-turn_dir.z);
+            let allowed_yaw = giant
+                .call("stance_turn_target", &[raw_yaw.to_variant()])
+                .try_to::<f32>()
+                .unwrap_or(raw_yaw);
+            Vector3::FORWARD.rotated(Vector3::UP, allowed_yaw)
+        } else {
+            turn_dir
+        };
         let carry_vel = if !actor.human
             && move_dir.length_squared() <= 0.0001
             && actor.pending_hand.is_none()
@@ -1674,16 +1779,23 @@ impl HarborRound {
         };
         let desired_velocity = if move_dir.length_squared() > 0.0001 {
             if !actor.human {
-                // Walk along actual body forward so turning giants follow a real curved arc
-                // instead of crab-sliding sideways off their planted support foot.
                 let body_forward = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
-                let align = body_forward.dot(move_dir.normalized_or_zero());
-                let turn_speed_mult = if align >= 0.0 {
-                    0.50 + 0.50 * align
+                if backpedal {
+                    let back_dir = move_dir.normalized_or_zero();
+                    let align = body_forward.dot(-back_dir).clamp(0.0, 1.0);
+                    let turn_speed_mult = 0.55 + 0.45 * align;
+                    back_dir * (giant_speed * GIANT_BACKWARD_MULT * turn_speed_mult)
                 } else {
-                    (0.50 + 0.25 * align).max(0.25)
-                };
-                body_forward * (giant_speed * turn_speed_mult)
+                    // Walk along actual body forward so turning giants follow a real curved arc
+                    // instead of crab-sliding sideways off their planted support foot.
+                    let align = body_forward.dot(move_dir.normalized_or_zero()).clamp(-1.0, 1.0);
+                    let turn_speed_mult = if align >= 0.0 {
+                        0.48 + 0.52 * align
+                    } else {
+                        0.42 + 0.06 * (1.0 + align)
+                    };
+                    body_forward * (giant_speed * turn_speed_mult)
+                }
             } else {
                 move_dir * giant_speed
             }
@@ -1724,7 +1836,7 @@ impl HarborRound {
             &mut giant,
             &mut actor.yaw_velocity,
             vel_xz,
-            turn_dir,
+            drive_turn_dir,
             dt,
             actor.scale,
             turn_pace,
@@ -1743,6 +1855,9 @@ impl HarborRound {
         let actual_travel = horizontal(giant.get_global_position() - giant_position).length();
         actor.was_walking = move_dir.length_squared() > 0.0001
             && (requested_travel <= f32::EPSILON || actual_travel > requested_travel * 0.35);
+        if can_crush && (move_dir.length_squared() > 0.0001 || actual_travel > 0.002) {
+            self.crush_touched_buildings(actor, giant.get_global_position());
+        }
         if self.growth_rules.is_some() {
             self.check_growth_contacts(actor, giant_position, dt);
             if actor.health_fraction <= 0.0 {
@@ -1763,7 +1878,6 @@ impl HarborRound {
                 }
             }
         } else if ai_attacks_scenery && actor.blocking_target.is_none() {
-            let crush_buildings = self.can_crush_buildings(actor);
             actor.blocking_target = (0..giant.get_slide_collision_count())
                 .filter_map(|index| giant.get_slide_collision(index))
                 .filter_map(|collision| collision.get_collider())
@@ -1781,28 +1895,33 @@ impl HarborRound {
                         .find(|&index| {
                             let target = &self.targets[index];
                             target.integrity.blocks()
-                                && (!crush_buildings || !target.footprint.building)
+                                && (!can_crush || !target.footprint.building)
                                 && target.node.instance_id() == parent.instance_id()
                         })
                 });
         }
         // Giant step timing also drives damage and must advance every physics frame.
         let visual_stride = if actor.human { self.animation_stride(actor, giant_position) } else { 1 };
+        let actual_ground = ground_speed(&giant);
+        let travel_dir = desired_velocity.normalized_or_zero();
+        let req_len = desired_velocity.length();
+        let actual_vel = horizontal(giant.get_velocity());
+        let wall_opposing = giant.is_on_wall()
+            && (0..giant.get_slide_collision_count())
+                .filter_map(|index| giant.get_slide_collision(index))
+                .any(|collision| horizontal(collision.get_normal()).dot(travel_dir) < -0.25);
+        let progress = actual_vel.dot(travel_dir);
+        let blocked = !actor.human
+            && move_dir.length_squared() > 0.0001
+            && giant.is_on_wall()
+            && (actual_ground < req_len * 0.42
+                || progress < req_len * 0.38
+                || (wall_opposing && progress < req_len * 0.65));
         let speed = if move_dir.length_squared() > 0.0001 {
-            let actual = ground_speed(&giant);
-            let facing = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
-            let blocked_by_target = !actor.human
-                && actual < desired_velocity.length() * 0.65
-                && facing.dot(move_dir.normalized_or_zero()) > 0.85
-                && (0..giant.get_slide_collision_count())
-                    .filter_map(|index| giant.get_slide_collision(index))
-                    .any(|collision| collision.get_collider()
-                        .and_then(|node| node.try_cast::<CollisionObject3D>().ok())
-                        .is_some_and(|node| node.get_collision_layer() & (BUILDING_LAYER | 4) != 0));
-            if blocked_by_target || (micro_steps && !giant.is_on_wall()) {
-                desired_velocity.length()
+            if micro_steps && !giant.is_on_wall() {
+                req_len
             } else {
-                actual
+                actual_ground
             }
         } else {
             0.0
@@ -1815,6 +1934,8 @@ impl HarborRound {
         {
             if let Some(pivot_yaw) = standing_pivot_target {
                 (pivot_yaw, true)
+            } else if let Some(aim) = ai_hold_for_scenery {
+                ((-aim.x).atan2(-aim.z), true)
             } else if let Some(view_yaw) = steer_yaw {
                 (view_yaw, true)
             } else {
@@ -1823,7 +1944,15 @@ impl HarborRound {
         } else {
             (f32::NAN, false)
         };
-        match actor.animate(speed, dt, visual_stride, turn_target, allow_standing_turn) {
+        match actor.animate(
+            speed,
+            dt,
+            visual_stride,
+            turn_target,
+            allow_standing_turn,
+            backpedal,
+            blocked,
+        ) {
             AnimateStep::GiantFootfall(footfall) => self.resolve_footfall(actor, footfall),
             AnimateStep::HumanFootfall => {
                 if let Some(mut audio) = self.audio() {
@@ -3758,9 +3887,15 @@ impl HarborRound {
             .blocking_target
             .map(|index| self.targets[index].footprint);
         if let Some(target) = blocker.or(building).filter(|_| attacks_scenery && chase_goal.is_none()) {
+            if crush_buildings {
+                return horizontal(target.transform.origin - position).normalized_or_zero();
+            }
             let surface = closest_surface_point(target, position);
-            if horizontal(surface - position).length() <= footfall_reach(scale) * 1.15 {
-                // Walk into the nearest facade until an actual sole overlaps it.
+            let approach_range = (actor.height(self.max_height) * 0.34)
+                .max(footfall_reach(scale) * 1.15)
+                .max(GIANT_RADIUS * scale * 1.15);
+            if horizontal(surface - position).length() <= approach_range {
+                // Approach and face the nearest intact facade for Punch / GrabCrush / SitCrush.
                 return horizontal(surface - position).normalized_or_zero();
             }
         }
@@ -3914,7 +4049,12 @@ impl HarborRound {
                 }
             };
             if base > 0.0 {
-                attack = base * (0.45 + 0.55 * personality.aggression01());
+                let agg_weight = if target.rival.is_none() {
+                    0.85 + 0.15 * personality.aggression01()
+                } else {
+                    0.45 + 0.55 * personality.aggression01()
+                };
+                attack = base * agg_weight;
                 if chosen.is_some_and(|id| grudge == Some(id)) {
                     attack += personality.vengeance01() * 22.0;
                 }
@@ -4356,6 +4496,11 @@ impl HarborRound {
             if target.grabbed || !target.integrity.blocks() || !area.touches(target.footprint) {
                 continue;
             }
+            // Before touch-crush unlocks, walking footsteps cannot damage buildings;
+            // demolition requires active Punch / GrabCrush / SitCrush attacks.
+            if target.footprint.building && method == DefeatMethod::Step && !crush_buildings {
+                continue;
+            }
             let destroy_on_hit = (one_hit_buildings || crush_buildings) && target.footprint.building;
             let target_damage = if target.footprint.building {
                 building_damage
@@ -4475,6 +4620,64 @@ impl HarborRound {
             actor.replan_in = 0.0;
         }
     }
+
+    fn crush_touched_buildings(&mut self, actor: &mut Giant, position: Vector3) {
+        if !self.can_crush_buildings(actor) || !self.can_demolish(actor) {
+            return;
+        }
+        let radius = GIANT_RADIUS * actor.scale;
+        let rebuild_at = self.building_rebuild_time();
+        let mut any = false;
+        let indices: Vec<usize> = self
+            .target_grid
+            .near(position, radius)
+            .filter(|&index| {
+                let target = &self.targets[index];
+                target.footprint.building
+                    && !target.grabbed
+                    && target.integrity.blocks()
+                    && target.footprint.touches(position, radius)
+            })
+            .collect();
+        for index in indices {
+            self.strike += 1;
+            let rebuild = rebuild_at.is_some();
+            let target = &mut self.targets[index];
+            match target.integrity.hit(self.strike, f32::INFINITY, true) {
+                Damage::Destroyed => {
+                    let rubble = target.node.call(
+                        "strike",
+                        &[
+                            true.to_variant(),
+                            actor.body.to_variant(),
+                            rebuild.to_variant(),
+                        ],
+                    );
+                    if let Ok(body) = rubble.try_to::<Gd<StaticBody3D>>() {
+                        actor.rubble_passes.push((target.footprint, body));
+                    }
+                    if let Some(deadline) = rebuild_at {
+                        self.building_respawns.push((index, deadline));
+                    }
+                    actor.progress.destroyed += 1;
+                    self.destroyed_buildings += 1;
+                    self.reward_building_growth(actor);
+                    any = true;
+                }
+                Damage::Ignored | Damage::Cracked => {}
+            }
+        }
+        if any {
+            actor.replan_in = 0.0;
+            self.refresh_damage_targets(actor);
+            let area = ImpactArea {
+                center: position,
+                yaw: actor.body.get_rotation().y,
+                radii: Vector2::splat(radius),
+            };
+            self.show_impact(area, true, true, actor.scale.min(1.0));
+        }
+    }
 }
 
 /// Maximum sustained speed used to extrapolate a footfall target. Rival giants can move
@@ -4495,7 +4698,7 @@ fn ambush_uphill(
 
 fn footfall_lead_cap(rival_scale: Option<f32>, human_speed: f32, giant_speed: f32) -> f32 {
     match rival_scale {
-        Some(scale) => GIANT_WALK * giant_speed * scale.min(1.0),
+        Some(scale) => GIANT_WALK * giant_speed * giant_size_speed_factor(scale),
         None => HUMAN_SPRINT * human_speed,
     }
 }
@@ -4622,10 +4825,10 @@ fn turn_giant_smooth(
     let target_yaw = (-direction.x).atan2(-direction.z);
     let diff = godot::global::angle_difference(current_yaw as f64, target_yaw as f64) as f32;
 
-    let size_factor = scale.powf(-0.16).clamp(0.75, 1.0);
-    let max_speed = 3.4 * size_factor;
-    let stiffness = 22.0 * size_factor;
-    let damping = 9.0 * size_factor.sqrt();
+    let size_factor = scale.powf(-0.15).clamp(0.75, 1.0);
+    let max_speed = 3.50 * size_factor;
+    let stiffness = 26.0 * size_factor;
+    let damping = 9.2 * size_factor.sqrt();
 
     let accel = diff * stiffness - *yaw_vel * damping;
     *yaw_vel = (*yaw_vel + accel * dt).clamp(-max_speed, max_speed);
@@ -4752,8 +4955,14 @@ mod tests {
         assert_eq!(footfall_lead_cap(None, 1.0, 4.0), HUMAN_SPRINT);
         assert_eq!(footfall_lead_cap(None, 2.0, 4.0), HUMAN_SPRINT * 2.0);
         assert_eq!(footfall_lead_cap(Some(1.0), 1.0, 4.0), 28.0);
-        assert_eq!(footfall_lead_cap(Some(19.8), 1.0, 4.0), 28.0);
-        assert!(footfall_lead_cap(Some(1.0), 1.0, 4.0) > 26.0);
+        assert_eq!(footfall_lead_cap(Some(0.5), 1.0, 4.0), 14.0);
+        assert!(footfall_lead_cap(Some(19.8), 1.0, 4.0) > 28.0);
+        assert!(
+            (footfall_lead_cap(Some(19.8), 1.0, 4.0)
+                - super::GIANT_WALK * 4.0 * super::giant_size_speed_factor(19.8))
+            .abs()
+                < 1e-4
+        );
     }
 
     #[test]

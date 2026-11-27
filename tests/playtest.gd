@@ -881,28 +881,20 @@ func _walking_attack() -> void:
 	var giant := _actor(1)
 	var target: Node3D = current.get_node("District/Targets/DockPress3")
 	giant.call("_set_skin", &"Kawaii")
-	# Approach the left edge so the right shoe overlaps but the separate settling
-	# step beside it falls outside the building.
-	var contact := await FootfallFixture.strike_building(current, target, 0.0, -1.0, 3.8, -5.0)
-	_check(not contact.is_empty() and _has_strike_overlay(target) and current.snapshot().destroyed == 0,
-			"A heavy sole strike cracks a building once")
-	var landing_count := int(contact.get("footfall_count", 0))
-	var settled_count := landing_count
-	var no_duplicate := true
-	for frame in 140:
-		await physics_frame
-		var gait := FootfallFixture.actor(current)
-		var count := int(gait.footfall_count)
-		if count != settled_count:
-			no_duplicate = no_duplicate and count == landing_count + 1 \
-					and gait.last_footfall_left != contact.last_footfall_left
-			settled_count = count
-	_check(target.has_node("IntactModel") and _giant_has_scale(giant, 1.0) and no_duplicate,
-			"Keeping the same shoe planted does not deal another hit")
+	# Before touch-crush unlocks (6 destroyed), walking over open ground or facades never damages buildings.
+	var walk_contact := await FootfallFixture.strike_building(current, target, 0.0, -1.0, 3.8, -5.0)
+	_check(not walk_contact.is_empty() and not _has_strike_overlay(target)
+			and current.snapshot().destroyed == 0 and (giant.collision_mask & BUILDING_LAYER) != 0,
+			"Below touch-crush threshold a walking footfall leaves buildings intact")
+	await FootfallFixture.sit_building(current, target, 0.0)
+	_check(_has_strike_overlay(target) and current.snapshot().destroyed == 0,
+			"An active sit-crush cracks a building once")
+	_check(target.has_node("IntactModel") and _giant_has_scale(giant, 1.0),
+			"First hit keeps the intact model and base size")
 
-	await FootfallFixture.strike_building(current, target, 0.0, -1.0, 3.8, -5.0)
+	await FootfallFixture.sit_building(current, target, 0.0, -1.0, false)
 	_check(current.snapshot().destroyed == 1 and target.has_node("CollapseModel")
-			and _giant_has_scale(giant, 1.0), "The next heavy contact destroys the building and starts growth")
+			and _giant_has_scale(giant, 1.0), "The next sit-crush destroys the building and starts growth")
 	await _ticks(14)
 	var model: Node3D = giant.get_node("Model")
 	var arm: SpringArm3D = current.get_node("Orbit/Arm")
@@ -1170,47 +1162,35 @@ func _giant_layered_turn() -> void:
 			and max_pivot_disp < 0.15 and transitioned_to_walk and current.snapshot().destroyed == before_destroyed,
 			"standing 90-degree directional input pivots in place with zero-slip alternating small steps before walking")
 
-	# 4. Standing 180-degree Back input takes 4+ alternating ship-like small steps before walking,
-	#    and releasing input mid-step lands cleanly with zero slip.
+	# 4. Pressing Back (S) keeps the body facing the camera direction and plays a natural
+	#    backward walk without spinning 180 degrees or twisting the pelvis/legs.
 	giant.position = Vector3(0.0, 0.03, 36.0)
 	giant.rotation = Vector3.ZERO
 	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
 	await _ticks(12)
+	var back_fc_before := int(FootfallFixture.actor(current).footfall_count)
 	Input.action_press("move_back")
-	var steps_180 := 0
-	var slip_180 := 0.0
-	var walked_south := false
-	prev_l_planted = true
-	prev_r_planted = true
-	prev_l_mode = -1
-	prev_r_mode = -1
-	for frame in 210:
+	var back_max_yaw_err := 0.0
+	var back_saw_pivot := false
+	var back_mode_active := false
+	var back_max_roll := 0.0
+	var back_legs_clean := true
+	for frame in 95:
 		await physics_frame
 		var tel: Dictionary = giant.get_turn_telemetry()
-		var in_pivot := bool(tel["standing_turning"]) or bool(tel["standing_step_active"])
-		var l_pl: bool = tel["left_planted"]
-		var r_pl: bool = tel["right_planted"]
-		var l_mode: int = tel["left_pivot_mode"]
-		var r_mode: int = tel["right_pivot_mode"]
-		var l_piv: Vector3 = tel["left_heel_world"] if l_mode == 0 else tel["left_ball_world"]
-		var r_piv: Vector3 = tel["right_heel_world"] if r_mode == 0 else tel["right_ball_world"]
-		if in_pivot:
-			steps_180 = maxi(steps_180, int(tel["standing_step_count"]))
-			if l_pl and prev_l_planted and l_mode == prev_l_mode and frame > 0:
-				slip_180 = maxf(slip_180, Vector2(l_piv.x - prev_l_piv.x, l_piv.z - prev_l_piv.z).length())
-			if r_pl and prev_r_planted and r_mode == prev_r_mode and frame > 0:
-				slip_180 = maxf(slip_180, Vector2(r_piv.x - prev_r_piv.x, r_piv.z - prev_r_piv.z).length())
-		elif giant.position.z > 37.5:
-			walked_south = true
-		prev_l_planted = l_pl
-		prev_r_planted = r_pl
-		prev_l_mode = l_mode
-		prev_r_mode = r_mode
-		prev_l_piv = l_piv
-		prev_r_piv = r_piv
+		back_max_yaw_err = maxf(back_max_yaw_err, absf(angle_difference(0.0, giant.rotation.y)))
+		back_saw_pivot = back_saw_pivot or bool(tel["standing_turning"]) or bool(tel["standing_step_active"])
+		back_mode_active = back_mode_active or bool(tel.get("walk_backward", false))
+		back_max_roll = maxf(back_max_roll, absf(float(tel.get("pelvis_roll_rad", 0.0))))
+		back_legs_clean = back_legs_clean and float(tel.get("left_ankle_local_x", 0.1)) > 0.035 \
+				and float(tel.get("right_ankle_local_x", -0.1)) < -0.035
 	Input.action_release("move_back")
-	_check(steps_180 >= 4 and slip_180 < 0.02 and walked_south,
-			"standing 180-degree Back input pivots across multiple zero-slip small steps before walking south")
+	var back_dist := giant.position.z - 36.0
+	var back_fc_after := int(FootfallFixture.actor(current).footfall_count)
+	_check(back_mode_active and not back_saw_pivot and back_max_yaw_err < 0.08
+			and back_dist > 4.0 and back_dist < 9.5 and back_fc_after > back_fc_before
+			and back_max_roll < 0.14 and back_legs_clean,
+			"Pressing Back walks backward smoothly without a 180-degree turnaround or torso twist")
 
 	# Early release mid-pivot finishes placing the airborne small step cleanly with zero slip.
 	giant.position = Vector3(0.0, 0.03, 36.0)
@@ -1352,12 +1332,118 @@ func _blocked_walk_pivot() -> void:
 	Input.action_release("move_forward")
 	_check(standing_pivot and turned and left,
 			"A blocked giant holding forward pivots in place and leaves the wall")
+
+	# Diagonal/straight push into wall keeps pelvis upright and legs separated without IK twist.
+	giant.position = Vector3(0.0, 0.03, -current.get_node("District").play_edge + 3.1)
+	giant.rotation = Vector3.ZERO
+	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
+	await _ticks(8)
+	Input.action_press("move_forward")
+	Input.action_press("move_left")
+	var wall_max_roll := 0.0
+	var wall_max_lean := 0.0
+	var wall_legs_safe := true
+	var wall_blocked_seen := false
+	for frame in 45:
+		await physics_frame
+		var tel: Dictionary = giant.get_turn_telemetry()
+		if frame >= 15:
+			wall_max_roll = maxf(wall_max_roll, absf(float(tel.get("pelvis_roll_rad", 0.0))))
+			wall_max_lean = maxf(wall_max_lean, absf(float(tel.get("inward_lean_rad", 0.0))))
+		wall_legs_safe = wall_legs_safe and float(tel.get("left_ankle_local_x", 0.1)) >= 0.035 \
+				and float(tel.get("right_ankle_local_x", -0.1)) <= -0.035
+		wall_blocked_seen = wall_blocked_seen or float(tel.get("blocked_weight", 0.0)) > 0.35
+	Input.action_release("move_forward")
+	Input.action_release("move_left")
+	_check(wall_blocked_seen and wall_max_roll < 0.12 and wall_max_lean < 0.05 and wall_legs_safe,
+			"Pushing obliquely into a wall decays lean/roll and prevents twisted support IK")
+
+	# Rapid alternating low-speed/stationary turning never spams heavy stomp footfalls or overlapping prints.
+	giant.position = Vector3(0.0, 0.03, 0.0)
+	giant.rotation = Vector3.ZERO
+	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
+	await _ticks(8)
+	var fc_pre_spin := int(FootfallFixture.actor(current).footfall_count)
+	for cycle_idx in 4:
+		var key := "move_left" if cycle_idx % 2 == 0 else "move_right"
+		Input.action_press(key)
+		await _ticks(14)
+		Input.action_release(key)
+	_check(int(FootfallFixture.actor(current).footfall_count) == fc_pre_spin,
+			"Sharp low-speed turning transitions smoothly without spamming heavy stomp footprints")
+
+	# Holding a directional key far from current facing turns briskly without off-axis small-step spam.
+	giant.position = Vector3(0.0, 0.03, 0.0)
+	giant.rotation = Vector3(0.0, PI * 0.25, 0.0)
+	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
+	await _ticks(6)
+	Input.action_press("move_forward")
+	Input.action_press("move_left")
+	await _ticks(12)
+	Input.action_release("move_forward")
+	Input.action_release("move_left")
+	var fc_pre_offaxis := int(FootfallFixture.actor(current).footfall_count)
+	Input.action_press("move_right")
+	for _off_f in 150:
+		await physics_frame
+	Input.action_release("move_right")
+	var offaxis_err := absf(angle_difference(giant.rotation.y, -PI * 0.5))
+	var offaxis_fc := int(FootfallFixture.actor(current).footfall_count) - fc_pre_offaxis
+	_check(offaxis_err < 0.35 and offaxis_fc <= 2,
+			"Holding an off-heading directional key turns smoothly in full pivot steps without small-step spam")
+
+	# Spinning the camera rapidly while walking forward keeps planted support feet pinned
+	# without slip and never pulls either leg across the sagittal midline.
+	giant.position = Vector3(0.0, 0.03, 0.0)
+	giant.rotation = Vector3.ZERO
+	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
+	await _ticks(6)
+	Input.action_press("move_forward")
+	var spin_legs_clean := true
+	var spin_support_slip := 0.0
+	var sp_prev_l_pl := false
+	var sp_prev_r_pl := false
+	var sp_prev_l_mode := -1
+	var sp_prev_r_mode := -1
+	var sp_prev_l_piv := Vector3.ZERO
+	var sp_prev_r_piv := Vector3.ZERO
+	for s_frame in 95:
+		_mouse(Vector2(-10.0 if s_frame >= 20 else -5.0, 0.0))
+		await physics_frame
+		var tel: Dictionary = giant.get_turn_telemetry()
+		var lx := float(tel.get("left_ankle_local_x", 0.0))
+		var rx := float(tel.get("right_ankle_local_x", 0.0))
+		if lx < 0.038 or rx > -0.038:
+			spin_legs_clean = false
+		var l_pl := bool(tel["left_planted"])
+		var r_pl := bool(tel["right_planted"])
+		var l_mode := int(tel["left_pivot_mode"])
+		var r_mode := int(tel["right_pivot_mode"])
+		var l_piv: Vector3 = tel["left_heel_world"] if l_mode == 0 else tel["left_ball_world"]
+		var r_piv: Vector3 = tel["right_heel_world"] if r_mode == 0 else tel["right_ball_world"]
+		if s_frame > 4:
+			if l_pl and sp_prev_l_pl and l_mode == sp_prev_l_mode:
+				spin_support_slip = maxf(spin_support_slip, Vector2(l_piv.x - sp_prev_l_piv.x, l_piv.z - sp_prev_l_piv.z).length())
+			if r_pl and sp_prev_r_pl and r_mode == sp_prev_r_mode:
+				spin_support_slip = maxf(spin_support_slip, Vector2(r_piv.x - sp_prev_r_piv.x, r_piv.z - sp_prev_r_piv.z).length())
+		sp_prev_l_pl = l_pl
+		sp_prev_r_pl = r_pl
+		sp_prev_l_mode = l_mode
+		sp_prev_r_mode = r_mode
+		sp_prev_l_piv = l_piv
+		sp_prev_r_piv = r_piv
+	Input.action_release("move_forward")
+	_check(spin_legs_clean and spin_support_slip < 0.015 and absf(angle_difference(0.0, giant.rotation.y)) > 1.2,
+			"Rapid camera turning while walking keeps support feet slip-free and prevents leg crossing")
 	_game.show_menu()
 
 
 func _giant_sandbox() -> void:
 	_game.start_mode(true)
 	var current := _round()
+	var haz := current.get_node_or_null("DeskHazards")
+	if haz != null:
+		haz.set("_next_auto_in", 9999.0)
 	var giant := _actor(1)
 	await _ticks(4)
 	_check(current.get_node_or_null("Human") == null and current.get_node("Civilians").get_child_count() > 0,
@@ -1444,11 +1530,18 @@ func _giant_sandbox() -> void:
 		var yaw := 0.0 if from_south else PI
 		if before_count == 3:
 			_check(not _has_strike_overlay(target), "the first building after the unlock starts undamaged")
+		if before_count == 6:
+			_check((giant.collision_mask & BUILDING_LAYER) == 0,
+					"unlocking touch-crush excludes the building collision layer so giants pass cleanly")
 		var attacks := 2 if before_count < 3 else 1
 		for hit in attacks:
 			if building_blocker.collision_layer == 0:
 				break
-			await FootfallFixture.strike_building(current, target, yaw)
+			if before_count < 6:
+				var keep_live := target.name == &"DockPress1" and hit == attacks - 1
+				await FootfallFixture.sit_building(current, target, yaw, -1.0, not keep_live)
+			else:
+				await FootfallFixture.strike_building(current, target, yaw)
 			if target.name == &"DockPress1" and hit == 0:
 				_check(building_blocker.collision_layer == BUILDING_LAYER and target.has_node("IntactModel")
 						and not target.has_node("CollapseModel") and _giant_has_scale(giant, 1.0),
@@ -1467,7 +1560,7 @@ func _giant_sandbox() -> void:
 			_check(_giant_has_scale(giant, GROWTH_PER_BUILDING), "one destroyed building grows the model and capsule by ten percent")
 			await _check_collapse_pause(target, building_blocker)
 		if target.name == &"Tidewater1":
-			_check(building_blocker.collision_layer == 0, "A grown giant can reach the larger tower with its sole")
+			_check(building_blocker.collision_layer == 0, "After touch-crush unlocks a walking giant passes through and crushes towers")
 	_check(current.snapshot().destroyed == 12, "giant can destroy all 12 buildings")
 	await _wait_growth(current, 12)
 	var final_scale := pow(GROWTH_PER_BUILDING, 12)
@@ -1502,10 +1595,10 @@ func _giant_sandbox() -> void:
 	_game.restart()
 	var replacement := _round()
 	var fresh_target: Node3D = replacement.get_node("District/Targets/DockPress3")
-	await FootfallFixture.strike_building(replacement, fresh_target, 0.0)
+	await FootfallFixture.sit_building(replacement, fresh_target, 0.0)
 	_check(replacement.snapshot().destroyed == 0 and fresh_target.has_node("IntactModel"),
 			"Restarting resets the one-hit building upgrade and leaves the first strike nonlethal")
-	await FootfallFixture.strike_building(replacement, fresh_target, 0.0)
+	await FootfallFixture.sit_building(replacement, fresh_target, 0.0)
 	_check(fresh_target.has_node("CollapseModel"),
 			"a new round can play the same source clip again")
 	_game.pause()
@@ -1539,8 +1632,8 @@ func _queued_growth_and_footfalls() -> void:
 	var over_cap := _test_building(targets, Vector3(-250.0, 0.02, -670.0))
 	root.add_child(current)
 	var giant := current.get_node("Giant") as CharacterBody3D
-	await FootfallFixture.strike_building(current, fixtures[0], 0.0)
-	await FootfallFixture.strike_building(current, fixtures[0], 0.0)
+	await FootfallFixture.sit_building(current, fixtures[0], 0.0)
+	await FootfallFixture.sit_building(current, fixtures[0], 0.0, -1.0, false)
 	_check(current.snapshot().destroyed == 3 and current.snapshot().growth_count == 0,
 			"three buildings destroyed in one impact queue separate growth steps")
 	var first_start := -1
@@ -1559,7 +1652,7 @@ func _queued_growth_and_footfalls() -> void:
 	await _wait_growth(current, 3)
 	_check(_giant_has_scale(giant, pow(GROWTH_PER_BUILDING, 3)),
 			"The independent growth queue preserves every compounding increase")
-	await FootfallFixture.strike_building(current, fixtures[3], 0.0)
+	await FootfallFixture.sit_building(current, fixtures[3], 0.0)
 	await _wait_growth(current, 6)
 	await FootfallFixture.strike_building(current, fixtures[6], 0.0)
 	await _wait_growth(current, 8)
@@ -1704,8 +1797,8 @@ func _expanded_harbor() -> void:
 	await _ticks(16)
 	_check(giant.position.x > 690.0 and giant.position.z < -680.0 and lighthouse.visible,
 			"new outer districts are walkable and become visible when approached")
-	await FootfallFixture.strike_building(current, lighthouse, 0.0)
-	await FootfallFixture.strike_building(current, lighthouse, 0.0)
+	await FootfallFixture.sit_building(current, lighthouse, 0.0)
+	await FootfallFixture.sit_building(current, lighthouse, 0.0, -1.0, false)
 	_check(lh_blocker.collision_layer == 0 and lighthouse.has_node("CollapseModel") and lighthouse.has_node("RuinBody")
 			and current.snapshot().destroyed == 1,
 			"outer procedural landmark collapses and counts toward demolition")
@@ -2217,9 +2310,10 @@ func _multiple_giants() -> void:
 	second = current.get_node("OtherGiants/Giant2") as CharacterBody3D
 	second.position = Vector3(0.0, 0.02, -684.0)
 	var second_start := second.position
-	var target := current.get_node("District/Targets/DockPress1") as Node3D
-	await FootfallFixture.strike_building(current, target)
-	await FootfallFixture.strike_building(current, target)
+	var target := current.get_node("District/Targets/Tidewater1") as Node3D
+	await FootfallFixture.punch_building(current, target)
+	if target.get_node("BlockingBody").collision_layer != 0:
+		await FootfallFixture.punch_building(current, target)
 	await _wait_growth(current, 1)
 	var data: Dictionary = current.snapshot()
 	_check(data.giant_destroyed == 1 and data.giant_at_max_height

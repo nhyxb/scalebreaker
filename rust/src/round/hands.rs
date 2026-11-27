@@ -95,10 +95,15 @@ impl TargetPose {
         );
         point.y = match kind {
             HandMove::GrabCrush => self.at.y + self.height * 0.5,
-            HandMove::Punch => (origin.y + attacker_height * 0.72).clamp(
-                self.at.y + self.height * 0.22,
-                self.at.y + self.height * 0.93,
-            ),
+            HandMove::Punch => {
+                let low = self.at.y
+                    + if self.footprint.is_some() {
+                        (self.height * 0.08).min(attacker_height * 0.40)
+                    } else {
+                        self.height * 0.22
+                    };
+                (origin.y + attacker_height * 0.72).clamp(low, self.at.y + self.height * 0.93)
+            }
         };
         point
     }
@@ -234,6 +239,33 @@ impl HarborRound {
         false
     }
 
+    pub(super) fn start_ai_scenery_hand_move(&self, actor: &mut Giant, index: usize) -> bool {
+        if !Self::ready_for_hand_move(actor) || !self.can_demolish(actor) {
+            return false;
+        }
+        let Some(pose) = self.scenery_hand_pose(index) else {
+            return false;
+        };
+        let height = actor.height(self.max_height);
+        let origin = actor.body.get_global_position();
+        let aim = Vector3::FORWARD.rotated(Vector3::UP, actor.body.get_rotation().y);
+        for &kind in &[HandMove::Punch, HandMove::GrabCrush] {
+            if let Some(point) = self.valid_hand_point(actor, kind, &pose, aim) {
+                let dist = horizontal(point - origin).length();
+                let arm_reach = height
+                    * match kind {
+                        HandMove::Punch => 0.34,
+                        HandMove::GrabCrush => 0.25,
+                    };
+                if dist <= arm_reach {
+                    self.begin_hand_move(actor, kind, HandTarget::Scenery(index), point);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub(super) fn ready_for_hand_move(actor: &mut Giant) -> bool {
         actor.body.is_on_floor()
             && !actor
@@ -293,7 +325,14 @@ impl HarborRound {
         aim: Vector3,
     ) -> Option<Vector3> {
         let height = actor.height(self.max_height);
-        if !kind.size_allows(height, target.height) {
+        // Any giant tall enough to swing can punch an intact building wall/roof in front of her,
+        // while character-to-character hand attacks strictly enforce the relative size ratios.
+        let size_ok = if target.footprint.is_some() && kind == HandMove::Punch {
+            target.height * 0.93 >= height * 0.27
+        } else {
+            kind.size_allows(height, target.height)
+        };
+        if !size_ok {
             return None;
         }
         let origin = actor.body.get_global_position();
@@ -307,7 +346,13 @@ impl HarborRound {
         let height_fraction = (point.y - origin.y) / height;
         let permitted_height = match kind {
             HandMove::GrabCrush => -0.08..=0.23,
-            HandMove::Punch => 0.34..=0.93,
+            HandMove::Punch => {
+                if target.footprint.is_some() {
+                    0.27..=0.93
+                } else {
+                    0.34..=0.93
+                }
+            }
         };
         if !permitted_height.contains(&height_fraction) {
             return None;

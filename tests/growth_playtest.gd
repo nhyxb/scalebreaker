@@ -43,6 +43,7 @@ func _run() -> void:
 	await _huge_rivals_engage()
 	await _idle_ai_keeps_wandering()
 	await _building_crush_height()
+	await _apex_hover_scales_with_size()
 	await _smallest_walk_at_map_edge()
 	await _small_giant_ground_contact_stays_steady()
 	await _small_giant_speed_setting_applies_in_round()
@@ -319,19 +320,19 @@ func _split_growth_rates() -> void:
 			"Coin pickup applies only the configured coin growth rate (50%)")
 	var building: Node3D = match_round.get_node("District/Targets/DockPress1")
 	for hit in 9:
-		await FootfallFixture.strike_building(match_round, building)
+		await FootfallFixture.sit_building(match_round, building)
 	await _ticks(35)
 	_check(match_round.snapshot().giant_destroyed == 1
 			and is_equal_approx(match_round.snapshot().giant_height, 3.6),
-			"Footfall demolition applies only the configured building growth rate (20%)")
+			"Active demolition applies only the configured building growth rate (20%)")
 	_game.show_menu()
 
 	_start({"giant_height": 40.0, "coin_growth_rate": 1.0, "building_growth_rate": 0.25})
 	match_round = _round()
 	giant = _giant()
-	building = match_round.get_node("District/Targets/DockPress1")
-	await FootfallFixture.strike_building(match_round, building)
-	await _ticks(40)
+	building = match_round.get_node("District/Targets/HarborLighthouse")
+	await FootfallFixture.strike_building(match_round, building, 0.0)
+	await _ticks(55)
 	_check(match_round.snapshot().giant_destroyed == 1
 			and is_equal_approx(match_round.snapshot().giant_height, 50.0),
 			"One-hit footfall demolition uses the building growth rate rather than coin growth rate")
@@ -506,12 +507,16 @@ func _demolition_and_rivals() -> void:
 	_check(match_round.snapshot().can_demolish and match_round.get_node("Coins").get_child_count() == 0,
 			"Demolition begins exactly at the three-meter threshold")
 	await FootfallFixture.strike_building(match_round, building)
-	_check(blocker.collision_layer == 8 and building.get("_cracked"), "A three-meter giant cracks a building on its first heavy footfall")
+	_check(blocker.collision_layer == 8 and not building.get("_cracked")
+			and match_round.snapshot().giant_destroyed == 0,
+			"Below touch-crush height walking does not damage a three-meter giant's building target")
+	await FootfallFixture.sit_building(match_round, building)
+	_check(blocker.collision_layer == 8 and building.get("_cracked"), "A three-meter giant cracks a building on its first sit-crush")
 	for remaining in 7:
-		await FootfallFixture.strike_building(match_round, building)
+		await FootfallFixture.sit_building(match_round, building)
 	_check(blocker.collision_layer == 8 and match_round.snapshot().building_hits == 9,
 			"A three-meter giant's first eight impacts leave the building standing")
-	await FootfallFixture.strike_building(match_round, building)
+	await FootfallFixture.sit_building(match_round, building)
 	await _ticks(30)
 	_check(blocker.collision_layer == 0 and match_round.snapshot().giant_destroyed == 1
 			and is_equal_approx(match_round.snapshot().giant_height, 3.3),
@@ -602,7 +607,7 @@ func _respawn_keeps_the_district() -> void:
 	var building: Node3D = match_round.get_node("District/Targets/DockPress1")
 	var blocker: StaticBody3D = building.get_node("BlockingBody")
 	for impact in 9:
-		await FootfallFixture.strike_building(match_round, building)
+		await FootfallFixture.sit_building(match_round, building)
 	await _ticks(28)
 	_check(blocker.collision_layer == 0 and match_round.snapshot().giant_destroyed == 1,
 			"The player creates a ruin before the respawn combat test")
@@ -1129,15 +1134,16 @@ func _huge_rivals_engage() -> void:
 	await _ticks(150)
 	rival.position = player.position + Vector3.BACK * 130.0
 	var health_before := float(match_round.snapshot().giant_health)
-	var started_gait := false
+	var engaged := false
 	var health_after := health_before
 	for frame in 600:
 		await physics_frame
-		started_gait = started_gait or bool(FootfallFixture.actor(match_round, 1).footfall_pending)
+		engaged = engaged or bool(FootfallFixture.actor(match_round, 1).footfall_pending) \
+				or bool(rival.get("_punch_active")) or bool(rival.get("_pickup_crush_active"))
 		health_after = float(match_round.snapshot().giant_health)
-		if started_gait and health_after < health_before:
+		if engaged and health_after < health_before:
 			break
-	_check(started_gait and health_after < health_before,
+	_check(engaged and health_after < health_before,
 			"A rival several hundred metres tall can engage and damage an equal giant beside it")
 	_game.show_menu()
 
@@ -1631,22 +1637,54 @@ func _building_crush_height() -> void:
 		var state: Dictionary = current.snapshot()
 		if height < 40.0:
 			var building_edge: float = building.position.z - building.footprint.z * 0.5
-			_check(not landing.is_empty() and blocker.collision_layer == 8 and building.get("_cracked")
+			_check(not landing.is_empty() and blocker.collision_layer == 8 and not building.get("_cracked")
 					and not state.can_crush_buildings and state.building_hits == 2
-					and (giant.collision_mask & 16) != 0 and giant.position.z < building_edge,
-					"Just under forty meters the giant is blocked and needs two strikes")
+					and (giant.collision_mask & 8) != 0 and (giant.collision_mask & 16) != 0
+					and giant.position.z < building_edge,
+					"Just under forty meters walking does not damage or pass through buildings")
+			await FootfallFixture.sit_building(current, building, PI)
+			await FootfallFixture.sit_building(current, building, PI)
+			_check(blocker.collision_layer == 0 and building.has_node("RuinBody"),
+					"Just under forty meters two active sit-crushes still demolish the building")
 		else:
 			current.set_touch_motion(FootfallFixture.WALK, false)
 			for frame in 90:
-				if giant.position.z > building.position.z:
+				if giant.position.z > building.position.z + building.footprint.z * 0.5 + 2.0:
 					break
 				await physics_frame
 			current.set_touch_motion(Vector2.ZERO, false)
 			_check(not landing.is_empty() and blocker.collision_layer == 0 and building.has_node("RuinBody")
-					and state.can_crush_buildings and state.building_hits == 1 and (giant.collision_mask & 16) == 0
+					and state.can_crush_buildings and state.building_hits == 1
+					and (giant.collision_mask & 8) == 0 and (giant.collision_mask & 16) == 0
 					and giant.position.z > building.position.z and giant.position.y < 0.1,
-					"At forty meters a footfall destroys the building and the giant walks through the rubble")
+					"At forty meters building collision is excluded and striding through crushes cleanly")
 		_game.show_menu()
+
+
+func _apex_hover_scales_with_size() -> void:
+	var hover_fracs := {}
+	var hover_secs := {}
+	var walk_speeds := {}
+	for height: float in [3.0, 25.2, 88.2]:
+		_start({"giant_height": height, "coin_count": 0})
+		var giant := _giant()
+		giant.position = Vector3(0.0, 0.02, 110.0 if height >= 40.0 else -34.0)
+		await _ticks(6)
+		var begin := giant.position
+		Input.action_press("move_forward")
+		for frame in 75:
+			await physics_frame
+			var tel: Dictionary = giant.get_turn_telemetry()
+			hover_fracs[height] = maxf(hover_fracs.get(height, 0.0), float(tel.get("swing_hover_frac", 0.0)))
+			hover_secs[height] = maxf(hover_secs.get(height, 0.0), float(tel.get("swing_hover_secs", 0.0)))
+		Input.action_release("move_forward")
+		walk_speeds[height] = (giant.position - begin).slide(Vector3.UP).length() / (75.0 / 60.0)
+		_game.show_menu()
+	_check(hover_fracs[3.0] < hover_fracs[25.2] and hover_fracs[25.2] < hover_fracs[88.2]
+			and hover_secs[3.0] < hover_secs[25.2] and hover_secs[25.2] < hover_secs[88.2],
+			"Larger giant height holds visibly longer at apex foot lift before slamming down")
+	_check(walk_speeds[88.2] > walk_speeds[25.2] and walk_speeds[25.2] > walk_speeds[3.0],
+			"Larger giant height increases forward walk speed instead of dragging slower")
 
 
 func _manual_camera_toggle() -> void:

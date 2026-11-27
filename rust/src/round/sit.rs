@@ -125,7 +125,7 @@ impl Giant {
         (offset.length_squared() > 0.0001).then(|| offset.x.atan2(offset.z))
     }
 
-    fn sit_radius(&self) -> f32 {
+    pub(super) fn sit_radius(&self) -> f32 {
         SEAT_RADIUS * self.scale
     }
 
@@ -177,14 +177,14 @@ impl HarborRound {
         if actor.sit_in > 0.0 {
             return false;
         }
-        // A swing already in motion finishes before the next AI crowd decision.
-        // At the first planted frame the crowd check runs before pursuit.
-        if actor.footfall.is_some() || !actor.body.is_on_floor() {
+        if !actor.body.is_on_floor() {
             return false;
         }
 
         // 1. AI giants sit on a small crowd: at least `crush_targets` bodies <= 1/5 the height.
-        if settings.crush_enabled {
+        // A swing already in motion finishes before the next AI crowd decision; at the first
+        // planted frame the crowd check runs before pursuit.
+        if actor.footfall.is_none() && settings.crush_enabled {
             let height = actor.height(self.max_height);
             let max_target = height / settings.crush_ratio.max(1.0);
             let (count, centroid) = self.seat_targets(actor, Some(max_target));
@@ -196,6 +196,8 @@ impl HarborRound {
             }
         }
         // 2. Idle sit: maxed out on height with an empty horizon, rolled per second.
+        // Heavy-step roaming leaves `footfall` pending on most walking frames; because nobody is in
+        // sight, idle sit can roll smoothly on every floor frame without waiting for double support.
         if settings.idle_enabled
             && at_current_growth_cap(actor.scale, self.max_height, actor.growth_limit)
             && !self.any_target_in_sight(actor)
@@ -350,6 +352,24 @@ impl HarborRound {
             actor.body.call("finish_sit_crush", &[false.to_variant()]);
         }
         actor.sit.is_some()
+    }
+
+    pub(super) fn maybe_start_ai_building_sit(&mut self, actor: &mut Giant, target: Vector3) -> bool {
+        if actor.human
+            || actor.health_fraction <= 0.0
+            || actor.grabbed
+            || actor.sit.is_some()
+            || actor.hand_attack.is_some()
+            || actor.sit_in > 0.0
+            || actor.footfall.is_some()
+            || !actor.body.is_on_floor()
+        {
+            return false;
+        }
+        let settings = self.settings.sit;
+        let hold = crush_hold_seconds(settings.hold_base, settings.hold_per_scale, actor.scale);
+        self.begin_sit(actor, false, hold, actor.back_to(target), true);
+        true
     }
 
     fn sit_impact(&mut self, actor: &mut Giant) {

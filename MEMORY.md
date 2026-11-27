@@ -13,6 +13,10 @@
 - `heavy_step_preview()` 提供预测 `eta / progress / locked / lift`，AI 可用早期预测避让。严格比较最终落点时等 `locked`，以 `growth_actors()` 的 `footfall_count` 和 `last_footfall_*` 确认。市民优先远离即将着地的鞋底，复用原有恐慌状态。
 - `round_effects.gd::footprint_debug()` 可以查看鞋印池。每局复用 72 个槽位，12 秒过期，末 4.5 秒淡出。鞋印从场景深度投影到可见表面，避免叠放平面产生 Z-fighting。
 - 撤离和成长人类观察视角可向上看约 83°。弹簧臂保留原上仰限位，摄像机本身补足抬头角度，保持街面上方。
+- **轴心换步与贴墙/倒退/分段拆楼规则（2026-11-27 下半程更新）**：
+  - 严禁随身体旋转滑动已踩地的支撑脚世界锚点；`stance_turn_target()`（`scenes/giant_visual.gd`）在单脚撑地期把骨盆相对撑地脚扭转钳在 `±STANCE_PELVIS_TWIST_MAX`（`0.52 rad`），主要靠摆动腿前摆与落地转移窗 `[0.28..0.88]` 配合 `PIVOT_STEP_MAX_YAW = 1.25 rad` 转正，辅以 `_constrain_ankle_ik()` 局部防跨中线约束（仅 `_blocked_weight > 0.05` 回写）。迈步只由轴向有效位移驱动，消除低速/原地/异向高频小碎步。
+  - `can_crush_buildings()` 解锁后从 `collision_mask` 排除 `BUILDING_LAYER(8)` 与 `RUBBLE_LAYER(16)` 并由 `crush_touched_buildings()` 直接穿楼碾压；未解锁时 `DefeatMethod::Step` 不伤建筑，改用 `E` 挥拳 / `Q` 抓碎 / `X` 坐压（AI 走 `start_ai_scenery_hand_move()`）。`idle_sit` 因重步期间多数帧存在 pending `footfall` 且此时视野无目标，只需检查地面状态而不必等待 `footfall.is_none()`（人群 sit-crush 仍保留等当前落地后再判断）。
+  - `giant_size_speed_factor(scale)` 与 `_swing_hover_bounds(body_ratio)` 让高体型移速不发闷、改为抬脚最高点悬停滞空更久；玩家按 `S` 后退用 `GIANT_BACKWARD_MULT(0.74)` / `BACKWARD_STEP_RATIO(0.82)` 保持正面朝前做真实倒退步。
 
 ## 全局合批、建筑三态与相机（2026-11-26 确认）
 

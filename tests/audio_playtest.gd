@@ -228,14 +228,17 @@ func _check_giant_and_destruction_sfx(game: Node, audio: Node) -> void:
 
 	var target: Node3D = current.get_node("District/Targets/DockPress1")
 	audio.call("reset_telemetry")
+	await FootfallFixture.strike_building(current, target)
+	_check(int(audio.call("count_played", &"giant_footfall")) >= 1
+			and int(audio.call("count_played", &"camera_shake")) >= 1
+			and not target.get("_cracked"),
+			"Below touch-crush threshold walking leaves the building intact while playing normal footfall audio")
+	audio.call("reset_telemetry")
 	for strike in 2:
-		await FootfallFixture.strike_building(current, target)
-	_check(int(audio.call("count_played", &"giant_footfall")) >= 2
-			and int(audio.call("count_played", &"camera_shake")) >= 2,
-			"Building strikes use the same footfall and shake audio as open ground")
+		await FootfallFixture.sit_building(current, target)
 	_check(int(audio.call("count_played", &"building_crack")) >= 1
 			and int(audio.call("count_played", &"building_collapse")) >= 1,
-			"damaging and demolishing a building plays building_crack and building_collapse")
+			"damaging and demolishing a building via active attack plays building_crack and building_collapse")
 
 	# The settings affect screen shake audio without muting the physical footfall.
 	for shake in [{"shake_strength": 0.0, "own_camera_shake": true},

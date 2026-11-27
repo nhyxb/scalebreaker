@@ -4,6 +4,7 @@ pub const HUMAN_HEIGHT: f32 = 1.8;
 pub const HUMAN_RADIUS: f32 = 0.42;
 pub const GIANT_WALK: f32 = 7.0;
 pub const AI_WALK: f32 = 6.5;
+pub const GIANT_BACKWARD_MULT: f32 = 0.74;
 pub const GIANT_RADIUS: f32 = 2.9;
 pub const GIANT_START_HEIGHT: f32 = 25.2;
 pub const GIANT_DEFAULT_MAX_HEIGHT: f32 = 500.0;
@@ -17,6 +18,17 @@ pub const TOUCH_CRUSH_BUILDING_THRESHOLD: u32 = 6;
 pub const BUILDING_LAYER: u32 = 8;
 pub const RUBBLE_LAYER: u32 = 16;
 pub const EXIT_RADIUS: f32 = 2.7;
+
+pub fn giant_size_speed_factor(scale: f32) -> f32 {
+    if scale <= 1.0 {
+        scale
+    } else {
+        // Match visual stride compression above 3.5x height while scaling ground speed upward
+        // with stride length so colossal giants never feel sluggish.
+        let step_scale = (3.5 / scale).min(1.0).powf(0.62).clamp(0.30, 1.0);
+        (scale * step_scale).powf(0.72)
+    }
+}
 
 pub fn growth_building_hits(height: f32) -> u32 {
     1 + ((GROWTH_CRUSH_HEIGHT - height - 0.00001).max(0.0) / 5.0).ceil() as u32
@@ -276,6 +288,15 @@ mod tests {
         session.destroyed = 6;
         assert!(session.one_hit_buildings());
         assert!(session.touch_crush_buildings());
+    }
+
+    #[test]
+    fn giant_size_speed_factor_scales_upward_for_larger_giants() {
+        assert!((giant_size_speed_factor(0.5) - 0.5).abs() < 1e-6);
+        assert!((giant_size_speed_factor(1.0) - 1.0).abs() < 1e-6);
+        assert!(giant_size_speed_factor(1.6) > 1.0);
+        assert!(giant_size_speed_factor(3.5) > giant_size_speed_factor(1.6));
+        assert!(giant_size_speed_factor(8.0) > giant_size_speed_factor(3.5));
     }
 
     #[test]
