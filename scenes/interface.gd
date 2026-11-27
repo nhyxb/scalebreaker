@@ -28,6 +28,7 @@ const DEFEAT_ACTIONS := {
 	"grab_crush": "捏碎击倒",
 	"bump": "撞击击倒",
 	"sit_crush": "坐压压扁",
+	"finger_poke": "巨指点戳碾碎",
 }
 const DEFEAT_FEED_LIMIT := 3
 const PERCENT_SETTINGS := ["shake_strength", "sfx_volume", "ambience_volume", "coin_growth_rate", "building_growth_rate", "coin_reward_rate"]
@@ -548,6 +549,8 @@ func announce_growth_defeats(messages: Array[Dictionary]) -> void:
 		var message := "%s 被更大的人类撞倒" % event.victim
 		if event.has("attacker"):
 			message = "%s  %s  %s" % [event.attacker, DEFEAT_ACTIONS[event.method], event.victim]
+		elif String(event.get("method", "")) == "finger_poke":
+			message = "%s 被巨指点戳碾碎" % event.victim
 		var row := ChamferBox.new()
 		row.fill_color = Color(CHARCOAL, 0.9)
 		row.accent_color = SIGNAL_RED if event.player_defeated else (CRANE_AMBER if event.player_attack else DIM_GRAY)

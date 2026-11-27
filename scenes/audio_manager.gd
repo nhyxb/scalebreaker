@@ -407,6 +407,23 @@ func play_stomp_warn(position: Vector3, height: float) -> bool:
 	return play_3d(&"stomp_warn", position, -3.0, pitch, unit_sz, max_dist, 0.04)
 
 
+func play_desk_hazard_warn(position: Vector3) -> bool:
+	# Low-frequency sky-filling rumble + deep warning tone for ultra-giant desk hazards.
+	var played_rumble := play_2d(&"camera_shake_heavy", -6.0, 0.46, 0.03)
+	var played_warn := play_3d(&"stomp_warn", position, -2.5, 0.46, 260.0, 2400.0, 0.03)
+	return played_rumble or played_warn
+
+
+func play_desk_hazard_whoosh(position: Vector3) -> bool:
+	return play_3d(&"hand_whoosh", position, -1.5, 0.44, 240.0, 2200.0, 0.04)
+
+
+func play_desk_hazard_impact(position: Vector3) -> bool:
+	var played_stomp := play_3d(&"giant_stomp", position, 1.5, 0.40, 320.0, 2600.0, 0.04)
+	var played_crush := play_3d(&"hand_crush", position, -1.0, 0.44, 280.0, 2400.0, 0.04)
+	return played_stomp or played_crush
+
+
 func play_camera_shake(intensity: float, source_height: float = 25.2) -> bool:
 	if intensity <= 0.005:
 		return false

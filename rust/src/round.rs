@@ -955,6 +955,10 @@ pub struct HarborRound {
     /// Whether the ground dwell ring is currently shown (avoids per-frame
     /// GDScript hide calls when nothing changed).
     dwell_ring_visible: bool,
+    /// Active tabletop desk-hazard warning circles `(id, center, radius)`
+    /// pushed by `scenes/desk_hazards.gd`. Fed into AI evasion and civilian
+    /// panic without ever registering hazards as targetable/attackable giants.
+    hazard_warnings: Vec<(i32, Vector3, f32)>,
 }
 
 #[godot_api]
@@ -1026,6 +1030,7 @@ impl INode3D for HarborRound {
             coin_regrade_in: 0.0,
             dwell_tick_in: 0.0,
             dwell_ring_visible: false,
+            hazard_warnings: Vec::new(),
         }
     }
 
@@ -2022,6 +2027,278 @@ impl HarborRound {
         entries
     }
 
+    /// Whether periodic/manual tabletop desk hazards are allowed in this round.
+    /// Legacy Human Evacuation mode never triggers desk hazards regardless of setting.
+    #[func]
+    fn desk_hazards_enabled(&self) -> bool {
+        self.mode != Mode::Human && self.settings.desk_hazards
+    }
+
+    #[func]
+    fn mode_key(&self) -> GString {
+        self.mode.key().into()
+    }
+
+    #[func]
+    fn world_play_edge(&self) -> f32 {
+        self.world_limit
+    }
+
+    /// Register or update a desk-hazard warning circle so Phase 4 AI (human & giant)
+    /// and civilians immediately flee outside the strike zone without registering the
+    /// hazard as an attackable giant/rival.
+    #[func]
+    fn set_hazard_warning(&mut self, id: i32, center: Vector3, radius: f32) {
+        let clean_center = Vector3::new(center.x, 0.0, center.z);
+        let clean_radius = radius.max(1.0);
+        if let Some(slot) = self.hazard_warnings.iter_mut().find(|entry| entry.0 == id) {
+            slot.1 = clean_center;
+            slot.2 = clean_radius;
+        } else {
+            self.hazard_warnings.push((id, clean_center, clean_radius));
+        }
+        self.note_hotspot(clean_center, clean_radius * 1.15);
+    }
+
+    #[func]
+    fn clear_hazard_warning(&mut self, id: i32) {
+        self.hazard_warnings.retain(|entry| entry.0 != id);
+    }
+
+    #[func]
+    fn hazard_warning_count(&self) -> i32 {
+        self.hazard_warnings.len() as i32
+    }
+
+    /// Pick a city block with intact buildings or active actors for a desk hazard.
+    #[func]
+    fn pick_hazard_target(&self) -> Vector3 {
+        let margin = (self.world_limit - 32.0).max(0.0);
+        let anchor = self.observer_position();
+        let mut preferred: Vec<Vector3> = Vec::new();
+        let mut fallback: Vec<Vector3> = Vec::new();
+        for target in &self.targets {
+            if !target.footprint.building || target.grabbed || !target.integrity.blocks() {
+                continue;
+            }
+            let pos = target.footprint.transform.origin;
+            let flat = Vector3::new(pos.x, 0.0, pos.z);
+            if margin > 0.0 && (flat.x.abs() > margin || flat.z.abs() > margin) {
+                continue;
+            }
+            let dist = horizontal(flat - anchor).length();
+            if (40.0..=360.0).contains(&dist) {
+                preferred.push(flat);
+            } else {
+                fallback.push(flat);
+            }
+        }
+        let pool = if !preferred.is_empty() {
+            &preferred
+        } else if !fallback.is_empty() {
+            &fallback
+        } else {
+            // All buildings gone or tiny map: aim near an active actor if any exist.
+            let mut actors: Vec<Vector3> = self
+                .giants
+                .iter()
+                .filter(|giant| giant.health_fraction > 0.0 && !giant.grabbed)
+                .map(|giant| {
+                    let p = giant.body.get_global_position();
+                    Vector3::new(p.x, 0.0, p.z)
+                })
+                .collect();
+            if actors.is_empty() {
+                return Vector3::ZERO;
+            }
+            let pick = (random_range(0.0, actors.len() as f64).floor() as usize)
+                .min(actors.len() - 1);
+            return actors.swap_remove(pick);
+        };
+        let pick = (random_range(0.0, pool.len() as f64).floor() as usize).min(pool.len() - 1);
+        pool[pick]
+    }
+
+    /// Batch-resolve a tabletop desk-hazard impact (unattackable external force):
+    /// collapses all intact buildings within `radius`, applies heavy crush damage &
+    /// outward knockback to units inside the radius, refreshes hotspots, and triggers
+    /// global camera shake obeying `shake_strength`.
+    #[func]
+    fn apply_desk_hazard_impact(
+        &mut self,
+        center: Vector3,
+        radius: f32,
+        damage_fraction: f32,
+        knockback_speed: f32,
+    ) -> VarDictionary {
+        let impact_center = Vector3::new(center.x, 0.0, center.z);
+        let impact_radius = radius.max(1.0);
+        let area = StompArea {
+            center: impact_center,
+            yaw: 0.0,
+            radii: Vector2::splat(impact_radius),
+        };
+        self.note_hotspot(impact_center, impact_radius * 1.4);
+
+        // 1. Batch-destroy intact buildings inside the strike radius using the existing
+        //    3-state MultiMesh collapse & rubble pipeline.
+        self.strike += 1;
+        let rebuild_at = self.building_rebuild_time();
+        let mut buildings_destroyed: i32 = 0;
+        let candidate_indices: Vec<usize> = self
+            .target_grid
+            .near(impact_center, impact_radius)
+            .collect();
+        for index in candidate_indices {
+            let target = &mut self.targets[index];
+            if target.grabbed || !target.integrity.blocks() || !area.touches(target.footprint) {
+                continue;
+            }
+            if target.integrity.hit(self.strike, f32::MAX, true) == Damage::Destroyed {
+                let rebuild = rebuild_at.filter(|_| target.footprint.building);
+                target.node.call(
+                    "strike",
+                    &[
+                        true.to_variant(),
+                        Variant::nil(),
+                        rebuild.is_some().to_variant(),
+                    ],
+                );
+                if target.footprint.building {
+                    if let Some(deadline) = rebuild {
+                        self.building_respawns.push((index, deadline));
+                    }
+                    self.destroyed_buildings += 1;
+                    buildings_destroyed += 1;
+                }
+            }
+        }
+        if buildings_destroyed > 0 {
+            for giant in &mut self.giants {
+                giant.replan_in = 0.0;
+            }
+        }
+
+        // 2. Heavy crush damage + outward knockback on living actors in range.
+        //    Foreground hazards are never added to `giants` / `rivals`.
+        let growth = self.growth_rules.is_some();
+        let mut giants_hit: i32 = 0;
+        let mut giants_defeated: i32 = 0;
+        let mut giants = std::mem::take(&mut self.giants);
+        let world_cap = (self.world_limit - 2.0).max(1.0);
+        for actor in &mut giants {
+            if actor.health_fraction <= 0.0 || actor.grabbed {
+                continue;
+            }
+            let pos = actor.body.get_global_position();
+            let offset = horizontal(pos - impact_center);
+            let dist = offset.length();
+            let actor_r = self.actor_radius(actor);
+            let reach = impact_radius + actor_r;
+            if dist > reach {
+                continue;
+            }
+            giants_hit += 1;
+            let falloff = desk_hazard_falloff(dist, reach);
+            let out_dir = if dist > 0.05 {
+                offset / dist
+            } else {
+                let angle = actor.index as f32 * 2.399_963_2;
+                Vector3::new(angle.cos(), 0.0, angle.sin())
+            };
+            let is_player_victim = actor.index == 0 && self.player == PlayerRole::Giant;
+            let victim_height = actor.height(self.max_height);
+            actor.body.call("show_hit", &[]);
+            actor.memory.note_danger(impact_center, impact_radius * 1.25);
+            if let Some(mut audio) = self.audio() {
+                audio.call(
+                    "play_combat_hit",
+                    &[
+                        false.to_variant(),
+                        is_player_victim.to_variant(),
+                        pos.to_variant(),
+                        victim_height.to_variant(),
+                    ],
+                );
+            }
+            let defeated = if growth {
+                let frac = desk_hazard_damage_fraction(dist, reach, damage_fraction);
+                let max_hp = self.growth_stat(actor, self.combat_rules().base_health);
+                self.hurt_giant(actor, max_hp * frac)
+            } else {
+                false
+            };
+            if defeated {
+                giants_defeated += 1;
+                self.record_growth_defeat(None, actor.index, DefeatMethod::FingerPoke);
+                if let Some(mut audio) = self.audio() {
+                    audio.call(
+                        "play_defeat",
+                        &[
+                            false.to_variant(),
+                            is_player_victim.to_variant(),
+                            pos.to_variant(),
+                            victim_height.to_variant(),
+                        ],
+                    );
+                }
+            } else {
+                // Knock surviving giant radially outward and slightly airborne so it clears the fingertip.
+                let push_speed = knockback_speed.max(0.0) * (0.55 + 0.45 * falloff);
+                let nudge = (reach - dist + 8.0).clamp(6.0, 28.0) * (0.45 + 0.55 * falloff);
+                let pushed = pos + out_dir * nudge;
+                let clamped = Vector3::new(
+                    pushed.x.clamp(-world_cap, world_cap),
+                    pos.y + (3.0 + 6.0 * falloff),
+                    pushed.z.clamp(-world_cap, world_cap),
+                );
+                actor.body.set_global_position(clamped);
+                actor
+                    .body
+                    .set_velocity(out_dir * push_speed + Vector3::UP * (8.0 + 10.0 * falloff));
+            }
+        }
+        self.giants = giants;
+
+        // 3. Crush / scatter civilians in range (Sandbox mode).
+        let mut civilians_hit: i32 = 0;
+        for npc in &mut self.civilians {
+            if npc.remove_in.is_some() || npc.grabbed {
+                continue;
+            }
+            let point = npc.body.get_global_position();
+            if area.reaches(point, npc.size.radius) {
+                civilians_hit += 1;
+                npc.hurt(1000.0, true);
+            }
+        }
+
+        // 4. Strong island-wide camera shake obeying `settings.shake_strength`.
+        if self.player != PlayerRole::Spectator && self.settings.shake_strength > 0.0 {
+            let observer = self.observer_position();
+            let dist = horizontal(observer - impact_center).length();
+            let raw_peak = desk_hazard_camera_shake(dist, impact_radius);
+            let scaled = raw_peak * self.settings.shake_strength;
+            let cutoff = self.shake_cutoff();
+            if self.nearby_shake.add_peak(scaled, cutoff)
+                && let Some(mut audio) = self.audio()
+            {
+                audio.call(
+                    "play_camera_shake",
+                    &[scaled.to_variant(), 600.0_f32.to_variant()],
+                );
+            }
+            self.apply_camera_shake();
+        }
+
+        let mut summary = VarDictionary::new();
+        summary.set("buildings_destroyed", buildings_destroyed);
+        summary.set("giants_hit", giants_hit);
+        summary.set("giants_defeated", giants_defeated);
+        summary.set("civilians_hit", civilians_hit);
+        summary
+    }
+
     #[func]
     pub fn snapshot(&self) -> VarDictionary {
         let mut snapshot = VarDictionary::new();
@@ -2963,6 +3240,9 @@ impl HarborRound {
                 dangers.push((impact.at, 24.0));
             }
         }
+        for &(_, center, radius) in &self.hazard_warnings {
+            dangers.push((center, radius + 35.0));
+        }
         self.civilians.retain_mut(|npc| {
             if growth && npc.remove_in.is_none() {
                 npc.size = BodySize::from_capsule(&npc.collision);
@@ -3348,6 +3628,13 @@ impl HarborRound {
                     }
                 }
             }
+            for &(_, center, hazard_radius) in &self.hazard_warnings {
+                let reach = hazard_radius + radius;
+                warnings.push((center, reach + 1.5));
+                if horizontal(center - position).length() <= reach {
+                    immediate = true;
+                }
+            }
             if immediate {
                 actor.danger_note_in -= dt;
                 if actor.danger_note_in <= 0.0
@@ -3390,6 +3677,13 @@ impl HarborRound {
                 if horizontal(center - position).length() <= reach {
                     immediate = true;
                 }
+            }
+        }
+        for &(_, center, hazard_radius) in &self.hazard_warnings {
+            let reach = hazard_radius + radius;
+            warnings.push((center, reach + 2.0));
+            if horizontal(center - position).length() <= reach {
+                immediate = true;
             }
         }
         if immediate {
@@ -4710,6 +5004,30 @@ fn at_current_growth_cap(scale: f32, max_height: f32, growth_limit: f32) -> bool
     scale + 1e-5 >= cap_scale
 }
 
+fn desk_hazard_falloff(distance: f32, reach: f32) -> f32 {
+    if reach <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - (distance / reach).clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+fn desk_hazard_damage_fraction(distance: f32, reach: f32, base_fraction: f32) -> f32 {
+    if distance > reach || base_fraction <= 0.0 {
+        return 0.0;
+    }
+    let falloff = desk_hazard_falloff(distance, reach);
+    // Core under the ~100 m fingertip pad crushes outright (>= 1.0x HP), while
+    // units near the outer ~110 m rim take heavy crush damage + radial knockback.
+    (base_fraction * (0.62 + 0.76 * falloff)).clamp(0.0, 2.0)
+}
+
+fn desk_hazard_camera_shake(distance: f32, impact_radius: f32) -> f32 {
+    // 10 km ultra-giant impact shakes across the whole 1,418 m harbour, peaking
+    // strongly near the strike zone and tapering to a deep rumble at the far rim.
+    let norm = (distance / (impact_radius.max(30.0) * 4.5)).clamp(0.0, 1.0);
+    1.55 * (1.0 - norm).powf(1.35) + 0.28
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -5042,5 +5360,22 @@ mod tests {
         let band_limit = 7.0 / GIANT_START_HEIGHT;
         assert!(!at_current_growth_cap(6.5 / GIANT_START_HEIGHT, 200.0, band_limit));
         assert!(at_current_growth_cap(band_limit, 200.0, band_limit));
+    }
+
+    #[test]
+    fn desk_hazard_damage_and_camera_shake_scale_monotonically() {
+        use super::{desk_hazard_camera_shake, desk_hazard_damage_fraction};
+        let reach = 110.0;
+        let core = desk_hazard_damage_fraction(0.0, reach, 0.85);
+        let mid = desk_hazard_damage_fraction(55.0, reach, 0.85);
+        let edge = desk_hazard_damage_fraction(109.0, reach, 0.85);
+        let outside = desk_hazard_damage_fraction(111.0, reach, 0.85);
+        assert!(core >= 1.0, "direct fingertip core hit should crush in one strike");
+        assert!(core > mid && mid > edge && edge > 0.5);
+        assert_eq!(outside, 0.0);
+
+        let near_shake = desk_hazard_camera_shake(20.0, reach);
+        let far_shake = desk_hazard_camera_shake(700.0, reach);
+        assert!(near_shake > 1.4 && far_shake >= 0.25 && near_shake > far_shake);
     }
 }

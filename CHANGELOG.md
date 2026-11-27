@@ -4,6 +4,60 @@
 
 ---
 
+## 2026-11-27 — 阶段 3B-1：双层手臂接力天灾「单指点戳（`finger_poke`）」与可复用天灾底座
+
+备份：`backups/20261127_100230_phase3b1_finger_poke/{rust_src,scenes,scripts,tests,CHANGELOG.md,MEMORY.md}`（本轮新增 `scenes/desk_hazards.gd` 与 `scripts/export_yumeka_hand_relay.py` 无备份副本；`assets/characters/yumeka/Yumeka_hand_relay.glb` 留在 gitignored 目录）。
+回滚：
+
+```sh
+cp -a backups/20261127_100230_phase3b1_finger_poke/rust_src/. rust/src/
+cp -a backups/20261127_100230_phase3b1_finger_poke/scenes/. scenes/
+cp -a backups/20261127_100230_phase3b1_finger_poke/scripts/. scripts/
+cp -a backups/20261127_100230_phase3b1_finger_poke/tests/. tests/
+rm -f scenes/desk_hazards.gd scenes/desk_hazards.gd.uid scripts/export_yumeka_hand_relay.py
+cp backups/20261127_100230_phase3b1_finger_poke/{CHANGELOG.md,MEMORY.md} .
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+```
+
+### 一、玩法设置开关与调度（`scenes/settings_schema.gd`、`rust/src/settings.rs`、`scenes/interface.gd`、`scenes/desk_hazards.gd`）
+
+- 新增持久化布尔选项 `desk_hazards`（默认 `true`，写入 `user://gameplay.cfg`），在玩法设置「地图与开局」组暴露开关「桌面天灾事件」（即时生效）。
+- **模式范围**：巨人沙盒、成长模式、大乱斗受 `desk_hazards` 控制；旧版「人类撤离模式」不展示该项且永不触发。
+- **触发机制**：开启后按 `45–90 秒` 随机间隔自动触发一次 `finger_poke`；局内未暂停时按 **`F8`**（兼容 `keycode`/`physical_keycode`）可立即触发测试；暂停、关闭开关或处于人类撤离模式时均不触发。
+
+### 二、Blender 前景接力右手拆导与占位回退（`scripts/export_yumeka_hand_relay.py`、`scenes/desk_hazards.gd`）
+
+- 确认 `assets/characters/yumeka/` 继续受 `.gitignore` 忽略（`git ls-files assets/characters/yumeka/` 为空，零授权资产入库）。
+- `scripts/export_yumeka_hand_relay.py` 从 `~/Downloads/YUMEKA_v1.0.4.zip` 解压出的 `Yumeka.blend` 中提取右前臂与右手 3 个网格（`Yumeka_Body`、`Yumeka_Cos_Jacket`、`Yumeka_Cos_Vest_Shirt`，合计 3,154 多边形 / 3,046 顶点，静态烘焙 4.45 MB GLB，原点精准落在食指指腹最低点，1:6,667 尺度下食指宽 96.0 m）。
+- 摆出自然单指点戳手势（食指伸直微弧 `-4°/-9°/-7°`，中/无名/小指绕验证过的真屈指轴 `local (1, 0, 0)` 自然卷握于掌内，拇指内收微屈；宽松毛衣袖口自然回落贴合手腕避免空心大袖筒遮挡），材质与 `Yumeka_seated.glb` 保持一致的柔和哑光二次元着色（`DIFFUSE_BURLEY`、`roughness=0.89`、`specular=0.16`、关自发光、防 AGX 过曝微压色温）。
+- 运行时通过 `ResourceLoader.exists()` 加载 `assets/characters/yumeka/Yumeka_hand_relay.glb`；公开克隆缺失该文件时自动回退为无碰撞风格化占位巨手网格，零报错。
+
+### 三、双层接力「单指点戳」三段式演出与不可攻击底座（`scenes/desk_hazards.gd`、`scenes/yumeka_ultra_giant.gd`、`scenes/harbor_skybox.gd`、`rust/src/round.rs`、`rust/src/round/growth.rs`、`scenes/audio_manager.gd`）
+
+- **严格不可被攻击**：前景手与预警视觉挂在 `Round/DeskHazards` 下，**绝不注册进 Rust 的 `giants` / `rivals` / `targets` 数组**且零 `CollisionObject3D`；待机时隐藏零开销；离开或重启回合自动清理预警并复位背景 Yumeka。
+- **预警前摇（2.4 s）**：由 `HarborRound::pick_hazard_target()` 选取城内建筑/单位街区；背景 `Yumeka_seated` 视线锁向目标点并轻抬右臂进入伸手态；前景巨指自东南高空压近，地面绘制柔和巨指投影（随下降收紧变深、夜间柔化）与 `110 m` 脉冲琥珀色预警圈，播低频轰鸣与压风音效；通过 `set_hazard_warning()` 接入阶段 4 AI（人类/巨人阶段直接触发 `evade` 逃离）与市民恐慌。
+- **触地结算（停留 0.5 s）**：`apply_desk_hazard_impact()` 批量摧毁 `~110 m` 半径内既有 `Damageable` 建筑（复用三态 MultiMesh 倒塌与废墟）、对范围内单位结算高额碾压伤害（核心直击压扁、外缘重创+径向击飞，成长/大乱斗新增 `finger_poke` 播报键）、触发全城强震屏（遵循 `shake_strength`）与柔边 Fresnel 扬尘冲击波。
+- **收回复位（1.2 s）**：前景手平滑抬离高空隐藏，背景 Yumeka 右臂与视线柔和恢复 `59c8440` 原趴桌休息态。
+
+### 四、同口径数据对比与测试验证
+
+| 指标 | 口径 | 数据源 | 基准值 | 当前值 |
+|---|---|---|---|---|
+| 前景右手几何 | 静态烘焙多边形 / 顶点（3 网格，无骨架） | `export_yumeka_hand_relay.py` | — | 3,154 polys / 3,046 verts（4.45 MB GLB） |
+| 城内动态灯光数 | `District` 内 `OmniLight3D + SpotLight3D` | `tests/playtest.gd` | 0 | **0** |
+| Rust 单元测试 | `cargo test --locked`（+2 项：`desk_hazards` 默认值、天灾伤害/震屏单调衰减） | `cargo test` | 52/52 | **54/54** |
+| Godot 回归断言 | 8 套 `--headless` playtest 总计（`playtest` +14 项桌面天灾/设置/AI逃避/占位回退断言） | `tests/*_playtest.gd` | 701/701 | **715/715** |
+| 实机 GPU 帧率 | 未测（本轮在隔离 `Xvfb` 纯 `llvmpipe` 仅拍少量帧验证视觉，禁止跑软渲染 FPS 基准） | — | — | 未测 |
+
+- **8 套 Godot `--headless` 回归全绿**：`playtest` 248 / `growth` 200 / `mode_menu` 45 / `touch` 42 / `sit_crush_gameplay` 44 / `sit_crush` 57 / `brawl` 43 / `audio` 36；启动校验 `--quit-after 5` 通过。
+- **视觉核验（隔离 `Xvfb :98`，`1280×720`，renderer=`llvmpipe (LLVM 23.1.5)`，2 轮 × 3 张，零占用真实桌面）**：
+  - 第 1 轮暴露宽松毛衣大袖口在仰角呈空心圆环、拇指偏张与低多边形扬尘块问题；第 2 轮将袖口自然回拉贴腕、收紧卷指与拇指内收、压陡手臂俯冲角并改用软边 Fresnel 扬尘着色器后重拍 3 张：
+    1. `build/tmp/poke_1_windup.png`（白天预警前摇）：食指宽约 96 m 自高空压下、中/无名/小指与拇指自然收握、哑光肤色与指甲无过曝、地面 110 m 琥珀色脉冲预警圈与手影清晰、背景 Yumeka 右袖抬起与前景接力自然——**通过**；
+    2. `build/tmp/poke_2_impact.png`（白天触地瞬间）：巨指落入城中且前排工业罐与高楼正确产生深度遮挡，半径 110 m 内 43 栋建筑触发倒塌并呈现废墟堆，柔边冲击烟尘自然——**通过**；
+    3. `build/tmp/poke_3_night.png`（`F7` 夜景同框）：月光与城市夜景光下巨指受光柔和自然（不惨白也不死黑），建筑万家灯火与地面琥珀预警圈清晰，背景台灯暖光照亮 Yumeka 面部与抬起右臂——**通过**。
+
+---
+
 ## 2026-11-27 — 阶段 4：金币风险分级博弈（3 档读条/缓退/模糊雷达）+ 全场 Utility AI（7 档体型矩阵/短期记忆/6 维性格/360° 避墙逃跑）+ 市民三态逃生
 
 备份：`backups/20261127_000524_phase4_coin_risk_ai/{rust/src/round/{round.rs,growth.rs},scenes/{coins.gd,interface.gd,audio_manager.gd},tests/{growth_playtest.gd,playtest.gd},CHANGELOG.md,MEMORY.md}`（本轮新增 `rust/src/round/ai.rs` 无备份副本）。

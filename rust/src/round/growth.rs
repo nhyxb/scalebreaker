@@ -336,6 +336,7 @@ pub(super) enum DefeatMethod {
     Punch,
     GrabCrush,
     SitCrush,
+    FingerPoke,
 }
 
 impl DefeatMethod {
@@ -352,6 +353,7 @@ impl DefeatMethod {
             Self::Punch => "punch",
             Self::GrabCrush => "grab_crush",
             Self::SitCrush => "sit_crush",
+            Self::FingerPoke => "finger_poke",
         }
     }
 }
@@ -1662,7 +1664,7 @@ impl HarborRound {
         }
     }
 
-    fn hurt_giant(&mut self, actor: &mut Giant, damage: f32) -> bool {
+    pub(super) fn hurt_giant(&mut self, actor: &mut Giant, damage: f32) -> bool {
         let max_health = self.growth_stat(actor, self.combat_rules().base_health);
         actor.health_fraction = (actor.health_fraction - damage / max_health).max(0.0);
         if actor.health_fraction > 0.0 {
@@ -1800,7 +1802,12 @@ impl HarborRound {
         }
     }
 
-    fn record_growth_defeat(&mut self, attacker: Option<i32>, victim: i32, method: DefeatMethod) {
+    pub(super) fn record_growth_defeat(
+        &mut self,
+        attacker: Option<i32>,
+        victim: i32,
+        method: DefeatMethod,
+    ) {
         if self.growth_defeats.len() == MAX_PENDING_DEFEATS {
             self.growth_defeats.pop_front();
         }

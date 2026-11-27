@@ -159,10 +159,14 @@ func mark_dirty() -> void:
 
 
 func is_yumeka_mounted() -> bool:
-	if ultra_giant_anchor == null:
-		return false
-	var y := ultra_giant_anchor.get_node_or_null("Yumeka")
+	var y := get_yumeka()
 	return y != null and y.has_method(&"debug_is_mounted") and bool(y.call(&"debug_is_mounted"))
+
+
+func get_yumeka() -> Node:
+	if ultra_giant_anchor == null:
+		return null
+	return ultra_giant_anchor.get_node_or_null("Yumeka")
 
 
 func get_backdrop_shader_material() -> ShaderMaterial:

@@ -125,6 +125,13 @@
 - **测试/调试接口**：`round.coin_debug()`（tier/dwell/position）、`round.civilian_debug()`、`growth_actors()` 新增 `intent/size_tier/evading/dwell/dwell_tier`。
 - **易踩坑**：`coins.gd` 的 dwell ring 挂在 Coins 根下，`_refresh_visible` 必须跳过无子节点的孩子（否则每帧 Index error 刷屏）；测试巨人瞬拾时场上必须仍有**人类阶段角色**（`update_coin_wave` 在全员巨化时清场退币）；growth 默认 `giant_speed=4×` 会把 WINDUP 压到 ~8 tick，躲预警圈类测试要按此排窗口。
 
+## 阶段 3B-1：双层手臂接力桌面天灾底座与「单指点戳」（2026-11-27 确认）
+
+- **设置与范围**：`GameSettings.desk_hazards`（默认 `true`，`settings_schema.gd` `PAGE_GAMEPLAY` `group="map"` `modes=[1,2,3]` `APPLY_LIVE`）；巨人沙盒/成长/大乱斗生效，人类撤离模式永远返回 `desk_hazards_enabled() == false`。开启后每 `45–90 s` 自动触发一次，局内未暂停按 `F8`（兼容 `keycode`/`physical_keycode`）立即触发。
+- **前景右手资产与回退**：`scripts/export_yumeka_hand_relay.py` 从 `~/Downloads/YUMEKA_v1.0.4.zip` 拆出右臂 3 网格（`Yumeka_Body`/`Yumeka_Cos_Jacket`/`Yumeka_Cos_Vest_Shirt`，3,154 polys，4.45 MB 静态烘焙 GLB → `assets/characters/yumeka/Yumeka_hand_relay.glb`，gitignored 永不入库）。关键要点：Yumeka 原版开衫为超宽萌袖（腕口半径 11.4 cm → 1:6,667 放大成 2.1 km 巨筒），导出脚本需将袖口回拉至手腕并收敛径向张角，且拇指用 `ThumbProximal_R` `local (0,0,1) -34°` 内收再配合 `local (1,0,0)` 负角卷握；原点落在食指指腹最低点（食指宽 96 m），手臂沿 `APPROACH_DIR=(0.24,0.94,0.24)` 指向东南天空 Yumeka 右肩。运行时必须 `ResourceLoader.exists()` 检查，缺资产自动回退无碰撞风格化占位手。
+- **不可攻击底座与 AI 联动**：`scenes/desk_hazards.gd` 挂在 `Round/DeskHazards`（继承 `PROCESS_MODE_PAUSABLE`，`_exit_tree()` 复位背景 Yumeka），前景手零 `CollisionObject3D` 且**永不注册进 Rust `giants`/`rivals`/`targets`**；前摇 2.4 s 调用 `round.set_hazard_warning()` 将 110 m 预警圈接入阶段 4 AI（人类/巨人均直接切 `evade`）与市民恐慌，背景 `yumeka_ultra_giant.gd::set_hazard_relay()` 锁视目标并沿 `Chest → Shoulder_R → UpperArm_R → LowerArm_R → Hand_R` 轻抬右臂；触地 0.5 s 调 `round.apply_desk_hazard_impact()` 批量触发 110 m 内既有 `Damageable` 倒塌/废墟、高额碾压伤害（核心一击压扁、外缘重创+击飞，成长/大乱斗 `DefeatMethod::FingerPoke` 播报）、全城强震屏与柔边 Fresnel 尘雾；收回 1.2 s 后前景手隐藏、背景右臂回位。
+- **回归入口**：`tests/playtest.gd::_desk_hazards_finger_poke()`（14 项断言：持久化/模式可见性/人类模式禁触发/关开关与暂停拦截 F8/无碰撞不可锁定/AI `evade`/建筑批量摧毁与单位压扁/结束后隐藏复位/占位回退/中途退回菜单清理）。
+
 ## 本机开发注意
 - bash 工具的 `/tmp` 不跨命令保留。临时源码副本放工程内的 `build/tmp/`，不要依赖 `/tmp`。
 - **GPU 测量口径（2026-11-26 教训）**：本机默认 OpenGL 会落在 zink/NVIDIA dGPU（本会话探测 `Using Device: Mesa - zink Vulkan(NVIDIA...)`）；测核显必须 `MESA_LOADER_DRIVER_OVERRIDE=radeonsi`（`glxinfo -B` 同理）。iGPU 连续满载热降频极明显（同一基线代码逐次 50.8→55.9 不等），前后对比必须做**交叠 A/B**（`build/tmp/ab_probe.gd`：只测全图俯瞰 `(0,620,980)`、1280×720、vsync 关、420 帧预热 + 60 帧采样），并报同会话成对差值；绝对值（如 61 FPS 历史基线）跨天/跨热状态不可比。ABBA 在哪跑按 AGENTS.md「视觉/渲染测试显示规范」：真 FPS 只能来自用户真实桌面（由用户自行运行）或验证过 radeonsi 的隔离虚拟显示；llvmpipe（纯 Xvfb）里的数字一律不进性能结论。

@@ -116,6 +116,12 @@ const OPTIONS := [
 		"kind": "number", "step": 0.1, "suffix": " 米",
 		"page": PAGE_GAMEPLAY, "group": "map", "apply": APPLY_NEXT,
 	},
+	{
+		"key": "desk_hazards", "label": "桌面天灾事件",
+		"hint": "开启后，桌边超巨少女会每隔 45–90 秒随机伸手点戳微缩城区；局内按 F8 可立即触发测试（人类撤离模式不触发）。",
+		"kind": "toggle", "modes": [1, 2, 3],
+		"page": PAGE_GAMEPLAY, "group": "map", "apply": APPLY_LIVE,
+	},
 
 	# --- 巨人 ---------------------------------------------------------------
 	{

@@ -59,6 +59,7 @@ func _run() -> void:
 	await _map_size_settings()
 	await _smallest_map()
 	await _own_camera_shake_toggle()
+	await _desk_hazards_finger_poke()
 	_check(_game.get_screen() == "menu", "both modes returned to the title")
 	if FileAccess.file_exists(settings_path):
 		DirAccess.remove_absolute(settings_path)
@@ -2422,6 +2423,209 @@ func _check_giant_walk(giant: CharacterBody3D) -> void:
 	Input.action_release("move_forward")
 	_check(left_swing and right_swing, "walking lifts each leg in turn")
 	_check(planted_frames > 18, "the support foot stays in place during the walking cycle")
+
+
+func _desk_hazards_finger_poke() -> void:
+	# 1. Setting defaults, mode-scoped UI visibility, and gameplay.cfg persistence.
+	var def_ok := true
+	for mode in [1, 2, 3]:
+		if not bool(_game.default_mode_settings(mode).get("desk_hazards", false)):
+			def_ok = false
+	var human_opts: Dictionary = _game.default_mode_settings(0)
+	var human_omits := not human_opts.has("desk_hazards")
+	_check(def_ok and human_omits,
+			"desk_hazards defaults true in Sandbox/Growth/Brawl and is excluded from Human Evacuation")
+
+	var ui := _game.get_node("Interface")
+	(ui.find_child("MenuSettings", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var panel: Control = ui.find_child("GameplaySettings", true, false)
+	(panel.find_child("SettingsPageGameplay", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var toggle := panel.find_child("desk_hazards", true, false) as CheckButton
+	(panel.find_child("HumanSettingsTab", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var hidden_in_human := toggle != null and not toggle.is_visible_in_tree()
+	(panel.find_child("GiantSettingsTab", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var visible_in_sandbox := toggle != null and toggle.is_visible_in_tree() and toggle.button_pressed
+	(panel.find_child("GrowthSettingsTab", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var visible_in_growth := toggle != null and toggle.is_visible_in_tree() and toggle.button_pressed
+	(panel.find_child("BrawlSettingsTab", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var visible_in_brawl := toggle != null and toggle.is_visible_in_tree() and toggle.button_pressed
+	_check(hidden_in_human and visible_in_sandbox and visible_in_growth and visible_in_brawl,
+			"Gameplay settings expose desk_hazards toggle in Sandbox/Growth/Brawl and hide it in Human Evacuation")
+
+	# Toggle OFF for Sandbox, save, verify gameplay.cfg & fresh HarborGame reload.
+	(panel.find_child("GiantSettingsTab", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	toggle.button_pressed = false
+	await process_frame
+	(panel.find_child("SaveSettings", true, false) as BaseButton).pressed.emit()
+	await process_frame
+	var cfg := ConfigFile.new()
+	var cfg_ok := cfg.load(_game.settings_path) == OK
+	var saved_giant: Dictionary = cfg.get_value("settings", "giant", {})
+	var saved_growth: Dictionary = cfg.get_value("settings", "growth", {})
+	var reloaded: Node = (load("res://scenes/main.tscn") as PackedScene).instantiate()
+	reloaded.settings_path = _game.settings_path
+	root.add_child(reloaded)
+	await process_frame
+	var reloaded_giant_off := not bool(reloaded.get_mode_settings(1).get("desk_hazards", true))
+	var reloaded_growth_on := bool(reloaded.get_mode_settings(2).get("desk_hazards", false))
+	reloaded.queue_free()
+	await process_frame
+	_check(cfg_ok and saved_giant.get("desk_hazards", true) == false
+			and saved_growth.get("desk_hazards", false) == true
+			and reloaded_giant_off and reloaded_growth_on,
+			"desk_hazards persists per-mode to gameplay.cfg and restores cleanly on reload")
+
+	# 2. Human Evacuation mode never triggers desk hazards even on F8.
+	_game.start_mode(false)
+	await _ticks(4)
+	var human_round := _round()
+	var human_haz := human_round.get_node_or_null("DeskHazards")
+	_key(KEY_F8)
+	await _ticks(3)
+	_check(human_haz != null and not bool(human_round.desk_hazards_enabled())
+			and not bool(human_haz.debug_state().active),
+			"Human Evacuation mode never enables or triggers desk hazards on F8")
+
+	# 3. Sandbox with desk_hazards = false ignores F8; enabling live allows F8 (blocked while paused).
+	_game.start_mode(true)
+	await _ticks(4)
+	var sb_round := _round()
+	var sb_haz := sb_round.get_node_or_null("DeskHazards")
+	_key(KEY_F8)
+	await _ticks(3)
+	var blocked_when_off := sb_haz != null and not bool(sb_round.desk_hazards_enabled()) \
+			and not bool(sb_haz.debug_state().active)
+	# Re-enable live across all modes, then test pause guard on F8.
+	var growth_opts: Dictionary = _game.default_mode_settings(2)
+	growth_opts["giant_height"] = 25.2
+	growth_opts["giant_count"] = 2
+	growth_opts["coin_count"] = 0
+	growth_opts["desk_hazards"] = true
+	_game.save_all_mode_settings(
+			_game.default_mode_settings(0), _game.default_mode_settings(1),
+			growth_opts, _game.default_mode_settings(3))
+	await _ticks(2)
+	_key(KEY_ESCAPE)
+	await process_frame
+	_key(KEY_F8)
+	await process_frame
+	var blocked_when_paused := paused and not bool(sb_haz.debug_state().active)
+	_key(KEY_ESCAPE)
+	await _ticks(2)
+	_check(blocked_when_off and blocked_when_paused,
+			"desk_hazards toggle OFF and pause state both block F8 finger_poke triggers")
+
+	# 4. Growth mode F8 trigger: unattackable foreground hand, AI evasion, building destruction, full reset.
+	_game.start_growth()
+	await _ticks(6)
+	var round := _round()
+	var hazards := round.get_node_or_null("DeskHazards")
+	var sky: Node = _game.get_node_or_null("Skybox")
+	var yumeka: Node = sky.call("get_yumeka") if sky != null and sky.has_method(&"get_yumeka") else null
+	var giants_before: int = round.snapshot().giant_count
+	var destroyed_before: int = round.snapshot().destroyed
+
+	_key(KEY_F8)
+	await _ticks(2)
+	var s_windup: Dictionary = hazards.debug_state()
+	var hand_has_no_colliders := _count_collisions_in(hazards) == 0
+	var giants_unchanged := int(round.snapshot().giant_count) == giants_before
+	_check(bool(s_windup.active) and String(s_windup.phase) == "windup"
+			and String(s_windup.hazard) == "finger_poke"
+			and bool(s_windup.hand_visible) and bool(s_windup.warning_visible)
+			and bool(s_windup.shadow_visible)
+			and int(round.hazard_warning_count()) == 1,
+			"F8 starts finger_poke windup with visible foreground hand, ground shadow, warning circle and Rust warning")
+	_check(hand_has_no_colliders and giants_unchanged,
+			"foreground hand carries zero colliders and never registers into giants/rivals (strictly unattackable)")
+
+	# Place the rival AI inside the 110 m warning circle and verify Phase 4 AI switches to evade.
+	var rival: CharacterBody3D = round.get_node("OtherGiants").get_child(0) as CharacterBody3D
+	var target: Vector3 = s_windup.target
+	rival.global_position = Vector3(target.x + 28.0, 0.05, target.z)
+	var ai_evaded := false
+	for _f in 24:
+		await physics_frame
+		var actors: Array = round.growth_actors()
+		if actors.size() > 1 and String(actors[1].intent) == "evade":
+			ai_evaded = true
+			break
+	_check(ai_evaded, "Phase 4 AI inside the desk hazard warning circle immediately switches to evade")
+
+	# Verify background Yumeka arm lift & gaze relay when licensed asset is mounted.
+	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
+		await _ticks(24)
+		var relay: Dictionary = yumeka.call("debug_hazard_relay_state")
+		_check(bool(relay.active) and float(relay.arm_lift) > 0.15,
+				"background Yumeka locks gaze and raises her right arm during finger_poke windup")
+
+	# Advance to touchdown (windup = 2.4 s = 144 ticks at 60 fps) and verify impact resolution.
+	# Right before touchdown, place the rival back near the center to also verify crush damage.
+	var hit_hold := false
+	for _f in 180:
+		var st: Dictionary = hazards.debug_state()
+		if String(st.phase) == "windup" and float(st.phase_time) >= 2.25:
+			rival.global_position = Vector3(target.x + 12.0, 0.05, target.z)
+		await physics_frame
+		if String(hazards.debug_state().phase) == "hold":
+			hit_hold = true
+			break
+	var s_hold: Dictionary = hazards.debug_state()
+	var impact_info: Dictionary = s_hold.last_impact
+	_check(hit_hold and int(round.hazard_warning_count()) == 0
+			and not bool(s_hold.warning_visible) and bool(s_hold.hand_visible)
+			and int(impact_info.get("buildings_destroyed", 0)) > 0
+			and int(round.snapshot().destroyed) > destroyed_before
+			and int(impact_info.get("giants_hit", 0)) >= 1
+			and int(impact_info.get("giants_defeated", 0)) >= 1,
+			"finger_poke touchdown clears warning, destroys buildings in ~110 m radius and crushes units inside")
+
+	# Advance through hold (0.5 s) + retract (1.2 s) and verify full hide & reset.
+	var returned_idle := false
+	for _f in 160:
+		await physics_frame
+		if not bool(hazards.debug_state().active):
+			returned_idle = true
+			break
+	var s_idle: Dictionary = hazards.debug_state()
+	_check(returned_idle and String(s_idle.phase) == "idle"
+			and not bool(s_idle.hand_visible) and not bool(s_idle.warning_visible)
+			and not bool(s_idle.shadow_visible) and int(round.hazard_warning_count()) == 0,
+			"after retract the foreground hand and warning visuals hide and reset cleanly")
+
+	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
+		await _ticks(60)
+		var relay_done: Dictionary = yumeka.call("debug_hazard_relay_state")
+		_check(not bool(relay_done.active) and float(relay_done.arm_lift) < 0.05,
+				"background Yumeka right arm smoothly returns to seated desk rest after poke")
+
+	# 5. Missing Yumeka GLB graceful placeholder fallback (zero errors, valid mesh, zero colliders).
+	hazards.debug_force_placeholder(true)
+	var ph_started: bool = bool(hazards.trigger_finger_poke(Vector3(0.0, 0.0, 0.0)))
+	await _ticks(2)
+	var s_ph: Dictionary = hazards.debug_state()
+	var ph_meshes: Array = hazards.find_children("*", "MeshInstance3D", true, false)
+	_check(ph_started and bool(s_ph.active) and bool(s_ph.using_placeholder)
+			and bool(s_ph.hand_visible) and ph_meshes.size() >= 6
+			and _count_collisions_in(hazards) == 0,
+			"missing Yumeka_hand_relay.glb gracefully falls back to collision-free stylized placeholder hand")
+
+	# Leaving round mid-hazard cleans up cleanly back to title & resets Yumeka relay.
+	_game.save_all_mode_settings(
+			_game.default_mode_settings(0), _game.default_mode_settings(1),
+			_game.default_mode_settings(2), _game.default_mode_settings(3))
+	_game.show_menu()
+	await _ticks(4)
+	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
+		_check(not bool(yumeka.call("debug_hazard_relay_state").active),
+				"returning to title mid-hazard immediately clears background Yumeka relay")
 
 
 func _ankle(giant: CharacterBody3D, side: String) -> Vector3:

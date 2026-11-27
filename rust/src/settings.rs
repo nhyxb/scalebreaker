@@ -229,6 +229,9 @@ pub struct GameSettings {
     /// First person: turning the view also turns the giant's shoulders (bounded by the
     /// ±75° head cone). Off keeps the head free while the body only turns to walk.
     pub first_person_steer: bool,
+    /// Periodic tabletop desk hazards (e.g. Yumeka's foreground single-finger poke) in
+    /// Sandbox, Growth and Brawl modes. Human Evacuation mode never triggers hazards.
+    pub desk_hazards: bool,
     pub growth: GrowthSettings,
     pub brawl: BrawlSettings,
     pub sit: SitSettings,
@@ -257,6 +260,7 @@ impl Default for GameSettings {
             own_camera_shake: true,
             time_of_day: TimeOfDay::default(),
             first_person_steer: true,
+            desk_hazards: true,
             growth: GrowthSettings::default(),
             brawl: BrawlSettings::default(),
             sit: SitSettings::default(),
@@ -357,6 +361,7 @@ impl GameSettings {
             own_camera_shake: flag("own_camera_shake", default.own_camera_shake),
             time_of_day,
             first_person_steer: flag("first_person_steer", default.first_person_steer),
+            desk_hazards: flag("desk_hazards", default.desk_hazards),
             growth: GrowthSettings {
                 random_start: mode.has_growth() && flag("random_start", growth.random_start),
                 building_respawn: flag("building_respawn", growth.building_respawn),
@@ -448,6 +453,9 @@ impl GameSettings {
         values.set("own_camera_shake", self.own_camera_shake);
         values.set("time_of_day", self.time_of_day.as_str());
         values.set("first_person_steer", self.first_person_steer);
+        if mode != Mode::Human {
+            values.set("desk_hazards", self.desk_hazards);
+        }
         if mode.has_growth() {
             values.set("random_start", self.growth.random_start);
             values.set("building_respawn", self.growth.building_respawn);
@@ -666,5 +674,13 @@ mod tests {
         assert_eq!(TimeOfDay::Day.as_str(), "day");
         assert_eq!(TimeOfDay::Dusk.as_str(), "dusk");
         assert_eq!(TimeOfDay::Night.as_str(), "night");
+    }
+
+    #[test]
+    fn desk_hazards_defaults_on_across_modes() {
+        assert!(GameSettings::default().desk_hazards);
+        for mode in Mode::ALL {
+            assert!(GameSettings::for_mode(mode).desk_hazards);
+        }
     }
 }
