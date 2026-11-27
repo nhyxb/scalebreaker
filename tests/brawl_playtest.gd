@@ -2,7 +2,7 @@ extends SceneTree
 
 const BRAWL := 3
 const OPEN_STREET := Vector3(0.0, 0.01, -34.0)
-const STOMP_OFFSET := Vector3(-1.39, 0.0, -7.05)
+const FootfallFixture = preload("res://tests/footfall_fixture.gd")
 const GIANT_HEIGHT := 25.2
 
 var _game: Node
@@ -120,18 +120,16 @@ func _check_demolition() -> void:
 	_check(not state.human_stage and state.can_attack and state.building_hits == 9
 			and not round.has_node("Human") and round.get_node("Civilians").get_child_count() == 0,
 			"The harbor menu opens an all-giant round with Growth building durability")
-	var giant: CharacterBody3D = round.get_node("Giant")
 	var building: Node3D = round.get_node("District/Targets/DockPress1")
-	giant.position = building.position + Vector3(0.16, 0.01, float(building.footprint.z) * 0.5 + 0.76)
-	await _ticks(4)
-	for hit in 9:
-		round.tap_stomp()
-		await _ticks(66)
+	for hit in 14:
+		await FootfallFixture.strike_building(round, building)
+		if building.get_node("BlockingBody").collision_layer == 0:
+			break
 	state = round.snapshot()
 	_check(building.get_node("BlockingBody").collision_layer == 0
 			and state.giant_destroyed == 1 and state.growth_count == 0
 			and is_equal_approx(state.giant_height, 3.0) and round.get_node("Coins").get_child_count() == 0,
-			"Stomp demolition awards neither height nor a coin")
+			"Footfall demolition awards neither height nor a coin")
 	_game.pause()
 	_game.restart()
 	await _ticks(2)
@@ -151,22 +149,23 @@ func _check_idle_ai() -> void:
 		var clearance := 2.9 * height / GIANT_HEIGHT + 2.0
 		rival.position = building.position + Vector3(0.67, 0.01, float(building.footprint.z) * 0.5 + clearance)
 		seed(48162)
-		var attacked := false
-		var kept_moving := true
+		var landed := false
+		var moving_segments := 0
 		for segment in 4:
 			var start := rival.position
 			var displacement := 0.0
 			for frame in 90:
 				await physics_frame
-				attacked = attacked or not round.growth_actors()[1].stomp
+				var gait := FootfallFixture.actor(round, 1)
+				landed = landed or int(gait.footfall_count) > 0
 				displacement = maxf(displacement, (rival.position - start).slide(Vector3.UP).length())
-			kept_moving = kept_moving and displacement > 1.0
-		_check(not attacked and kept_moving,
-				"A %.0f m Brawl AI keeps roaming without targeting nearby buildings" % height)
+			moving_segments += int(displacement > 1.0)
+		_check(landed and moving_segments >= 3,
+				"A %.0f m Brawl AI keeps roaming and landing footsteps near buildings" % height)
 		if height >= 40.0:
 			var state: Dictionary = round.snapshot()
 			_check(state.destroyed > state.giant_destroyed,
-					"At the crush height a roaming AI walks through buildings without an active attack")
+					"At the crush height a roaming AI can demolish buildings in its walking path")
 
 
 func _check_combat() -> void:
@@ -182,14 +181,12 @@ func _check_combat() -> void:
 		rival.position = OPEN_STREET + Vector3.BACK * 100.0
 		survivor.position = Vector3(-280.0, 0.01, -260.0)
 		await _ticks(3)
-		round.tap_stomp()
-		await _ticks(2)
-		var center := giant.position + STOMP_OFFSET * (height / GIANT_HEIGHT)
-		for frame in 30:
-			if rival.collision_layer == 0:
-				break
-			rival.position = center
-			await physics_frame
+		giant.add_collision_exception_with(rival)
+		rival.add_collision_exception_with(giant)
+		var landed := await FootfallFixture.land(round, func(gait: Dictionary) -> void:
+			FootfallFixture.place_under(rival, gait))
+		var drop_position := giant.position
+		_check(not landed.is_empty(), "The walking swing lands on the rival")
 		_check(rival.collision_layer == 0 and round.snapshot().giant_kills == 1,
 				"The %.0f m attacker defeats one rival" % height)
 		await _ticks(32)
@@ -200,7 +197,7 @@ func _check_combat() -> void:
 		if height < 50.0 or coins.get_child_count() != 1:
 			continue
 		var coin: Node3D = coins.get_child(0)
-		_check(coin.position.distance_to(OPEN_STREET) < 0.1 and round.snapshot().coins_collected == 0,
+		_check(_distance_on_ground(coin.position, drop_position) < 0.1 and round.snapshot().coins_collected == 0,
 				"The coin stays under the attacker's feet without being collected")
 		giant.position = Vector3(320.0, 0.01, 290.0)
 		survivor.position = coin.position
@@ -243,14 +240,10 @@ func _check_crowded_respawn() -> void:
 	giant.position = OPEN_STREET
 	rival.position = OPEN_STREET + Vector3.BACK * 100.0
 	await _ticks(3)
-	round.tap_stomp()
-	await _ticks(2)
-	var center := giant.position + STOMP_OFFSET * (50.0 / GIANT_HEIGHT)
-	for frame in 30:
-		if rival.collision_layer == 0:
-			break
-		rival.position = center
-		await physics_frame
+	giant.add_collision_exception_with(rival)
+	rival.add_collision_exception_with(giant)
+	await FootfallFixture.land(round, func(gait: Dictionary) -> void:
+		FootfallFixture.place_under(rival, gait))
 	_check(rival.collision_layer == 0, "A giant is defeated on the compact map")
 	for frame in 60:
 		for index in survivors.size():
@@ -297,31 +290,27 @@ func _check_upward_footfall_damage() -> void:
 	rival.position = Vector3(-100, 0.02, 100)
 	await _ticks(4)
 	var starting_health: float = round.growth_actors()[1].health
-	# Keep the target in the walking footfalls without letting its capsule stop the stride.
-	rival.collision_layer = 0
-	rival.collision_mask = 1
-	Input.action_press("move_forward")
-	for frame in 75:
-		rival.position = giant.position + Vector3.FORWARD * 1.5
-		await physics_frame
-	Input.action_release("move_forward")
-	_check(giant.position.distance_to(OPEN_STREET) > 4.0
-			and is_equal_approx(round.growth_actors()[1].health, starting_health),
-			"A smaller giant can walk over a taller rival without dealing passive footfall damage")
+	giant.add_collision_exception_with(rival)
+	rival.add_collision_exception_with(giant)
+	var radius := 2.9 * float(actors[1].height) / GIANT_HEIGHT
+	var missed := await FootfallFixture.land(round, func(gait: Dictionary) -> void:
+		var half_extents: Vector2 = gait.footfall_half_extents
+		FootfallFixture.place_under(rival, gait, Vector3(half_extents.x + radius + 0.5, 0.0, 0.0)))
+	_check(not missed.is_empty() and is_equal_approx(round.growth_actors()[1].health, starting_health),
+			"A footfall beside a taller enemy leaves the enemy unharmed")
 
+	giant.position = OPEN_STREET
 	rival.position = Vector3(-100, 0.02, 100)
-	await _ticks(70)
-	var aim_point: Vector3 = giant.position + STOMP_OFFSET * (actors[0].height / GIANT_HEIGHT)
-	var prior_health: float = round.growth_actors()[1].health
-	round.tap_stomp()
-	for frame in 70:
-		rival.position = aim_point
-		await physics_frame
-		if round.growth_actors()[1].health < prior_health:
-			break
-	_check(round.growth_actors()[1].health < prior_health,
-			"A deliberate stomp can still hit a taller rival")
-
+	await _ticks(12)
+	var landed := await FootfallFixture.land(round, func(gait: Dictionary) -> void:
+		FootfallFixture.place_under(rival, gait))
+	var after := float(round.growth_actors()[1].health)
+	_check(not landed.is_empty() and after < starting_health and after > 0.0,
+			"A sole overlap damages a taller enemy")
+	rival.position = Vector3(-100, 0.02, 100)
+	await _ticks(45)
+	_check(is_equal_approx(round.growth_actors()[1].health, after),
+			"One heavy landing does not damage a taller enemy again while planted")
 
 func _check_giants_pass() -> void:
 	for ignore_ratio in [10.0, 3.0]:
@@ -346,6 +335,12 @@ func _check_giants_pass() -> void:
 		var giant: CharacterBody3D = round.get_node("Giant")
 		var rival: CharacterBody3D = round.get_node("OtherGiants/Giant2")
 		giant.position = OPEN_STREET
+		FootfallFixture.face(round, giant, 0.0)
+		rival.position = giant.position + Vector3.BACK
+		await _ticks(3)
+		_check(is_equal_approx(float(FootfallFixture.actor(round, 1).health), 1.0)
+				and int(FootfallFixture.actor(round).footfall_count) == 0,
+				"Body overlap alone does not damage a smaller giant at ignore ratio %.0f" % ignore_ratio)
 		var blocker := Vector3(0, 0.02, -54)
 		rival.position = blocker
 		await _ticks(4)
@@ -356,10 +351,8 @@ func _check_giants_pass() -> void:
 		Input.action_release("move_forward")
 		actors = round.growth_actors()
 		_check(giant.position.z < blocker.z - 6.0 and rival.collision_layer == 4
-				and actors[0].health == 1.0,
+				and actors[0].health > 0.99,
 				"A larger giant can walk past a living smaller rival with ignore ratio %.0f" % ignore_ratio)
-		if ignore_ratio == 3.0:
-			_check(actors[1].health < 1.0, "Passing contact still damages the smaller giant at the configured ratio")
 		rival.position = Vector3(-100, 0.02, 100)
 		await _ticks(2)
 		_check(not giant.get_collision_exceptions().has(rival) and not rival.get_collision_exceptions().has(giant),

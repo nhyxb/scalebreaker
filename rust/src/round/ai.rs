@@ -28,7 +28,7 @@ pub(super) const HIT_TTL: f32 = 2.5;
 pub(super) const GRUDGE_TTL: f32 = 25.0;
 /// How long a failed escape heading stays blacklisted (3–5 s band).
 pub(super) const FAILED_ESCAPE_TTL: f32 = 4.0;
-/// How long a recent stomp/sit/combat location stays a danger zone (12–15 s).
+/// How long a recent footfall/sit/combat location stays a danger zone (12–15 s).
 pub(super) const DANGER_TTL: f32 = 13.0;
 /// Candidate rays for the 360° escape scorer (every 22.5°).
 const ESCAPE_RAYS: usize = 16;
@@ -94,9 +94,9 @@ impl Personality {
 /// `human_ignore_ratio` settings stay hard gates in front of this matrix.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum SizeTier {
-    /// `< 0.1×` — incidental stomp in passing, never a deliberate chase.
+    /// `< 0.1×` — incidental footfall in passing, never a deliberate chase.
     Trivial,
-    /// `0.1–0.5×` — actively chased with lead prediction, intercepted via stomp/sit.
+    /// `0.1–0.5×` — actively chased with lead prediction, intercepted via footfall or sit.
     Prey,
     /// `0.5–0.8×` — pressed hard in close combat.
     Pushover,
@@ -199,7 +199,7 @@ pub(super) struct CombatMemory {
     pub grudge: Option<(InstanceId, f32)>,
     /// Escape headings that ran into a wall or made no progress (yaw, TTL).
     pub failed_escapes: Vec<(f32, f32)>,
-    /// Recent stomp/sit/combat locations to avoid while foraging
+    /// Recent footfall/sit/combat locations to avoid while foraging
     /// (position, radius, TTL).
     pub danger_zones: Vec<(Vector3, f32, f32)>,
 }

@@ -1,7 +1,7 @@
 extends SceneTree
 ## Exercises the growth mode through the same menu, settings and input as a player.
 
-const FOOT_OFFSET := Vector3(-1.39, 0.0, -7.05)
+const FootfallFixture = preload("res://tests/footfall_fixture.gd")
 const BASE_HEIGHT := 25.2
 const OPEN_STREET := Vector3(0.0, 0.01, -34.0)
 
@@ -31,7 +31,7 @@ func _run() -> void:
 	await _foraging_ai()
 	await _avoidance_ai()
 	await _coin_tiers_and_dwell()
-	await _ai_evades_warning_circles()
+	await _ai_evades_footfall_landings()
 	await _demolition_ai()
 	await _walk_tempo_and_own_shake()
 	await _human_speed_multiplier()
@@ -318,26 +318,23 @@ func _split_growth_rates() -> void:
 			and after_coin.can_demolish,
 			"Coin pickup applies only the configured coin growth rate (50%)")
 	var building: Node3D = match_round.get_node("District/Targets/DockPress1")
-	var surface := building.position + Vector3.BACK * (float(building.footprint.z) * 0.5)
-	giant.position = surface + Vector3(0.16, 0.01, 0.76)
-	await _ticks(4)
 	for hit in 9:
-		await _stomp()
+		await FootfallFixture.strike_building(match_round, building)
 	await _ticks(35)
 	_check(match_round.snapshot().giant_destroyed == 1
 			and is_equal_approx(match_round.snapshot().giant_height, 3.6),
-			"Stomp demolition applies only the configured building growth rate (20%)")
+			"Footfall demolition applies only the configured building growth rate (20%)")
 	_game.show_menu()
 
 	_start({"giant_height": 40.0, "coin_growth_rate": 1.0, "building_growth_rate": 0.25})
 	match_round = _round()
 	giant = _giant()
 	building = match_round.get_node("District/Targets/DockPress1")
-	giant.position = building.position + Vector3.UP * 0.01
+	await FootfallFixture.strike_building(match_round, building)
 	await _ticks(40)
 	_check(match_round.snapshot().giant_destroyed == 1
 			and is_equal_approx(match_round.snapshot().giant_height, 50.0),
-			"Touch-crush demolition uses the building growth rate rather than coin growth rate")
+			"One-hit footfall demolition uses the building growth rate rather than coin growth rate")
 	_game.show_menu()
 
 	_start({"giant_height": 23.4, "coin_growth_rate": 1.0, "building_growth_rate": 0.30})
@@ -463,13 +460,17 @@ func _combat_unlock() -> void:
 	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
 	rival.position = Vector3(600.0, 0.02, 600.0)
 	var building: Node3D = match_round.get_node("District/Targets/DockPress1")
-	var edge := building.position + Vector3.BACK * (float(building.footprint.z) * 0.5)
-	giant.position = edge + Vector3(0.155, 0.01, 0.86)
-	_press_stomp()
-	await _ticks(30)
-	_check(match_round.snapshot().stomp == "ready" and not match_round.snapshot().can_demolish
+	var edge := building.position - Vector3.BACK * (float(building.footprint.z) * 0.5)
+	giant.position = edge + Vector3(0.0, 0.02, -1.2)
+	FootfallFixture.face(match_round, giant, PI)
+	var initial_contacts := int(FootfallFixture.actor(match_round).footfall_count)
+	Input.action_press("move_forward")
+	await _ticks(45)
+	Input.action_release("move_forward")
+	_check(int(FootfallFixture.actor(match_round).footfall_count) == initial_contacts
+			and not match_round.snapshot().can_demolish
 			and not building.get("_cracked") and match_round.snapshot().destroyed == 0,
-			"Humans below the demolition height cannot start a stomp or damage a building")
+			"Human movement below the demolition height leaves buildings and heavy footfalls unchanged")
 	var coins := match_round.get_node("Coins")
 	var coin: Node3D = coins.get_child(0)
 	giant.position = coin.position + Vector3.UP * 0.01
@@ -484,38 +485,33 @@ func _combat_unlock() -> void:
 	await _ticks(8)
 	giant.position = OPEN_STREET
 	var rival_health := float(match_round.growth_actors()[1]["health"])
-	var center := giant.position + FOOT_OFFSET * (float(state.giant_height) / BASE_HEIGHT)
-	_press_stomp()
-	for frame in 27:
-		if rival.collision_layer != 0:
-			rival.position = center
-		await physics_frame
+	FootfallFixture.face(match_round, giant, 0.0)
+	await _ticks(6)
+	await FootfallFixture.land(match_round, func(gait: Dictionary) -> void:
+		FootfallFixture.place_under(rival, gait))
 	await _ticks(90)
 	var after: Array = match_round.growth_actors()
 	_check(after[1].health < rival_health and after[1].get("can_demolish") == false
 			and match_round.snapshot().coins_collected == harvested,
-			"A giant stomp hits a human actor without granting coin growth")
+			"A giant footfall hits a human actor without granting coin growth")
 	_game.show_menu()
 
 
 func _demolition_and_rivals() -> void:
 	_start({"giant_height": 3.0})
 	var match_round := _round()
-	var giant := _giant()
 	var building: Node3D = match_round.get_node("District/Targets/DockPress1")
 	var blocker: StaticBody3D = building.get_node("BlockingBody")
-	var surface := building.position + Vector3.BACK * (float(building.footprint.z) * 0.5)
-	giant.position = surface + Vector3(0.16, 0.01, 0.76)
 	await _ticks(4)
 	_check(match_round.snapshot().can_demolish and match_round.get_node("Coins").get_child_count() == 0,
 			"Demolition begins exactly at the three-meter threshold")
-	await _stomp()
-	_check(blocker.collision_layer == 8 and building.get("_cracked"), "A three-meter giant cracks a building on its first stomp")
+	await FootfallFixture.strike_building(match_round, building)
+	_check(blocker.collision_layer == 8 and building.get("_cracked"), "A three-meter giant cracks a building on its first heavy footfall")
 	for remaining in 7:
-		await _stomp()
+		await FootfallFixture.strike_building(match_round, building)
 	_check(blocker.collision_layer == 8 and match_round.snapshot().building_hits == 9,
 			"A three-meter giant's first eight impacts leave the building standing")
-	await _stomp()
+	await FootfallFixture.strike_building(match_round, building)
 	await _ticks(30)
 	_check(blocker.collision_layer == 0 and match_round.snapshot().giant_destroyed == 1
 			and is_equal_approx(match_round.snapshot().giant_height, 3.3),
@@ -524,20 +520,18 @@ func _demolition_and_rivals() -> void:
 
 	_start({"giant_height": 3.0, "giant_count": 2, "base_attack": 200.0, "respawn_delay": 1.5})
 	match_round = _round()
-	giant = _giant()
+	var giant := _giant()
 	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
 	var rival_nameplate: Label3D = rival.get_node("HealthBar/GiantName")
 	var rival_name := rival_nameplate.text
 	giant.position = OPEN_STREET
 	rival.position = OPEN_STREET + Vector3.BACK * 30.0
-	var center := giant.position + FOOT_OFFSET * (3.0 / BASE_HEIGHT)
-	await _ticks(4)
-	_press_stomp()
-	await _ticks(3)
-	for frame in 27:
-		if rival.collision_layer != 0:
-			rival.position = center
-		await physics_frame
+	await _ticks(6)
+	giant.add_collision_exception_with(rival)
+	rival.add_collision_exception_with(giant)
+	var landed := await FootfallFixture.land(match_round, func(gait: Dictionary) -> void:
+		FootfallFixture.place_under(rival, gait))
+	var center: Vector3 = landed.get("last_footfall_center", giant.position)
 	await _ticks(45)
 	var state: Dictionary = match_round.snapshot()
 	_check(rival.collision_layer == 0 and state.giant_kills == 1 and state.giants_alive == 1
@@ -546,8 +540,8 @@ func _demolition_and_rivals() -> void:
 	var ranking: Array[Dictionary] = match_round.growth_leaderboard()
 	_check(ranking[0].is_player and ranking[1].name == rival_name and ranking[1].rank == 0,
 			"A defeated rival keeps its name and moves off the active ranking")
-	var defeat := "%s  重踏击倒  %s" % [ranking[0].name, rival_name]
-	_check(_defeat_messages() == [defeat], "A lethal stomp announces the correct attacker, move and victim once")
+	var defeat := "%s  落脚击倒  %s" % [ranking[0].name, rival_name]
+	_check(_defeat_messages() == [defeat], "A lethal footfall announces the correct attacker, move and victim once")
 	await _ticks(62)
 	state = match_round.snapshot()
 	_check(rival.collision_layer == 4 and rival.visible and rival.position.distance_to(center) >= 16.0
@@ -575,7 +569,7 @@ func _foraging_ai() -> void:
 	var capsule: CapsuleShape3D = rival.get_node("Collision").shape
 	_check(rival.position.distance_to(start) > 0.004 and is_equal_approx(capsule.height, 0.0121)
 			and coins.get_child_count() == 0
-			and not match_round.get_node("Effects").has_node("StompWarning2"),
+			and int(FootfallFixture.actor(match_round, 1).footfall_count) == 0,
 			"Without a rival in reach the small AI seeks coins before it can demolish")
 	_game.show_menu()
 
@@ -607,22 +601,24 @@ func _respawn_keeps_the_district() -> void:
 	var player := _giant()
 	var building: Node3D = match_round.get_node("District/Targets/DockPress1")
 	var blocker: StaticBody3D = building.get_node("BlockingBody")
-	var edge := building.position + Vector3.BACK * (float(building.footprint.z) * 0.5)
-	player.position = edge + Vector3(0.16, 0.01, 0.76)
-	await _ticks(4)
 	for impact in 9:
-		await _stomp()
+		await FootfallFixture.strike_building(match_round, building)
 	await _ticks(28)
 	_check(blocker.collision_layer == 0 and match_round.snapshot().giant_destroyed == 1,
 			"The player creates a ruin before the respawn combat test")
 	var death_at := OPEN_STREET
 	player.position = death_at
-	for frame in 180:
+	# The demolished building raised the player to 3.3 m. A smaller giant's
+	# sole cannot hurt it, so give this lethal opponent enough height to fight.
+	match_round.debug_resize_giant(1, 5.0)
+	rival.position = death_at + Vector3.BACK * 2.0
+	rival.rotation = Vector3.ZERO
+	rival.velocity = Vector3.ZERO
+	for frame in 360:
 		if match_round.snapshot().giant_respawning:
 			break
-		rival.position = death_at + Vector3.BACK * 0.94
 		await physics_frame
-	_check(match_round.snapshot().giant_respawning, "The AI can defeat the player with a stomp")
+	_check(match_round.snapshot().giant_respawning, "The AI can defeat the player with its heavy gait or a hand attack")
 	await _ticks(70)
 	var state: Dictionary = match_round.snapshot()
 	_check(_round() == match_round and not state.giant_respawning and player.visible
@@ -724,37 +720,53 @@ func _coin_tiers_and_dwell() -> void:
 	_game.show_menu()
 
 
-func _ai_evades_warning_circles() -> void:
+func _ai_evades_footfall_landings() -> void:
 	seed(77331)
 	_start({"giant_height": 25.2, "giant_count": 2, "giant_max_height": 25.2,
-			"coin_count": 0, "base_attack": 1.0, "respawn_delay": 60.0})
+			"coin_count": 0, "base_attack": 1.0, "respawn_delay": 60.0, "giant_speed": 1.0})
 	var match_round := _round()
 	await _ticks(4)
 	var player := _giant()
 	player.position = OPEN_STREET
 	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
-	match_round.debug_resize_giant(1, 25.2)
-	# Park the rival 4 m beyond the player's left-foot landing spot: inside
-	# the warning ellipse, but ~11 m from the player — outside its own stomp
-	# reach, so only the player's windup can freeze the scene.
-	var center := OPEN_STREET + FOOT_OFFSET
-	rival.position = center + Vector3.FORWARD * 4.0
-	await _ticks(2)
-	var evading := false
-	var escaped := false
-	_press_stomp()
-	for frame in 42:
+	rival.position = OPEN_STREET + Vector3.BACK * 100.0
+	player.add_collision_exception_with(rival)
+	rival.add_collision_exception_with(player)
+	await _ticks(6)
+	var center := Vector3.INF
+	var escaped_from := Vector3.INF
+	var swing_count := int(FootfallFixture.actor(match_round).footfall_count)
+	Input.action_press("move_forward")
+	for frame in 120:
 		await physics_frame
-		var actors: Array = match_round.growth_actors()
-		if String(actors[1].intent) == "evade":
-			evading = true
-		if rival.position.distance_to(center) > 5.0:
-			escaped = true
-	Input.action_release("stomp")
-	_check(evading,
-			"An AI caught inside a telegraphed stomp circle switches to the evade intent immediately")
-	_check(escaped,
-			"The warned rival escapes the landing ellipse before the foot comes down")
+		var gait := FootfallFixture.actor(match_round)
+		var preview: Dictionary = player.heavy_step_preview()
+		if preview.get("locked", false) and gait.get("footfall_pending", false):
+			center = gait.footfall_center
+			var rival_radius: float = rival.get_node("Collision").shape.radius
+			# The sole will clip the back of the capsule unless it takes a short
+			# evasive step along the street, where the surrounding lots leave room.
+			var near_edge := float(preview.half_extents.y) + rival_radius - 0.65
+			FootfallFixture.place_under(rival, gait, Vector3.FORWARD * near_edge)
+			rival.rotation.y = float(gait.footfall_yaw)
+			escaped_from = rival.position
+			break
+	var evading := false
+	var before := float(FootfallFixture.actor(match_round, 1).health)
+	for frame in 60:
+		await physics_frame
+		evading = evading or String(FootfallFixture.actor(match_round, 1).intent) == "evade"
+		if int(FootfallFixture.actor(match_round).footfall_count) > swing_count:
+			break
+	Input.action_release("move_forward")
+	var landed := FootfallFixture.actor(match_round)
+	var escaped := escaped_from != Vector3.INF and rival.position.slide(Vector3.UP).distance_to(
+			escaped_from.slide(Vector3.UP)) > 0.65
+	_check(center != Vector3.INF and evading,
+			"Phase-4 AI switches to evade when a committed footfall overlaps it")
+	_check(int(landed.footfall_count) == swing_count + 1 and escaped
+			and is_equal_approx(float(FootfallFixture.actor(match_round, 1).health), before),
+			"The threatened rival escapes the projected sole before the foot comes down")
 	_game.show_menu()
 
 
@@ -784,15 +796,15 @@ func _demolition_ai() -> void:
 	var building: Node3D = match_round.get_node("District/Targets/DockPress1")
 	var clearance := 2.9 * (12.0 / 25.2) + 2.0
 	rival.position = building.position + Vector3(0.67, 0.02, float(building.footprint.z) * 0.5 + clearance)
-	var attacked := false
+	var landed := false
 	var start_pos := rival.position
 	var displacement := 0.0
 	for frame in 320:
 		await physics_frame
-		attacked = attacked or not match_round.growth_actors()[1].stomp
+		landed = landed or int(FootfallFixture.actor(match_round, 1).footfall_count) > 0
 		displacement = maxf(displacement, (rival.position - start_pos).slide(Vector3.UP).length())
-	_check(not attacked and match_round.snapshot().destroyed == 0 and displacement > 2.0,
-			"An AI at the round height cap stops targeting buildings and roams when no combat target is nearby")
+	_check(landed and displacement > 2.0,
+			"An AI at the round height cap keeps walking when no combat target is nearby")
 	_game.show_menu()
 
 	# An AI capped by an occupied height band also roams instead of actively stomping buildings.
@@ -805,15 +817,15 @@ func _demolition_ai() -> void:
 	building = match_round.get_node("District/Targets/DockPress1")
 	clearance = 2.9 * (7.0 / 25.2) + 2.0
 	rival.position = building.position + Vector3(0.67, 0.02, float(building.footprint.z) * 0.5 + clearance)
-	attacked = false
+	landed = false
 	start_pos = rival.position
 	displacement = 0.0
 	for frame in 320:
 		await physics_frame
-		attacked = attacked or not match_round.growth_actors()[1].stomp
+		landed = landed or int(FootfallFixture.actor(match_round, 1).footfall_count) > 0
 		displacement = maxf(displacement, (rival.position - start_pos).slide(Vector3.UP).length())
-	_check(not attacked and match_round.snapshot().destroyed == 0 and displacement > 2.0,
-			"An AI held at its current height-band cap stops targeting buildings and roams when idle")
+	_check(landed and displacement > 2.0,
+			"An AI held at its current height-band cap keeps walking when idle")
 	_game.show_menu()
 
 
@@ -1018,7 +1030,7 @@ func _small_giant_ground_contact_stays_steady() -> void:
 
 
 func _early_rival_combat() -> void:
-	# Humans cannot attack at all; growing into a giant unlocks stomp damage.
+	# Growing into a giant unlocks the heavy gait and hand attacks.
 	_start({"giant_height": 0.5, "giant_count": 2, "coin_count": 4, "coin_interval": 600.0,
 			"coin_growth_rate": 1.0, "giant_speed": 2.0, "respawn_delay": 60.0, "base_attack": 70.0})
 	var match_round := _round()
@@ -1031,10 +1043,12 @@ func _early_rival_combat() -> void:
 	_check(is_equal_approx(state.giant_height, 0.5) and state.get("human_stage", false)
 			and not state.can_attack and not state.can_demolish,
 			"Both actors start below the demolition height as humans")
-	_press_stomp()
-	await _ticks(12)
-	_check(match_round.snapshot().stomp == "ready",
-			"A human cannot start a stomp even when the attack key is pressed")
+	var before := int(FootfallFixture.actor(match_round).footfall_count)
+	Input.action_press("move_forward")
+	await _ticks(30)
+	Input.action_release("move_forward")
+	_check(int(FootfallFixture.actor(match_round).footfall_count) == before,
+			"Human-stage walking produces no heavy footfalls")
 	var coins := match_round.get_node("Coins")
 	for coin in coins.get_children():
 		coin.position = giant.position
@@ -1043,16 +1057,14 @@ func _early_rival_combat() -> void:
 	_check(state.giant_height > 3.0 and state.can_demolish and not state.get("human_stage", true),
 			"Eating coins turns the human into a giant")
 	var rival_health := float(match_round.growth_actors()[1]["health"])
-	var center := giant.position + FOOT_OFFSET * (float(state.giant_height) / BASE_HEIGHT)
-	_press_stomp()
-	for frame in 42:
-		if rival.collision_layer != 0:
-			rival.position = center
-		await physics_frame
+	FootfallFixture.face(match_round, giant, 0.0)
+	await _ticks(6)
+	await FootfallFixture.land(match_round, func(gait: Dictionary) -> void:
+		FootfallFixture.place_under(rival, gait))
 	await _ticks(60)
 	var after: Array = match_round.growth_actors()
 	_check(float(after[1]["health"]) < rival_health or int(after[1]["health"]) == 0,
-			"A giant stomp hurts the smaller human actor")
+			"A giant footfall hurts the smaller human actor")
 	_game.show_menu()
 
 
@@ -1077,7 +1089,7 @@ func _giant_ai_vs_human() -> void:
 	actors = round.growth_actors()
 	_check(float(actors[1]["height"]) > 3.0 and bool(actors[1]["can_demolish"]),
 			"The coin-eating AI becomes a giant")
-	_check(defeated, "A giant AI stomps the human player exactly like the old pedestrian NPCs")
+	_check(defeated, "A giant AI can defeat the growth human with its normal combat behavior")
 	_game.show_menu()
 
 	_start({"giant_height": 0.5, "giant_count": 1, "coin_count": 0})
@@ -1108,35 +1120,25 @@ func _huge_rivals_engage() -> void:
 	var match_round := _round()
 	var player := _giant()
 	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
-	var targets: Node3D = match_round.get_node("District/Targets")
-	for pair: Array in [[player, "DockPress1"], [rival, "DockPress2"]]:
-		var at: Vector3 = (targets.get_node(pair[1] as String) as Node3D).position
-		(pair[0] as CharacterBody3D).position = Vector3(at.x, 0.015, at.z)
-	var player_capsule: CapsuleShape3D = player.get_node("Collision").shape
-	var rival_capsule: CapsuleShape3D = rival.get_node("Collision").shape
-	for frame in 300:
-		await physics_frame
-		if player_capsule.height >= 499.0 and rival_capsule.height >= 499.0:
-			break
-	_check(player_capsule.height >= 499.0 and rival_capsule.height >= 499.0,
-			"Two giants that crush one building each reach the 500 m height cap")
+	match_round.debug_resize_giant(0, 500.0)
+	match_round.debug_resize_giant(1, 500.0)
+	player.position = Vector3(0.0, 0.02, 220.0)
 	# Break the lock both picked up while standing 36 m apart: out of sight for two seconds
 	# drops the chase target, so the pair has to re-acquire from 130 m away.
 	rival.position = player.position + Vector3.BACK * 620.0
 	await _ticks(150)
 	rival.position = player.position + Vector3.BACK * 130.0
 	var health_before := float(match_round.snapshot().giant_health)
-	var effects: Node = match_round.get_node("Effects")
-	var warned := false
+	var started_gait := false
 	var health_after := health_before
 	for frame in 600:
 		await physics_frame
-		warned = warned or effects.has_node("StompWarning2")
+		started_gait = started_gait or bool(FootfallFixture.actor(match_round, 1).footfall_pending)
 		health_after = float(match_round.snapshot().giant_health)
-		if warned and health_after < health_before:
+		if started_gait and health_after < health_before:
 			break
-	_check(warned and health_after < health_before,
-			"A rival several hundred metres tall targets and stomps an equal giant beside it")
+	_check(started_gait and health_after < health_before,
+			"A rival several hundred metres tall can engage and damage an equal giant beside it")
 	_game.show_menu()
 
 
@@ -1602,10 +1604,11 @@ func _check_retargeted_skin(skin_name: StringName, ankle_name: String, toe_name:
 	var foot_lift := 0.0
 	var up := (skin.basis * skeleton.basis).inverse() * Vector3.UP
 	up = up.normalized()
-	for frame in 48:
-		giant.show_motion(0.0, frame / 47.0, 1.0 / 60.0)
+	for frame in 120:
+		giant.position.z -= 0.12
+		giant.show_motion(7.2, 0.0, 1.0 / 60.0)
 		foot_lift = maxf(foot_lift, up.dot(skeleton.get_bone_global_pose(ankle).origin - idle_ankle))
-	_check(foot_lift * skin.scale.x > 0.2, "The procedural stomp lifts %s's foot" % skin_name)
+	_check(foot_lift * skin.scale.x > 0.2, "The heavy gait lifts %s's shoe" % skin_name)
 	for kind in 2:
 		var initial := skeleton.get_bone_global_pose(wrist).origin
 		var wrist_travel := 0.0
@@ -1624,22 +1627,25 @@ func _building_crush_height() -> void:
 		var giant := _giant()
 		var building: Node3D = current.get_node("District/Targets/DockPress1")
 		var blocker: StaticBody3D = building.get_node("BlockingBody")
-		var edge := building.position + Vector3.BACK * (float(building.footprint.z) * 0.5)
-		giant.position = edge + Vector3(0.0, 0.01, 2.9 * height / BASE_HEIGHT + 0.25)
-		await _ticks(4)
-		var previous := giant.position.z
-		Input.action_press("move_forward")
-		await _ticks(15)
-		Input.action_release("move_forward")
+		var landing := await FootfallFixture.strike_building(current, building)
 		var state: Dictionary = current.snapshot()
 		if height < 40.0:
-			_check(blocker.collision_layer == 8 and not state.can_crush_buildings and state.building_hits == 2
-					and giant.position.z > previous - 1.2 and (giant.collision_mask & 16) != 0,
+			var building_edge: float = building.position.z - building.footprint.z * 0.5
+			_check(not landing.is_empty() and blocker.collision_layer == 8 and building.get("_cracked")
+					and not state.can_crush_buildings and state.building_hits == 2
+					and (giant.collision_mask & 16) != 0 and giant.position.z < building_edge,
 					"Just under forty meters the giant is blocked and needs two strikes")
 		else:
-			_check(blocker.collision_layer == 0 and state.can_crush_buildings and state.building_hits == 1
-					and giant.position.z < previous - 1.5 and (giant.collision_mask & 16) == 0
-					and giant.position.y < 0.1, "At forty meters the giant walks through a building and its rubble")
+			current.set_touch_motion(FootfallFixture.WALK, false)
+			for frame in 90:
+				if giant.position.z > building.position.z:
+					break
+				await physics_frame
+			current.set_touch_motion(Vector2.ZERO, false)
+			_check(not landing.is_empty() and blocker.collision_layer == 0 and building.has_node("RuinBody")
+					and state.can_crush_buildings and state.building_hits == 1 and (giant.collision_mask & 16) == 0
+					and giant.position.z > building.position.z and giant.position.y < 0.1,
+					"At forty meters a footfall destroys the building and the giant walks through the rubble")
 		_game.show_menu()
 
 
@@ -1748,18 +1754,19 @@ func _first_person_eye_tracks_head() -> void:
 	Input.action_release("move_forward")
 	await _ticks(50)
 	_check(tracked and bob > height * 0.001, "The eye rides the walking head bob every frame")
-	# 重踏：上半身压下，镜头跟着下压。
-	var before_stomp: Vector3 = giant.call("first_person_eye_position")
-	_press_stomp()
+	# The eye follows the head through a real touchdown and its weight transfer.
+	var eye_before_step: Vector3 = giant.call("first_person_eye_position")
 	var dip := 0.0
 	tracked = true
-	for frame in 40:
+	Input.action_press("move_forward")
+	for frame in 90:
 		await physics_frame
 		var frame_eye: Vector3 = giant.call("first_person_eye_position")
-		dip = maxf(dip, before_stomp.y - frame_eye.y)
+		dip = maxf(dip, eye_before_step.y - frame_eye.y)
 		tracked = tracked and absf(camera.global_position.y - frame_eye.y) < 0.0015
-	_check(tracked and dip > height * 0.02, "A stomp dips the eye with the leaning head")
-	await _ticks(60)
+	Input.action_release("move_forward")
+	_check(tracked and dip > height * 0.006, "A heavy footfall dips the eye with the head")
+	await _ticks(55)
 	# 坐压：头部随坐姿下沉，镜头仍贴着头。
 	Input.action_press("stand_up")
 	await _ticks(2)
@@ -1826,24 +1833,36 @@ func _first_person_view_limits() -> void:
 	var offset := rad_to_deg(angle_difference(giant.get_rotation().y, orbit.rotation.y))
 	_check(steered > 0.4 and absf(offset) <= limit,
 			"Steering on turns the body with the view while the head stays inside 75°")
-	# 攻击锁定：重踏蓄力到落地这段时间转视角，身体朝向不许被带走。
-	_press_stomp()
-	await _ticks(2)
-	body_yaw = giant.get_rotation().y
-	var locked := String(_round().snapshot().get("stomp", "")) == "windup"
-	_key_hold(KEY_LEFT, true)
-	var turned_during := 0.0
-	for frame in 22:
+	# A foot that has committed to landing stays on its projected mark as the view turns.
+	var current := _round()
+	FootfallFixture.face(current, giant, 0.0)
+	giant.position = OPEN_STREET
+	await _ticks(6)
+	current.set_camera_view(2)
+	var forecast: Vector3 = Vector3.INF
+	var gait_count := int(FootfallFixture.actor(current).footfall_count)
+	Input.action_press("move_forward")
+	for frame in 100:
 		await physics_frame
-		var phase := String(_round().snapshot().get("stomp", ""))
-		if phase == "windup" or phase == "impact":
-			turned_during = maxf(turned_during,
-					absf(angle_difference(body_yaw, giant.get_rotation().y)))
+		var actor := FootfallFixture.actor(current)
+		if giant.heavy_step_preview().get("locked", false) and actor.footfall_pending:
+			forecast = actor.footfall_center
+			break
+	var yaw_before_turn := orbit.rotation.y
+	Input.action_release("move_forward")
+	_key_hold(KEY_LEFT, true)
+	for frame in 90:
+		await physics_frame
+		if int(FootfallFixture.actor(current).footfall_count) > gait_count:
+			break
 	_key_hold(KEY_LEFT, false)
-	_check(locked and turned_during < 0.02,
-			"A locked stomp keeps its facing while the view is steered")
-	await _ticks(90)
-	_game.show_menu()
+	var landed := FootfallFixture.actor(current)
+	var contact: Vector3 = landed.get("last_footfall_center", Vector3.INF)
+	_check(forecast != Vector3.INF and int(landed.footfall_count) == gait_count + 1
+			and absf(angle_difference(orbit.rotation.y, yaw_before_turn)) > 0.10
+			and contact.slide(Vector3.UP).distance_to(forecast.slide(Vector3.UP)) < 0.10,
+			"A committed sole projection stays fixed while first-person steering turns the view")
+	await _ticks(50)
 
 	var config := ConfigFile.new()
 	var saved := config.load(_game.settings_path) == OK
@@ -1901,11 +1920,10 @@ func _observation_roles() -> void:
 	var world_start := camera.global_position
 	_mouse(Vector2(0.0, -350.0))
 	Input.action_press("move_forward")
-	round.tap_stomp()
 	await _ticks(10)
 	Input.action_release("move_forward")
 	_check(camera.global_position.y > world_start.y + 0.02 and camera.position == camera_start
-			and round.snapshot().stomp == "ready" and giant.position.distance_to(giant_start) > 0.0008,
+			and giant.position.distance_to(giant_start) > 0.0008,
 			"Glancing upward and moving flies the camera while the first giant moves on its own")
 	_game.pause()
 	var paused_at := camera.global_position
@@ -1956,8 +1974,7 @@ func _building_refresh() -> void:
 	var round := _round()
 	var giant := _giant()
 	var historic: Node3D = round.get_node("District/Targets/DockPress1")
-	giant.position = historic.position + Vector3.UP * 0.01
-	await _ticks(4)
+	await FootfallFixture.strike_building(round, historic)
 	giant.position = OPEN_STREET
 	Engine.time_scale = 8.0
 	await _ticks(465)
@@ -1993,14 +2010,12 @@ func _building_refresh() -> void:
 	var radar: Node3D = round.get_node("District/Targets/HarborRadarTower")
 	var radar_visual: Node3D = radar.get_node("IntactModel")
 	var radar_transform := radar_visual.transform
-	var scale := 40.0 / BASE_HEIGHT
-	var stomp_from := historic.position + Vector3(1.39 * scale, 0.01, historic.footprint.z * 0.5 + 7.05 * scale - 0.5)
-	giant.position = stomp_from
-	await _stomp()
-	_check(historic.has_node("RuinBody"), "A stomp schedules the historic building to refresh")
+	await FootfallFixture.strike_building(round, historic)
+	_check(historic.has_node("RuinBody"), "A footfall schedules the historic building to refresh")
+	# The radar sits against the north boundary, so approach from the harbor side.
+	await FootfallFixture.strike_building(round, radar, 0.0)
 	giant.position = radar.position + Vector3.UP * 0.01
-	await _ticks(5)
-	_check(radar.has_node("RuinBody"), "Crushing by contact also schedules a building to refresh")
+	_check(radar.has_node("RuinBody"), "A heavy footfall also schedules a landmark to refresh")
 	var wrecked: int = round.snapshot().destroyed
 	await _ticks(24)
 	_game.pause()
@@ -2018,8 +2033,7 @@ func _building_refresh() -> void:
 			and radar.get_node_or_null("IntactModel") == radar_visual and radar_visual.transform == radar_transform
 			and round.snapshot().destroyed == 0 and round.snapshot().giant_destroyed == wrecked,
 			"A cleared procedural building restores its original model and collision without removing earned progress")
-	giant.position = stomp_from
-	await _stomp()
+	await FootfallFixture.strike_building(round, historic)
 	var state: Dictionary = round.snapshot()
 	_check(historic.has_node("RuinBody") and state.giant_destroyed == wrecked + state.destroyed,
 			"A rebuilt building can be destroyed again and awards normal growth progress")
@@ -2030,11 +2044,11 @@ func _defeat_feed_history() -> void:
 	var ui := _game.get_node("Interface")
 	var feed := ui.find_child("GrowthDefeatFeed", true, false) as VBoxContainer
 	var messages: Array[Dictionary] = []
-	for method in ["step", "contact_stomp", "grab_crush", "punch"]:
+	for method in ["bump", "step", "grab_crush", "punch"]:
 		messages.append({"attacker": "林晓岚", "victim": "周雨桐", "method": method,
 				"player_attack": false, "player_defeated": false})
 	ui.announce_growth_defeats(messages)
-	var newest := ["林晓岚  挥拳击倒  周雨桐", "林晓岚  捏碎击倒  周雨桐", "林晓岚  碰撞踩倒  周雨桐"]
+	var newest := ["林晓岚  挥拳击倒  周雨桐", "林晓岚  捏碎击倒  周雨桐", "林晓岚  落脚击倒  周雨桐"]
 	_check(_defeat_messages() == newest, "A burst of messages keeps the three newest in order")
 	_game.pause()
 	await _ticks(310)
@@ -2189,27 +2203,9 @@ func _mouse(motion: Vector2) -> void:
 	Input.flush_buffered_events()
 
 
-func _press_stomp() -> void:
-	Input.action_press("stomp")
-
-
-func _stomp() -> void:
-	Input.action_release("stomp")
-	var match_round := _round()
-	for frame in 100:
-		if match_round.snapshot().stomp == "ready":
-			break
-		await physics_frame
-	await _ticks(2)
-	_press_stomp()
-	await _ticks(35)
-	Input.action_release("stomp")
-
-
 func _ticks(count: int) -> void:
 	for frame in count:
 		await physics_frame
-	Input.action_release("stomp")
 
 
 func _check(condition: bool, description: String) -> void:

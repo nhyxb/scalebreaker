@@ -11,7 +11,7 @@ const SHAKE_POOL_SIZE := 2
 const TELEMETRY_LIMIT := 64
 
 const STREAM_PATHS := {
-	&"giant_step": [
+	&"giant_footfall": [
 		"res://assets/audio/giant_step_1.wav",
 		"res://assets/audio/giant_step_2.wav",
 	],
@@ -74,7 +74,6 @@ const AMBIENCE_PATHS := {
 }
 
 const COOLDOWNS := {
-	&"giant_step": 0.055,
 	&"giant_stomp": 0.055,
 	&"stomp_warn": 0.09,
 	&"hand_whoosh": 0.08,
@@ -390,21 +389,22 @@ func _giant_pitch_for_height(height: float) -> float:
 	return clampf(pow(25.2 / maxf(height, 0.35), 0.28), 0.45, 1.85)
 
 
-func play_giant_step(position: Vector3, height: float, is_stomp: bool, is_player: bool = false) -> bool:
-	var id := &"giant_stomp" if is_stomp else &"giant_step"
+func play_giant_footfall(position: Vector3, height: float, is_player: bool = false) -> bool:
+	var pitch := _giant_pitch_for_height(height) * 0.86
+	var size_boost := clampf(log(maxf(height, 0.5) / 25.2) * 2.4, -10.0, 3.5)
+	var volume := -2.5 + size_boost + (1.5 if is_player else 0.0)
+	var unit_size := clampf(height * 1.3, 3.0, 240.0)
+	var max_distance := clampf(height * 8.5, 28.0, 1400.0)
+	return play_3d(&"giant_footfall", position, volume, pitch, unit_size, max_distance, 0.05)
+
+
+func play_giant_impact(position: Vector3, height: float, is_player: bool = false) -> bool:
 	var pitch := _giant_pitch_for_height(height)
 	var size_boost := clampf(log(maxf(height, 1.0) / 25.2) * 1.6, -4.5, 3.5)
-	var base_db := (0.5 if is_stomp else -4.5) + size_boost + (1.5 if is_player else 0.0)
-	var unit_sz := clampf(height * (1.5 if is_stomp else 0.95), 10.0 if is_stomp else 6.0, 240.0)
-	var max_dist := clampf(height * (9.5 if is_stomp else 6.5), 75.0 if is_stomp else 45.0, 1400.0)
-	return play_3d(id, position, base_db, pitch, unit_sz, max_dist, 0.06)
-
-
-func play_stomp_warn(position: Vector3, height: float) -> bool:
-	var pitch := clampf(_giant_pitch_for_height(height) * 1.05, 0.55, 1.6)
-	var unit_sz := clampf(height * 1.15, 10.0, 180.0)
-	var max_dist := clampf(height * 7.5, 70.0, 950.0)
-	return play_3d(&"stomp_warn", position, -3.0, pitch, unit_sz, max_dist, 0.04)
+	var volume := 0.5 + size_boost + (1.5 if is_player else 0.0)
+	var unit_size := clampf(height * 1.5, 10.0, 240.0)
+	var max_distance := clampf(height * 9.5, 75.0, 1400.0)
+	return play_3d(&"giant_stomp", position, volume, pitch, unit_size, max_distance, 0.06)
 
 
 func play_desk_hazard_warn(position: Vector3) -> bool:

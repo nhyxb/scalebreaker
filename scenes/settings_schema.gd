@@ -55,12 +55,12 @@ const OPTIONS := [
 		"page": PAGE_GRAPHICS, "scope": "display", "apply": APPLY_LIVE,
 	},
 	{
-		"key": "shake_strength", "label": "震动强度", "hint": "巨人踩踏和坐压时的镜头震动幅度。",
+		"key": "shake_strength", "label": "震动强度", "hint": "巨人落脚和坐压时的镜头震动幅度。",
 		"kind": "number", "step": 5.0, "suffix": " %", "percent": true,
 		"page": PAGE_GRAPHICS, "scope": "display", "apply": APPLY_LIVE,
 	},
 	{
-		"key": "own_camera_shake", "label": "自身震动", "hint": "自己踩踏时镜头是否跟着震。",
+		"key": "own_camera_shake", "label": "自身震动", "hint": "自己的落脚与其他冲击是否让镜头震动。",
 		"kind": "toggle", "page": PAGE_GRAPHICS, "scope": "display", "apply": APPLY_LIVE,
 	},
 	{

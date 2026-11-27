@@ -22,8 +22,6 @@ const GROWTH_MODE := 2
 const BRAWL_MODE := 3
 const DEFEAT_ACTIONS := {
 	"step": "落脚击倒",
-	"stomp": "重踏击倒",
-	"contact_stomp": "碰撞踩倒",
 	"punch": "挥拳击倒",
 	"grab_crush": "捏碎击倒",
 	"bump": "撞击击倒",
@@ -123,7 +121,7 @@ var _count_num: Label
 var _count_total: Label
 var _count_status: Label
 var _building_matrix: BuildingMatrix
-var _stomp_gauge: StompGauge
+var _action_status: GiantActionStatus
 var _hud_keys: KeycapBar
 var _vignette: ColorRect
 var _vignette_mat: ShaderMaterial
@@ -262,7 +260,6 @@ func _process(delta: float) -> void:
 			_evac_compass.tick(dt)
 		elif _is_giant:
 			_building_matrix.tick(dt)
-			_stomp_gauge.tick(dt)
 			if _has_growth_hud(_mode):
 				_evac_compass.tick(dt)
 				_coin_radar.tick(dt)
@@ -355,7 +352,7 @@ func show_screen(screen: String, mode: int, current_round: Node, player: PlayerR
 	if _ranking_round != null:
 		_refresh_growth_ranking()
 	_demo_hud.visible = mode == 1
-	_stomp_gauge.visible = mode == 1
+	_action_status.set_phase("", 0.0)
 	_modal_stat.visible = not observing
 	if observing:
 		_damage_flash = 0.0
@@ -389,7 +386,6 @@ func show_screen(screen: String, mode: int, current_round: Node, player: PlayerR
 				_health_meter.reset(3)
 				_stamina_gauge.reset(1.0)
 				_building_matrix.reset(0)
-				_stomp_gauge.reset()
 		"paused":
 			if prev_screen == "playing":
 				_play_ui(&"ui_pause")
@@ -423,7 +419,7 @@ func show_screen(screen: String, mode: int, current_round: Node, player: PlayerR
 			_modal_kicker.text = "人类撤离"
 			_modal_kicker.add_theme_color_override("font_color", SIGNAL_RED)
 			_modal_title.text = "撤离失败"
-			_modal_text.text = "未能避开巨人重踏，生命已耗尽。"
+			_modal_text.text = "未能避开巨人落脚，生命已耗尽。"
 			_modal_stat.text = "剩余生命  0 / 3"
 			_primary_modal.set_accent(SIGNAL_RED)
 			_resume_button.hide()
@@ -500,33 +496,36 @@ func update_hud(state: Dictionary) -> void:
 		_count_status.text = "剩余 %d 栋  ·  身高 %s" % [total - destroyed, scale_text]
 		_count_status.add_theme_color_override("font_color", WARM_GRAY)
 
-	if state.get("giant_pinned", false):
-		_stomp_gauge.set_phase("pinned", 0.0)
-	elif not String(state.get("sit_action", "")).is_empty():
-		_stomp_gauge.set_phase(
-			"sit_" + String(state.sit_action), float(state.get("sit_progress", 0.0))
-		)
-	elif state.giant_grabbed:
-		_stomp_gauge.set_phase("grabbed", 0.0)
-	elif not state.hand_action.is_empty():
-		_stomp_gauge.set_phase(state.hand_action, state.hand_action_progress)
+	var sitting := not String(state.get("sit_action", "")).is_empty()
+	if _is_giant and not state.giant_respawning:
+		if state.get("giant_pinned", false):
+			_action_status.set_phase("pinned", 0.0)
+		elif sitting:
+			_action_status.set_phase("sit_" + String(state.sit_action),
+					float(state.get("sit_progress", 0.0)))
+		elif state.giant_grabbed:
+			_action_status.set_phase("grabbed", 0.0)
+		else:
+			_action_status.set_phase(state.hand_action, state.hand_action_progress)
 	else:
-		_stomp_gauge.set_phase(state.stomp, state.stomp_progress)
+		_action_status.set_phase("", 0.0)
+
 	if _has_growth_hud(_mode):
 		_update_growth_hud(state)
-	elif _is_giant:
-		_stomp_gauge.visible = not state.giant_respawning
-		if state.giant_respawning:
-			_count_status.text = "倒下了 · %.1f 秒后复活" % state.giant_respawn_in
-			_count_status.add_theme_color_override("font_color", SIGNAL_RED)
+	elif _is_giant and state.giant_respawning:
+		_count_status.text = "倒下了 · %.1f 秒后复活" % state.giant_respawn_in
+		_count_status.add_theme_color_override("font_color", SIGNAL_RED)
+
 	if _touch_enabled and _is_giant:
-		var can_stomp: bool = state.get("can_demolish", true) and not state.giant_respawning and not state.giant_grabbed and state.hand_action.is_empty()
-		if _touch.can_stomp != can_stomp:
-			_touch.can_stomp = can_stomp
-			_touch.queue_redraw()
-		var sitting := not String(state.get("sit_action", "")).is_empty()
-		if _touch.sitting != sitting:
+		var free_to_act: bool = (not state.giant_respawning and not state.giant_grabbed
+				and not state.get("giant_pinned", false))
+		var can_use_hands: bool = (free_to_act and state.get("can_attack", true)
+				and not sitting and state.hand_action.is_empty())
+		var sit_ready: bool = free_to_act and state.get("sit_ready", false)
+		if _touch.can_use_hands != can_use_hands or _touch.sitting != sitting or _touch.sit_ready != sit_ready:
+			_touch.can_use_hands = can_use_hands
 			_touch.sitting = sitting
+			_touch.sit_ready = sit_ready
 			_touch.queue_redraw()
 
 	if state.has("exit_distance"):
@@ -577,9 +576,9 @@ func _set_hud_keys() -> void:
 	var bindings := [["WASD", "飞行" if flying else "移动"], ["鼠标 / 方向键", "环视"]]
 	if _is_giant:
 		bindings.append(["V", "切换视角"])
-		bindings.append(["SPACE", "踩踏"])
 		bindings.append(["Q", "捡起捏碎"])
 		bindings.append(["E", "挥拳"])
+		bindings.append(["X", "坐压 / 起身"])
 	elif not flying:
 		bindings.append(["SHIFT", "疾跑"])
 	if _has_growth_hud(_mode):
@@ -682,11 +681,8 @@ func _update_growth_hud(state: Dictionary) -> void:
 	elif state.growth_band_locked:
 		_growth_height.text += "（档位已满）"
 	_growth_stats.text = "生命 %.0f / %.0f  ·  攻击 %.0f" % [health, max_health, state.giant_attack]
-	var can_attack: bool = state.can_attack
 	var can_demolish: bool = state.can_demolish
 	_demo_hud.visible = can_demolish
-	if _stomp_gauge.visible != can_attack:
-		_stomp_gauge.visible = can_attack
 	if state.giant_respawning:
 		_growth_status.text = "倒下了 · %.1f 秒后复活" % state.giant_respawn_in
 		_growth_coins.text = "击倒 %d  ·  存活 %d/%d" % [state.giant_kills, state.giants_alive, state.giant_count]
@@ -694,7 +690,7 @@ func _update_growth_hud(state: Dictionary) -> void:
 		_growth_status.text = "击倒巨人增加身高"
 		_growth_coins.text = "金币 %d  ·  击倒 %d  ·  存活 %d/%d" % [state.coins_collected, state.giant_kills, state.giants_alive, state.giant_count]
 	elif can_demolish:
-		_growth_status.text = "巨人形态 · 踩踏、抓取并拆楼"
+		_growth_status.text = "巨人形态 · 行进落脚、抓取与拆楼"
 		_growth_coins.text = "金币 %d  ·  击倒 %d  ·  存活 %d/%d" % [state.coins_collected, state.giant_kills, state.giants_alive, state.giant_count]
 	else:
 		_growth_status.text = "人类形态 · 长到 %s 后变成巨人" % _format_height(state.attack_height)
@@ -1202,7 +1198,7 @@ func _build_hud() -> void:
 	_evac_dist_unit.size_flags_vertical = Control.SIZE_SHRINK_END
 	dist_row.add_child(_evac_dist_unit)
 
-	# --- GIANT MODE: Top-Left Heavy Demolition Counter + Stomp Instrument ---
+	# --- GIANT MODE: Top-Left Demolition Counter and Action Status ---
 	var giant_stack := _column(10)
 	_hud.add_child(giant_stack)
 	giant_stack.offset_left = 28
@@ -1271,11 +1267,10 @@ func _build_hud() -> void:
 	_count_status = _label("剩余目标  12 栋", 12, WARM_GRAY, _font_medium)
 	d_col.add_child(_count_status)
 
-	# Stomp tactical state bar directly beneath demolition card.
-	_stomp_gauge = StompGauge.new()
-	_stomp_gauge.setup(_font_bold, _font_mono_bold, _touch_enabled)
-	_stomp_gauge.custom_minimum_size = Vector2(248, 40)
-	giant_stack.add_child(_stomp_gauge)
+	_action_status = GiantActionStatus.new()
+	_action_status.setup(_font_bold, _touch_enabled)
+	_action_status.custom_minimum_size = Vector2(248, 40)
+	giant_stack.add_child(_action_status)
 
 	_defeat_feed = _column(4)
 	_defeat_feed.name = "GrowthDefeatFeed"
@@ -3169,118 +3164,62 @@ class BuildingMatrix extends Control:
 				draw_colored_polygon(fquad, col)
 
 
-## Dynamic stomp phase telemetry bar synced with Rust windup/impact/cooldown timings.
-class StompGauge extends Control:
-	var _phase := "ready"
-	var _progress := 1.0
-	var _impact_flash := 0.0
+## Status for the giant's hand attacks, sit-crush and restraints.
+class GiantActionStatus extends Control:
+	var _phase := ""
+	var _progress := 0.0
 	var _status_lbl: Label
-	var _space_key: Control
 
 	func _init() -> void:
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		hide()
 
-	func setup(f_label: Font, f_mono: Font, touch: bool) -> void:
-		var row := HBoxContainer.new()
-		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_theme_constant_override("separation", 10)
-		add_child(row)
-		row.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		row.offset_left = 14
-		row.offset_right = -14
-		row.offset_top = 4
-		row.offset_bottom = -10
-
-		if not touch:
-			var key := Label.new()
-			key.text = "SPACE"
-			key.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			key.add_theme_font_override("font", f_mono)
-			key.add_theme_font_size_override("font_size", 11)
-			key.add_theme_color_override("font_color", Color("#111316"))
-			key.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-			var key_pad := PanelContainer.new()
-			key_pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			key_pad.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-			var ks := StyleBoxFlat.new()
-			ks.bg_color = Color("#eba930")
-			ks.content_margin_left = 6
-			ks.content_margin_right = 6
-			ks.content_margin_top = 1
-			ks.content_margin_bottom = 1
-			key_pad.add_theme_stylebox_override("panel", ks)
-			key_pad.add_child(key)
-			row.add_child(key_pad)
-			_space_key = key_pad
-
+	func setup(font: Font, touch: bool) -> void:
 		_status_lbl = Label.new()
-		_status_lbl.text = "踩踏就绪"
 		_status_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		_status_lbl.add_theme_font_override("font", f_label)
+		_status_lbl.add_theme_font_override("font", font)
 		_status_lbl.add_theme_font_size_override("font_size", 17 if touch else 14)
-		_status_lbl.add_theme_color_override("font_color", Color("#efeae0"))
 		_status_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		row.add_child(_status_lbl)
-
-	func reset() -> void:
-		_phase = "ready"
-		_progress = 1.0
-		_impact_flash = 0.0
-		_update_label()
-		queue_redraw()
+		add_child(_status_lbl)
+		_status_lbl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		_status_lbl.offset_left = 14
+		_status_lbl.offset_bottom = -6
 
 	func set_phase(phase: String, progress: float) -> void:
 		if phase == _phase and progress == _progress:
 			return
 		if phase != _phase:
 			_phase = phase
-			if phase == "impact":
-				_impact_flash = 1.0
+			visible = not phase.is_empty()
 			_update_label()
 		_progress = progress
 		queue_redraw()
 
-	func tick(dt: float) -> void:
-		if _impact_flash > 0.0:
-			_impact_flash = maxf(0.0, _impact_flash - dt * 3.0)
-			queue_redraw()
-
 	func _update_label() -> void:
-		if _status_lbl == null:
-			return
-		if _space_key:
-			_space_key.visible = _phase in ["ready", "windup", "impact", "cooldown"]
+		var ink := CRANE_AMBER
 		match _phase:
-			"grab_crush", "punch", "grabbed":
-				_status_lbl.text = {"grab_crush": "捡起捏碎", "punch": "挥拳", "grabbed": "被抓住"}[_phase]
-				_status_lbl.add_theme_color_override("font_color", Color("#eba930"))
+			"grab_crush":
+				_status_lbl.text = "捡起捏碎"
+			"punch":
+				_status_lbl.text = "挥拳"
+			"grabbed":
+				_status_lbl.text = "被抓住"
 			"sit_turn":
 				_status_lbl.text = "转身对准"
-				_status_lbl.add_theme_color_override("font_color", Color("#eba930"))
 			"sit_drop":
 				_status_lbl.text = "坐压落下"
-				_status_lbl.add_theme_color_override("font_color", Color("#ff8a5b"))
+				ink = Color("#ff8a5b")
 			"sit_hold":
-				_status_lbl.text = "坐压压实（X 起身）"
-				_status_lbl.add_theme_color_override("font_color", Color("#eba930"))
+				_status_lbl.text = "坐压压实"
 			"sit_rise":
 				_status_lbl.text = "起身"
-				_status_lbl.add_theme_color_override("font_color", Color("#fffaf0"))
+				ink = HOT_WHITE
 			"pinned":
 				_status_lbl.text = "被坐压制服"
-				_status_lbl.add_theme_color_override("font_color", Color("#e44d2e"))
-			"windup":
-				_status_lbl.text = "蓄力预警"
-				_status_lbl.add_theme_color_override("font_color", Color("#ff8a5b"))
-			"impact":
-				_status_lbl.text = "重踏冲击"
-				_status_lbl.add_theme_color_override("font_color", Color("#fffaf0"))
-			"cooldown":
-				_status_lbl.text = "重蓄冷却"
-				_status_lbl.add_theme_color_override("font_color", Color("#9ea5a8"))
+				ink = SIGNAL_RED
 			_:
-				_status_lbl.text = "踩踏就绪"
-				_status_lbl.add_theme_color_override("font_color", Color("#efeae0"))
+				_status_lbl.text = ""
+		_status_lbl.add_theme_color_override("font_color", ink)
 
 	func _draw() -> void:
 		var w := size.x
@@ -3289,44 +3228,15 @@ class StompGauge extends Control:
 		var poly := PackedVector2Array([
 			Vector2(0, 0), Vector2(w, 0), Vector2(w, h - c), Vector2(w - c, h), Vector2(0, h)
 		])
-		var bg := Color("#111316", 0.82)
-		if _impact_flash > 0.0:
-			bg = bg.lerp(Color("#eba930", 0.85), _impact_flash * 0.55)
-		draw_colored_polygon(poly, bg)
+		draw_colored_polygon(poly, Color(CHARCOAL, 0.82))
 		draw_line(Vector2(0, 0.5), Vector2(w, 0.5), Color(1, 1, 1, 0.10), 1.0)
-
-		# Progress bar along the lower edge
-		var bar_y := h - 5.5
-		var bar_h := 3.5
-		var bar_w := w - c - 6.0
-		draw_rect(Rect2(3.0, bar_y, bar_w, bar_h), Color("#242a31", 0.9))
-
-		var fill_frac := 1.0
-		var bar_col := Color("#eba930")
-		match _phase:
-			"grab_crush", "punch", "grabbed", "sit_drop", "sit_hold":
-				fill_frac = _progress
-			"sit_turn":
-				fill_frac = 0.0
-				bar_col = Color("#eba930")
-			"sit_rise":
-				fill_frac = 1.0 - _progress
-				bar_col = Color("#fffaf0")
-			"windup":
-				fill_frac = _progress
-				bar_col = Color("#e44d2e").lerp(Color("#eba930"), 0.5 + 0.5 * sin(_progress * 16.64))
-			"impact":
-				fill_frac = 1.0 - _progress
-				bar_col = Color("#fffaf0").lerp(Color("#eba930"), 1.0 - _impact_flash)
-			"cooldown":
-				fill_frac = _progress
-				bar_col = Color("#8f7848")
-			_:
-				fill_frac = 1.0
-				bar_col = Color("#eba930")
-
-		draw_rect(Rect2(3.0, bar_y, bar_w * fill_frac, bar_h), bar_col)
+		var bar_col := HOT_WHITE if _phase == "sit_rise" else CRANE_AMBER
 		draw_rect(Rect2(0, 0, 3.0, h), bar_col)
+		if _phase in ["punch", "grab_crush", "sit_drop", "sit_hold", "sit_rise"]:
+			var fill := 1.0 - _progress if _phase == "sit_rise" else _progress
+			var bar_w := w - c - 6.0
+			draw_rect(Rect2(3.0, h - 5.5, bar_w, 3.5), Color("#242a31", 0.9))
+			draw_rect(Rect2(3.0, h - 5.5, bar_w * fill, 3.5), bar_col)
 
 
 ## Clean frameless floating row of tactile keycap badges + concise labels.

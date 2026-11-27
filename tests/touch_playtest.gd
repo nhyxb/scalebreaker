@@ -137,29 +137,30 @@ func _test_giant(growth: bool) -> void:
 	_check(foot_mode == 1 and current.camera_view_mode() == 2
 			and camera.get_parent() == current.get_node("Orbit"),
 			"touch cycles the giant view to foot follow then first person in mode %d" % int(growth))
-	var stomp := _button("_action_rect")
-	_finger(2, stomp, true)
-	_finger(2, stomp, false, true)
-	await _ticks(3)
-	_check(current.snapshot().stomp == "ready", "canceling the stomp tap leaves it ready")
+	var giant := current.get_node("Giant") as CharacterBody3D
+	giant.position = Vector3(0.0, 0.03, -34.0)
+	await _ticks(5)
+	var initial_position := giant.position
+	var before_count := int(current.growth_actors()[0].footfall_count)
+	var starting_yaw: float = current.get_node("Orbit").rotation.y
 	var move := Vector2(112, _controls.size.y - 104)
 	var look := Vector2(_controls.size.x * 0.67, _controls.size.y * 0.48)
 	_finger(6, move, true)
 	_drag(6, move + Vector2(0, -60), Vector2(0, -60))
 	_finger(8, look, true)
 	_drag(8, look + Vector2(32, 0), Vector2(32, 0))
-	_tap(2, stomp)
-	var attacked := false
-	for frame in 65:
-		await physics_frame
-		if current.snapshot().stomp != "ready":
-			attacked = true
-			break
+	await _ticks(110)
+	var took_step: bool = int(current.growth_actors()[0].footfall_count) > before_count
+	var moved := giant.position.distance_to(initial_position) > 0.01
+	var looked: bool = absf(angle_difference(starting_yaw, current.get_node("Orbit").rotation.y)) > 0.02
+	_check(not _controls.get("_allow_sprint") and _controls.get("_action_id") == -1
+			and not InputMap.has_action("stomp"), "The giant touch layout has no manual stomp")
 	if growth:
-		_check(not attacked and not _controls.can_stomp,
-				"The touch stomp button stays disabled while growth actors are human")
+		_check(moved and looked and not took_step,
+				"The growth human moves and looks with two fingers without creating heavy footfalls")
 	else:
-		_check(attacked, "touch triggers stomp while moving and looking in mode %d" % int(growth))
+		_check(moved and looked and took_step,
+				"The giant touch joystick walks and lands heavy footsteps while looking")
 	_tap(14, _button("_pause_rect"))
 	_check(_game.get_screen() == "paused", "pause button works with other fingers held")
 
@@ -249,7 +250,7 @@ func _test_observation() -> void:
 	_drag(8, move - Vector2(0, 58), Vector2(0, -58))
 	await _ticks(15)
 	_check(camera.global_position.y > start.y + 0.03 and _controls.get("_action_id") == -1,
-			"The spectator can swipe where the stomp button normally sits and fly upward with the joystick")
+			"The spectator can swipe in the lower action area and fly upward with the joystick")
 	_finger(3, look, false)
 	_finger(8, move, false)
 	_tap(11, _button("_ranking_rect"))
@@ -303,7 +304,7 @@ func _test_observer_defeat_feed() -> void:
 			_game.start_growth_human()
 		var current := _round()
 		var messages: Array[Dictionary] = [{
-				"attacker": "林晓岚", "victim": "周雨桐", "method": "stomp",
+				"attacker": "林晓岚", "victim": "周雨桐", "method": "step",
 				"player_attack": false, "player_defeated": false}]
 		_view.announce_growth_defeats(messages)
 		await _ticks(3)

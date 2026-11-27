@@ -3,7 +3,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::time::Instant;
 
 use godot::classes::{
-    Camera3D, CapsuleShape3D, CharacterBody3D, CollisionShape3D, Input, InputEvent,
+    Camera3D, CapsuleShape3D, CharacterBody3D, CollisionObject3D, CollisionShape3D, Input, InputEvent,
     InputEventMouseButton, InputEventMouseMotion, KinematicCollision3D, PackedScene,
     PhysicsDirectSpaceState3D, PhysicsRayQueryParameters3D, SphereShape3D, SpringArm3D,
     StaticBody3D,
@@ -15,6 +15,7 @@ use crate::rules::*;
 use crate::settings::{GameSettings, GrowthSettings};
 
 mod ai;
+mod footfalls;
 mod growth;
 mod hands;
 mod sit;
@@ -22,6 +23,7 @@ use ai::{
     CombatMemory, Intent, Personality, SizeTier, INTENT_INERTIA, UTILITY_INTERVAL,
     coin_forage_score, demolition_score, escape_direction, threat_evasion_score,
 };
+use footfalls::{Footfall, FootfallPreview, footfall_reach};
 use growth::{CoinDwell, CoinField, DefeatMethod, GiantStrike, GrowthDefeat, Rival, ignores_rival};
 use hands::{HandAttack, HandMove};
 use sit::SitAction;
@@ -63,7 +65,9 @@ const FIRST_PERSON_STEER_DEADZONE: f32 = 0.05;
 /// Looking down in first person walks the eye forward so the view clears the hidden
 /// neck instead of staring into the stump; scaled by the giant's height.
 const FIRST_PERSON_LOOK_DOWN_PITCH: f32 = -0.35;
-const FIRST_PERSON_LOOK_DOWN_LEAN: f32 = 0.06;
+const FIRST_PERSON_LOOK_DOWN_LEAN: f32 = 0.105;
+/// The evacuee can look up without swinging the spring arm through the street.
+const EVAC_ARM_MAX_PITCH: f32 = 0.26;
 const MOUSE_LOOK_SENSITIVITY: f32 = 0.0028;
 const KEYBOARD_LOOK_SPEED: f32 = FRAC_PI_2;
 const GROWTH_DURATION: f32 = 0.60;
@@ -86,23 +90,10 @@ const ANIMATION_FULL_DISTANCE: f32 = 120.0;
 const ANIMATION_HALF_DISTANCE: f32 = 240.0;
 const PATH_TIME_BUDGET: f32 = 0.0025;
 
-// Shoe dimensions and the left foot's deliberate stomp pose at the starting scale.
-const FOOT_RADII: Vector2 = Vector2::new(0.71, 1.49);
-const FOOT_FORWARD: f32 = 7.05;
-const FOOT_LEFT: f32 = 1.39;
-const FOOT_YAW: f32 = 0.06;
 /// From standstill, a requested move direction wider than this pivots in place with
 /// small steps first, then flows smoothly into walking once aligned within the exit angle.
 const STAND_PIVOT_ENTER_ANGLE: f32 = 0.96;
 const STAND_PIVOT_EXIT_ANGLE: f32 = 0.56;
-/// Minimum forward alignment dot-product (~15 deg cone, safely wider than
-/// `STAND_START_DEADZONE` = 12.6 deg) before an AI giant launches a stomp.
-const AI_STOMP_ALIGN_COS: f32 = 0.965;
-
-fn stomp_center_range(scale: f32) -> f32 {
-    FOOT_FORWARD.hypot(FOOT_LEFT) * scale
-}
-
 /// How far a giant looks for rivals and people. The 150 m baseline suits small giants; a
 /// giant hundreds of metres tall has to look about its own height away to spot a peer.
 fn sight_range(scale: f32) -> f32 {
@@ -119,34 +110,19 @@ fn ignores_human(giant_height: f32, human_height: f32, ratio: f32) -> bool {
 /// centres, and the collision capsule keeps two giants at least
 /// `GIANT_RADIUS * (scale + rival_scale)` apart. The old flat 75 m cap therefore made any
 /// pair taller than roughly 326 m each mutually invisible: they walked into each other
-/// without ever fighting. Keep the cap at least one full body span plus the stomp reach.
+/// without ever fighting. Keep the cap at least one full body span plus the footfall reach.
 fn rival_engage_range(reach: f32, speed: f32, scale: f32) -> f32 {
     (reach + speed * 2.5).clamp(10.0, 75.0_f32.max(2.0 * GIANT_RADIUS * scale + reach))
 }
 
 #[derive(Clone, Copy)]
-struct StompArea {
+struct ImpactArea {
     center: Vector3,
     yaw: f32,
     radii: Vector2,
 }
 
-impl StompArea {
-    fn new(position: Vector3, aim: Vector3, scale: f32) -> Self {
-        let right = aim.cross(Vector3::UP);
-        Self {
-            center: position + (aim * FOOT_FORWARD - right * FOOT_LEFT) * scale,
-            yaw: (-aim.x).atan2(-aim.z) + FOOT_YAW,
-            radii: FOOT_RADII * scale,
-        }
-    }
-
-    fn aim_at(offset: Vector3) -> Vector3 {
-        offset
-            .normalized_or_zero()
-            .rotated(Vector3::UP, -FOOT_LEFT.atan2(FOOT_FORWARD))
-    }
-
+impl ImpactArea {
     fn to_unit_circle(self, point: Vector3) -> Vector2 {
         let local = (point - self.center).rotated(Vector3::UP, -self.yaw);
         Vector2::new(local.x, local.z) / self.radii
@@ -170,7 +146,7 @@ impl StompArea {
         }
 
         // In the ellipse's normalized space, each side of the footprint is a
-        // line segment. It overlaps the stomp when it comes within unit radius.
+        // line segment. It overlaps the ellipse when it comes within unit radius.
         let half = footprint.size * 0.5;
         let corners = [
             Vector3::new(-half.x, 0.0, -half.z),
@@ -188,12 +164,40 @@ impl StompArea {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Stomp {
-    Ready,
-    Windup { area: StompArea, elapsed: f32 },
-    Recover { area: StompArea, left: f32 },
-    Cooldown(f32),
+#[derive(Clone)]
+enum StrikeArea {
+    Sole(Footfall),
+    Ellipse(ImpactArea),
+}
+
+impl StrikeArea {
+    fn reaches(&self, point: Vector3, radius: f32) -> bool {
+        match self {
+            Self::Sole(sole) => sole.reaches(point, radius),
+            Self::Ellipse(area) => area.reaches(point, radius),
+        }
+    }
+
+    fn touches(&self, footprint: Footprint) -> bool {
+        match self {
+            Self::Sole(sole) => sole.touches(footprint),
+            Self::Ellipse(area) => area.touches(footprint),
+        }
+    }
+
+    fn center(&self) -> Vector3 {
+        match self {
+            Self::Sole(sole) => sole.center,
+            Self::Ellipse(area) => area.center,
+        }
+    }
+
+    fn bounds(&self) -> f32 {
+        match self {
+            Self::Sole(sole) => sole.bounds(),
+            Self::Ellipse(area) => area.radii.x.max(area.radii.y),
+        }
+    }
 }
 
 struct Growth {
@@ -213,7 +217,6 @@ struct Target {
 
 struct Civilian {
     body: Gd<CharacterBody3D>,
-    collision: Gd<CollisionShape3D>,
     size: BodySize,
     /// Frame-start position used by the AI target scan.
     position: Vector3,
@@ -297,19 +300,15 @@ impl Civilian {
 
 #[derive(Clone, Copy)]
 enum GroundImpact {
-    HumanStep,
-    Step,
-    Stomp,
-    Demolition,
+    Footfall,
+    Sit,
 }
 
 impl GroundImpact {
     fn strength_and_reach(self) -> (f32, f32) {
         match self {
-            Self::HumanStep => (0.54, 16.0),
-            Self::Step => (0.63, 100.0),
-            Self::Stomp => (1.42, 160.0),
-            Self::Demolition => (0.46, 82.0),
+            Self::Footfall => (1.20, 133.0),
+            Self::Sit => (1.42, 160.0),
         }
     }
 
@@ -324,10 +323,7 @@ impl GroundImpact {
             return 0.0;
         }
         let (strength, legacy_reach) = self.strength_and_reach();
-        let reach = match self {
-            Self::HumanStep => legacy_reach,
-            _ => (2.5 + 8.0 * source_height).min(220.0) * (legacy_reach / 100.0),
-        };
+        let reach = (2.5 + 8.0 * source_height).min(220.0) * (legacy_reach / 100.0);
         let height_gap = (source_height / viewer_height).log2();
         strength * (height_gap / (height_gap + 3.0)) * (1.0 - distance / reach).max(0.0).powi(2)
     }
@@ -477,12 +473,12 @@ struct Giant {
     /// smaller humans. Once it reaches the threshold it becomes a giant for the rest of the round.
     human: bool,
     yaw_velocity: f32,
-    stomp: Stomp,
+    footfall: Option<FootfallPreview>,
+    last_footfall: Option<Footfall>,
+    footfall_count: u32,
     hand_attack: Option<HandAttack>,
     pending_hand: Option<HandMove>,
     grabbed: bool,
-    pending_stomp_aim: Option<Vector3>,
-    stomp_animation_scale: f32,
     progress: GiantProgress,
     growth: Option<Growth>,
     growth_rewards: VecDeque<f32>,
@@ -498,8 +494,6 @@ struct Giant {
     replan_in: f32,
     blocking_target: Option<usize>,
     building_target: Option<usize>,
-    ai_holding_stomp: bool,
-    ai_aim_yaw: Option<f32>,
     standing_pivot_active: bool,
     was_walking: bool,
     health_fraction: f32,
@@ -545,7 +539,7 @@ struct Giant {
 enum AnimateStep {
     None,
     HumanFootfall,
-    GiantFootfall(StompArea),
+    GiantFootfall(Footfall),
 }
 
 impl Giant {
@@ -579,12 +573,12 @@ impl Giant {
             scale: 1.0,
             human: false,
             yaw_velocity: 0.0,
-            stomp: Stomp::Ready,
+            footfall: None,
+            last_footfall: None,
+            footfall_count: 0,
             hand_attack: None,
             pending_hand: None,
             grabbed: false,
-            pending_stomp_aim: None,
-            stomp_animation_scale: 1.0,
             progress: GiantProgress::default(),
             growth: None,
             growth_rewards: VecDeque::new(),
@@ -599,8 +593,6 @@ impl Giant {
             replan_in: 0.0,
             blocking_target: None,
             building_target: None,
-            ai_holding_stomp: false,
-            ai_aim_yaw: None,
             standing_pivot_active: false,
             was_walking: false,
             health_fraction: 1.0,
@@ -655,17 +647,6 @@ impl Giant {
             max_height
         } else {
             GIANT_START_HEIGHT * self.scale
-        }
-    }
-
-    /// Shared by the HUD snapshot and the AI debug rows so a test can wait for one
-    /// specific stomp phase (the sit-crush gate cares about windup/recovery vs. the rest).
-    fn stomp_phase(&self) -> &'static str {
-        match self.stomp {
-            Stomp::Ready => "ready",
-            Stomp::Windup { .. } => "windup",
-            Stomp::Recover { .. } => "impact",
-            Stomp::Cooldown(_) => "cooldown",
         }
     }
 
@@ -726,12 +707,9 @@ impl Giant {
             return;
         }
         self.human = human;
-        self.stomp = Stomp::Ready;
+        self.footfall = None;
         self.hand_attack = None;
         self.pending_hand = None;
-        self.pending_stomp_aim = None;
-        self.ai_holding_stomp = false;
-        self.ai_aim_yaw = None;
         self.standing_pivot_active = false;
         self.was_walking = false;
         self.sit = None;
@@ -745,7 +723,6 @@ impl Giant {
     fn animate(
         &mut self,
         speed: f32,
-        pose: f32,
         dt: f32,
         stride: u8,
         turn_target: f32,
@@ -766,14 +743,14 @@ impl Giant {
         let contact = if self.human {
             self.body.call(
                 "show_motion",
-                &[speed.to_variant(), pose.to_variant(), delta.to_variant()],
+                &[speed.to_variant(), (-1.0_f32).to_variant(), delta.to_variant()],
             )
         } else {
             self.body.call(
                 "show_motion",
                 &[
                     speed.to_variant(),
-                    pose.to_variant(),
+                    (-1.0_f32).to_variant(),
                     delta.to_variant(),
                     turn_target.to_variant(),
                     allow_standing_turn.to_variant(),
@@ -787,22 +764,18 @@ impl Giant {
                 AnimateStep::None
             };
         }
-        let Ok(contact) = contact.try_to::<Vector4>() else {
-            return AnimateStep::None;
-        };
-        AnimateStep::GiantFootfall(StompArea {
-            center: Vector3::new(contact.x, contact.y, contact.z),
-            yaw: contact.w,
-            radii: FOOT_RADII * self.scale,
-        })
+        self.footfall = FootfallPreview::from_script(self.body.call("heavy_step_preview", &[]));
+        let landed = contact.try_to::<VarDictionary>().ok()
+            .and_then(|contact| Footfall::from_script(&contact));
+        if let Some(sole) = landed {
+            AnimateStep::GiantFootfall(sole)
+        } else {
+            AnimateStep::None
+        }
     }
 
     fn advance_growth(&mut self, dt: f32, starting_scale: f32, max_height: f32, growth_mode: bool) {
         self.growth_in = (self.growth_in - dt).max(0.0);
-        // Keep the planted stomp pose aligned with the warning during windup.
-        if matches!(self.stomp, Stomp::Windup { .. }) {
-            return;
-        }
         let max_scale = max_height / GIANT_START_HEIGHT;
         if self.growth.is_none() && self.scale < max_scale && self.growth_in == 0.0 {
             let target = if growth_mode {
@@ -922,7 +895,6 @@ pub struct HarborRound {
     foot_view_yaw: Option<f32>,
     touch_axes: Vector2,
     touch_sprint: bool,
-    touch_stomp: bool,
     touch_stand: bool,
     touch_sit: bool,
     touch_hand: Option<HandMove>,
@@ -936,7 +908,7 @@ pub struct HarborRound {
     coins: CoinField,
     rivals: Vec<Rival>,
     giant_collision_passes: HashSet<(usize, usize)>,
-    trample_contacts: HashSet<(usize, usize)>,
+    bump_contacts: HashSet<(usize, usize)>,
     path_requests: Vec<Option<PathRequest>>,
     path_cursor: usize,
     path_serial: u64,
@@ -945,7 +917,7 @@ pub struct HarborRound {
     giant_strikes: Vec<GiantStrike>,
     growth_defeats: VecDeque<GrowthDefeat>,
     player_giant_hits: u32,
-    /// Combat hotspots (position, radius, ttl) fed by stomps/sits/demolitions;
+    /// Combat hotspots (position, radius, ttl) fed by footfalls/sits/demolitions;
     /// they grade map coins up and fade after ~12 s.
     hotspots: Vec<(Vector3, f32, f32)>,
     /// Cadence of the live coin re-grading pass.
@@ -1003,7 +975,6 @@ impl INode3D for HarborRound {
             foot_view_yaw: None,
             touch_axes: Vector2::ZERO,
             touch_sprint: false,
-            touch_stomp: false,
             touch_stand: false,
             touch_sit: false,
             touch_hand: None,
@@ -1017,7 +988,7 @@ impl INode3D for HarborRound {
             coins: CoinField::default(),
             rivals: Vec::new(),
             giant_collision_passes: HashSet::new(),
-            trample_contacts: HashSet::new(),
+            bump_contacts: HashSet::new(),
             path_requests: Vec::new(),
             path_cursor: 0,
             path_serial: 0,
@@ -1289,8 +1260,6 @@ impl INode3D for HarborRound {
         }
         let keys = input.get_vector("move_left", "move_right", "move_forward", "move_back");
         let axes = (keys + self.touch_axes).limit_length(Some(1.0));
-        let stomp_pressed =
-            std::mem::take(&mut self.touch_stomp) || input.is_action_just_pressed("stomp");
         let stand_pressed = std::mem::take(&mut self.touch_stand)
             || std::mem::take(&mut self.touch_sit)
             || input.is_action_just_pressed("stand_up");
@@ -1409,7 +1378,6 @@ impl INode3D for HarborRound {
                 actor,
                 player,
                 direction,
-                stomp_pressed,
                 hand_pressed,
                 stand_pressed,
                 dt,
@@ -1418,7 +1386,7 @@ impl INode3D for HarborRound {
         }
         self.update_hand_attacks(&mut giants, dt);
         sync_pair_frames(&mut frames, &giants);
-        self.apply_giant_contact_stomps(&mut giants, &frames, dt);
+        self.apply_human_bumps(&mut giants, &frames);
         self.giants = giants;
         self.update_pins(dt);
         self.flush_camera_impacts();
@@ -1436,11 +1404,6 @@ impl HarborRound {
     fn set_touch_motion(&mut self, axes: Vector2, sprint: bool) {
         self.touch_axes = axes;
         self.touch_sprint = sprint;
-    }
-
-    #[func]
-    fn tap_stomp(&mut self) {
-        self.touch_stomp = true;
     }
 
     #[func]
@@ -1466,7 +1429,6 @@ impl HarborRound {
     #[func]
     pub fn clear_touch(&mut self) {
         self.set_touch_motion(Vector2::ZERO, false);
-        self.touch_stomp = false;
         self.touch_stand = false;
         self.touch_sit = false;
         self.touch_hand = None;
@@ -1499,6 +1461,8 @@ impl HarborRound {
         self.yaw = (self.yaw - angles.x).rem_euclid(TAU);
         let (bottom, top) = if self.first_person || self.player == PlayerRole::Spectator {
             (-1.45, 1.45)
+        } else if matches!(self.player, PlayerRole::Evacuee | PlayerRole::HumanObserver) {
+            (-1.15, 1.45)
         } else {
             (-1.15, 0.26)
         };
@@ -1528,21 +1492,13 @@ impl HarborRound {
         actor: &mut Giant,
         player: bool,
         direction: Vector3,
-        stomp_pressed: bool,
         hand_pressed: Option<HandMove>,
         stand_pressed: bool,
         dt: f32,
     ) {
         if self.state.outcome != Outcome::Active {
-            if matches!(actor.stomp, Stomp::Windup { .. }) {
-                actor.stomp = Stomp::Ready;
-                self.effects
-                    .as_mut()
-                    .unwrap()
-                    .call("cancel_warning", &[actor.index.to_variant()]);
-            }
-            let pose = self.advance_stomp(actor, dt);
-            actor.animate(0.0, pose, dt, 1, f32::NAN, false);
+            actor.animate(0.0, dt, 1, f32::NAN, false);
+            actor.footfall = None;
             return;
         }
         let mut giant = actor.body.clone();
@@ -1552,7 +1508,7 @@ impl HarborRound {
         if actor.sit.is_some() || self.maybe_start_sit(actor, player, stand_pressed, dt) {
             actor.was_walking = false;
             actor.standing_pivot_active = false;
-            actor.pending_stomp_aim = None;
+            actor.footfall = None;
             actor.pending_hand = None;
             self.drive_sit(actor, dt, player && stand_pressed);
             drive_giant(
@@ -1570,7 +1526,7 @@ impl HarborRound {
         if actor.pinned_by.is_some() {
             actor.was_walking = false;
             actor.standing_pivot_active = false;
-            actor.pending_stomp_aim = None;
+            actor.footfall = None;
             actor.pending_hand = None;
             drive_giant(
                 &mut giant,
@@ -1581,7 +1537,8 @@ impl HarborRound {
                 actor.scale,
                 1.0,
             );
-            actor.animate(0.0, -1.0, dt, 1, f32::NAN, false);
+            actor.animate(0.0, dt, 1, f32::NAN, false);
+            actor.footfall = None;
             return;
         }
         let mut giant_direction = direction;
@@ -1606,13 +1563,10 @@ impl HarborRound {
         if !player {
             giant_direction = self.pursue(actor, giant_speed, dt);
         } else if actor.human {
-            // Humans have no active attacks at all; only body checks against smaller humans.
+            // Humans have no active attacks; smaller humans can take a body check.
             actor.pending_hand = None;
-            actor.pending_stomp_aim = None;
-        } else if matches!(actor.stomp, Stomp::Ready) {
-            if actor.pending_stomp_aim.is_none() {
-                actor.pending_hand = hand_pressed.or(actor.pending_hand);
-            }
+        } else {
+            actor.pending_hand = hand_pressed.or(actor.pending_hand);
             if let Some(kind) = actor.pending_hand {
                 actor.standing_pivot_active = false;
                 if Self::ready_for_hand_move(actor) {
@@ -1625,21 +1579,6 @@ impl HarborRound {
                     giant_direction = Vector3::ZERO;
                 }
             }
-            if stomp_pressed && actor.pending_hand.is_none() {
-                // Attacks are strictly locked to the giant's current body facing, never camera yaw
-                // or a held reverse direction. Starting the charge must not drop an in-place
-                // turn already in progress: the aim is snapshotted here and the pivot resumes
-                // once the feet are free again.
-                let facing = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
-                actor.pending_stomp_aim = Some(facing);
-            }
-            if let Some(aim) = actor.pending_stomp_aim {
-                giant_direction = Vector3::ZERO;
-                if self.begin_stomp(actor, aim) {
-                    actor.pending_stomp_aim = None;
-                    actor.was_walking = false;
-                }
-            }
         }
 
         if actor.hand_attack.is_some() {
@@ -1647,16 +1586,13 @@ impl HarborRound {
             actor.was_walking = false;
             return;
         }
-        let taking_step = matches!(actor.stomp, Stomp::Ready | Stomp::Cooldown(_));
         // First-person steering: turning the view turns the body. Both stay inside the same
         // ±75° cone, so camera and shoulders never fight over the rotation, and a locked
-        // attack keeps its facing — the option never re-aims a stomp or a hand move.
+        // hand action keeps its facing.
         let steer_view = player
             && self.first_person
             && self.settings.first_person_steer
             && !actor.human
-            && taking_step
-            && actor.pending_stomp_aim.is_none()
             && actor.pending_hand.is_none();
         let input_yaw = if giant_direction.length_squared() > 0.0001 {
             Some((-giant_direction.x).atan2(-giant_direction.z))
@@ -1689,10 +1625,6 @@ impl HarborRound {
             None
         };
         let turn_intent = steer_dir.unwrap_or(giant_direction);
-        // The in-place turn must survive a stomp charge. Pressing forward during the windup no
-        // longer drops the pivot flag, and a wall-blocked walk no longer counts as walking
-        // (`was_walking` now tracks actual movement), so the giant can always turn away once
-        // its feet are free again instead of staying wedged against the wall.
         let mut standing_pivot_target: Option<f32> = None;
         if actor.human {
             actor.standing_pivot_active = false;
@@ -1701,13 +1633,15 @@ impl HarborRound {
             let yaw_diff =
                 godot::global::angle_difference(giant.get_rotation().y as f64, target_yaw as f64)
                     .abs() as f32;
-            if !giant.is_on_floor() {
+            if !giant.is_on_floor() && actor.was_walking {
                 actor.standing_pivot_active = false;
             } else if !actor.standing_pivot_active {
                 if !actor.was_walking && yaw_diff > STAND_PIVOT_ENTER_ANGLE {
                     actor.standing_pivot_active = true;
                 }
-            } else if yaw_diff <= STAND_PIVOT_EXIT_ANGLE {
+            } else if yaw_diff <= STAND_PIVOT_EXIT_ANGLE
+                && !giant.call("has_standing_step_in_flight", &[]).to::<bool>()
+            {
                 actor.standing_pivot_active = false;
             }
             // Evasion outranks the in-place pivot: a giant caught inside a
@@ -1716,42 +1650,20 @@ impl HarborRound {
             if !player && actor.intent == Intent::Evade {
                 actor.standing_pivot_active = false;
             }
-            if actor.standing_pivot_active
-                && taking_step
-                && actor.pending_stomp_aim.is_none()
-                && actor.pending_hand.is_none()
-                && actor.hand_attack.is_none()
-            {
+            if actor.standing_pivot_active && actor.pending_hand.is_none() {
                 standing_pivot_target = Some(target_yaw);
             }
-        } else if actor.pending_stomp_aim.is_none()
-            && actor.pending_hand.is_none()
-            && direction.length_squared() <= 0.0001
-        {
-            // Only releasing the direction input cancels an in-place turn mid-flight; a held
-            // direction keeps the pending charge from disturbing the unfinished pivot.
+        } else if actor.pending_hand.is_none() && direction.length_squared() <= 0.0001 {
             actor.standing_pivot_active = false;
         }
-        // `was_walking` is resolved after the physics move below; it tracks actual movement so
-        // a giant pressing into a wall is still considered standing for the pivot gate.
-        let move_dir = if taking_step && standing_pivot_target.is_none() {
-            giant_direction
+        let (move_dir, turn_dir) = if standing_pivot_target.is_none() {
+            (giant_direction, turn_intent)
         } else {
-            Vector3::ZERO
-        };
-        // While walking, the view steers the shoulders through turn_giant_smooth; a pivot or a
-        // still-standing body is turned by the step animation instead.
-        let turn_dir = if taking_step && standing_pivot_target.is_none() {
-            turn_intent
-        } else {
-            Vector3::ZERO
+            (Vector3::ZERO, Vector3::ZERO)
         };
         let carry_vel = if !actor.human
-            && taking_step
             && move_dir.length_squared() <= 0.0001
-            && actor.pending_stomp_aim.is_none()
             && actor.pending_hand.is_none()
-            && !actor.ai_holding_stomp
         {
             giant
                 .call("stop_carry_velocity", &[dt.to_variant()])
@@ -1802,8 +1714,6 @@ impl HarborRound {
             }
             near
         });
-        // Clear crushable buildings before move_and_slide so their walls cannot slow the giant.
-        self.crush_touched_buildings(actor, vel_xz * dt);
         let turn_pace = if actor.human {
             // Human turning also ignores the giant speed option.
             1.0
@@ -1829,20 +1739,10 @@ impl HarborRound {
                 actor.walk_remainder += lost;
             }
         }
-        // `was_walking` keeps its intent-based walking meaning while the giant is free to
-        // walk. During a stomp charge or its cooldown — the phases the wall-stuck defect
-        // lives in — a walk that physically cannot move (pressed into a wall) counts as
-        // standing, so the in-place pivot can engage out of the cooldown instead of leaving
-        // the giant wedged against the wall. Micro-step walks withhold travel on some
-        // frames (requested == 0), so those frames do not flip to standing.
-        let charging_or_cooling =
-            actor.pending_stomp_aim.is_some() || !matches!(actor.stomp, Stomp::Ready);
         let requested_travel = vel_xz.length() * dt;
         let actual_travel = horizontal(giant.get_global_position() - giant_position).length();
-        let moved_as_requested =
-            requested_travel <= f32::EPSILON || actual_travel > requested_travel * 0.35;
         actor.was_walking = move_dir.length_squared() > 0.0001
-            && (!charging_or_cooling || moved_as_requested);
+            && (requested_travel <= f32::EPSILON || actual_travel > requested_travel * 0.35);
         if self.growth_rules.is_some() {
             self.check_growth_contacts(actor, giant_position, dt);
             if actor.health_fraction <= 0.0 {
@@ -1850,7 +1750,7 @@ impl HarborRound {
             }
         }
         let ai_attacks_scenery = !player && self.ai_attacks_scenery(actor);
-        if !player && taking_step && !ai_attacks_scenery {
+        if !player && !ai_attacks_scenery {
             if actor.chase_target.is_none() && giant.is_on_wall() {
                 let forward = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
                 let heading_into_wall = actor.roam_goal.is_none_or(|goal| {
@@ -1862,7 +1762,7 @@ impl HarborRound {
                     actor.clear_path();
                 }
             }
-        } else if ai_attacks_scenery && taking_step && actor.blocking_target.is_none() {
+        } else if ai_attacks_scenery && actor.blocking_target.is_none() {
             let crush_buildings = self.can_crush_buildings(actor);
             actor.blocking_target = (0..giant.get_slide_collision_count())
                 .filter_map(|index| giant.get_slide_collision(index))
@@ -1886,13 +1786,23 @@ impl HarborRound {
                         })
                 });
         }
-        let pose = self.advance_stomp(actor, dt);
-        let visual_stride = self.animation_stride(actor, giant_position);
+        // Giant step timing also drives damage and must advance every physics frame.
+        let visual_stride = if actor.human { self.animation_stride(actor, giant_position) } else { 1 };
         let speed = if move_dir.length_squared() > 0.0001 {
-            if micro_steps && !giant.is_on_wall() {
+            let actual = ground_speed(&giant);
+            let facing = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
+            let blocked_by_target = !actor.human
+                && actual < desired_velocity.length() * 0.65
+                && facing.dot(move_dir.normalized_or_zero()) > 0.85
+                && (0..giant.get_slide_collision_count())
+                    .filter_map(|index| giant.get_slide_collision(index))
+                    .any(|collision| collision.get_collider()
+                        .and_then(|node| node.try_cast::<CollisionObject3D>().ok())
+                        .is_some_and(|node| node.get_collision_layer() & (BUILDING_LAYER | 4) != 0));
+            if blocked_by_target || (micro_steps && !giant.is_on_wall()) {
                 desired_velocity.length()
             } else {
-                ground_speed(&giant)
+                actual
             }
         } else {
             0.0
@@ -1900,36 +1810,21 @@ impl HarborRound {
         let (turn_target, allow_standing_turn) = if move_dir.length_squared() > 0.0001 {
             ((-turn_intent.x).atan2(-turn_intent.z), false)
         } else if !actor.human
-            && taking_step
             && carry_vel.length_squared() <= 0.0001
-            && actor.pending_stomp_aim.is_none()
             && actor.pending_hand.is_none()
         {
             if let Some(pivot_yaw) = standing_pivot_target {
                 (pivot_yaw, true)
             } else if let Some(view_yaw) = steer_yaw {
                 (view_yaw, true)
-            } else if !player
-                && let Some(aim_yaw) = actor.ai_aim_yaw
-            {
-                (aim_yaw, true)
             } else {
                 (f32::NAN, false)
             }
         } else {
             (f32::NAN, false)
         };
-        match actor.animate(
-            speed,
-            pose,
-            dt,
-            visual_stride,
-            turn_target,
-            allow_standing_turn,
-        ) {
-            AnimateStep::GiantFootfall(footfall) => {
-                self.impact(actor, footfall, DefeatMethod::Step)
-            }
+        match actor.animate(speed, dt, visual_stride, turn_target, allow_standing_turn) {
+            AnimateStep::GiantFootfall(footfall) => self.resolve_footfall(actor, footfall),
             AnimateStep::HumanFootfall => {
                 if let Some(mut audio) = self.audio() {
                     audio.call(
@@ -2133,7 +2028,7 @@ impl HarborRound {
     ) -> VarDictionary {
         let impact_center = Vector3::new(center.x, 0.0, center.z);
         let impact_radius = radius.max(1.0);
-        let area = StompArea {
+        let area = ImpactArea {
             center: impact_center,
             yaw: 0.0,
             radii: Vector2::splat(impact_radius),
@@ -2324,14 +2219,6 @@ impl HarborRound {
             "giant_at_max_height",
             giant.scale >= self.max_height / GIANT_START_HEIGHT,
         );
-        let (phase, progress) = match giant.stomp {
-            Stomp::Ready => (giant.stomp_phase(), 1.0),
-            Stomp::Windup { elapsed, .. } => (giant.stomp_phase(), elapsed / WINDUP),
-            Stomp::Recover { left, .. } => (giant.stomp_phase(), 1.0 - left / RECOVERY),
-            Stomp::Cooldown(left) => (giant.stomp_phase(), 1.0 - left / COOLDOWN),
-        };
-        snapshot.set("stomp", phase);
-        snapshot.set("stomp_progress", progress);
         snapshot.set(
             "hand_action",
             giant
@@ -2396,9 +2283,10 @@ impl HarborRound {
             return;
         };
         let mut position = body.get_global_position();
+        let mut camera_pitch = 0.0;
         let (height, pitch) = if self.first_person {
             let height = giant.height(self.max_height);
-            // Ride the live Head bone so the eye follows walking, stomps, hand actions and
+            // Ride the live Head bone so the eye follows stepping, hand actions and
             // sitting instead of a fixed fraction of the capsule.
             if self.player == PlayerRole::Giant {
                 let mut body = body.clone();
@@ -2443,13 +2331,7 @@ impl HarborRound {
             // camera above the pavement instead of under it.
             let focus_floor = if self.growth_rules.is_some() { 0.037 } else { 0.0 };
             let forward = Vector3::FORWARD.rotated(Vector3::UP, self.yaw);
-            let feet = forward * (height * 0.05);
-            let want = match giant.stomp {
-                Stomp::Windup { area, .. } | Stomp::Recover { area, .. } => {
-                    feet.lerp(horizontal(area.center - position), 0.75)
-                }
-                _ => feet,
-            };
+            let want = forward * (height * 0.05);
             self.camera_focus_offset = self
                 .camera_focus_offset
                 .lerp(want, 1.0 - (-dt * 5.0).exp());
@@ -2471,8 +2353,13 @@ impl HarborRound {
                 ((height * focus_ratio).max(focus_floor), self.pitch)
             }
         } else {
-            (1.52, self.pitch)
+            let arm_pitch = self.pitch.min(EVAC_ARM_MAX_PITCH);
+            camera_pitch = self.pitch - arm_pitch;
+            (1.52, arm_pitch)
         };
+        if let Some(camera) = &mut self.camera {
+            camera.set_rotation(Vector3::RIGHT * camera_pitch);
+        }
         // Smooth wheel zoom: the arm and near plane follow the eased value.
         if !self.first_person && (self.camera_zoom - self.camera_zoom_target).abs() > 0.0005 {
             let t = (1.0 - (-dt * CAMERA_ZOOM_SMOOTHING).exp()).clamp(0.0, 1.0);
@@ -3189,7 +3076,6 @@ impl HarborRound {
         let size = BodySize::from_capsule(&collision);
         self.civilians.push(Civilian {
             body,
-            collision,
             size,
             position: spawn,
             direction: random_heading(),
@@ -3217,9 +3103,9 @@ impl HarborRound {
         }
         let giant = self.giants[0].body.get_global_position();
         let observer = self.observer_position();
-        let growth = self.growth_rules.is_some();
         // Danger sources for the sense pass, snapshotted once per frame.
         let mut dangers: Vec<(Vector3, f32)> = Vec::new();
+        let mut landings = Vec::new();
         for actor in &self.giants {
             if actor.health_fraction <= 0.0 {
                 continue;
@@ -3227,20 +3113,21 @@ impl HarborRound {
             let height = actor.height(self.max_height);
             if !actor.human {
                 // A giant's stride is dangerous across its whole reach.
-                let reach = (stomp_center_range(actor.scale) + FOOT_RADII.y * actor.scale)
+                let reach = footfall_reach(actor.scale)
                     .max(height * 1.2);
                 dangers.push((actor.body.get_global_position(), reach + 55.0));
             }
-            if let Stomp::Windup { area, .. } = &actor.stomp {
-                dangers.push((area.center, area.radii.x.max(area.radii.y) + 20.0));
+            if let Some(landing) = &actor.footfall {
+                landings.push(landing);
+                dangers.push((landing.sole.center, landing.sole.bounds() + height * 0.35));
             }
             if let Some((center, radius)) = actor.sit_drop_zone() {
                 dangers.push((center, radius + 20.0));
             }
         }
         for impact in &self.camera_impacts {
-            // Collapses and stomps shake the ground: felt even through walls.
-            if matches!(impact.kind, GroundImpact::Stomp | GroundImpact::Demolition) {
+            // Collapses and ground strikes shake the ground: felt even through walls.
+            if matches!(impact.kind, GroundImpact::Footfall | GroundImpact::Sit) {
                 dangers.push((impact.at, 24.0));
             }
         }
@@ -3248,9 +3135,6 @@ impl HarborRound {
             dangers.push((center, radius + 35.0));
         }
         self.civilians.retain_mut(|npc| {
-            if growth && npc.remove_in.is_none() {
-                npc.size = BodySize::from_capsule(&npc.collision);
-            }
             if npc.grabbed {
                 return true;
             }
@@ -3269,9 +3153,23 @@ impl HarborRound {
                 npc.body.call("set_render_active", &[visible.to_variant()]);
             }
 
+            // An approaching sole takes priority immediately, including during panic.
+            // Project along the current heading so pedestrians crossing the step path react too.
+            let landing = landings.iter().find(|landing| {
+                let projected = at + npc.direction * npc.speed * landing.eta.min(0.45);
+                let clearance = npc.size.radius + landing.sole.half_extents.x * 0.30;
+                landing.threatens(at, clearance) || landing.threatens(projected, clearance)
+            });
+            if let Some(landing) = landing {
+                npc.state = CivilianState::Panic;
+                npc.threat = Some((landing.sole.center, landing.sole.bounds()));
+                npc.panic_left = npc.panic_left.max(3.6);
+                npc.cover_goal = None;
+            }
+
             // --- Sense pass (staggered, ~0.3 s per pedestrian). ---
             npc.sense_in -= dt;
-            if npc.sense_in <= 0.0 {
+            if landing.is_none() && npc.sense_in <= 0.0 {
                 npc.sense_in = 0.28 + random_range(0.0, 0.08);
                 let mut sensed: Option<(Vector3, f32)> = None;
                 for &(danger_at, radius) in &dangers {
@@ -3390,17 +3288,7 @@ impl HarborRound {
             drive(&mut npc.body, npc.direction, speed, dt, 11.0);
             if visible {
                 let speed = ground_speed(&npc.body);
-                let footfall = npc.body.call(
-                    "show_motion",
-                    &[speed.to_variant(), sprinting.to_variant()],
-                );
-                if growth && footfall.to::<bool>() {
-                    self.camera_impacts.push(CameraImpact {
-                        at: npc.body.get_global_position(),
-                        kind: GroundImpact::HumanStep,
-                        giant: None,
-                    });
-                }
+                npc.body.call("show_motion", &[speed.to_variant(), sprinting.to_variant()]);
             }
             true
         });
@@ -3432,7 +3320,7 @@ impl HarborRound {
         let can_demolish = self.can_demolish(actor);
         let growth = self.growth_rules.is_some();
         let rules = self.combat_rules();
-        let reach = stomp_center_range(actor.scale) + FOOT_RADII.y * actor.scale;
+        let reach = footfall_reach(actor.scale);
         let eye_range = sight_range(actor.scale);
         let mut sight = GiantSight::new(&actor.body, actor.scale)?;
         let actor_height = actor.height(self.max_height);
@@ -3521,7 +3409,7 @@ impl HarborRound {
                 // above stays the hard gate; the tier decides whether this
                 // actor reaches for the rival at all and how far.
                 let tier = SizeTier::from_ratio(scale / actor.scale);
-                let enemy_reach = stomp_center_range(scale) + GIANT_RADIUS * actor.scale;
+                let enemy_reach = footfall_reach(scale) + GIANT_RADIUS * actor.scale;
                 let hits = scale * health * rules.base_health / (actor.scale * rules.base_attack);
                 let outmatched = scale * health > 1.5 * actor.scale * actor.health_fraction;
                 let attack_range = if !can_demolish {
@@ -3531,7 +3419,7 @@ impl HarborRound {
                     reach * if hits <= 1.0 { 3.0 } else { 1.7 }
                 } else {
                     match tier {
-                        // Incidental stomp in passing only — never a chase.
+                        // Incidental footfall in passing only — never a chase.
                         SizeTier::Trivial => reach,
                         // Ambush the uphill rival only while scale×HP + boldness say so.
                         SizeTier::Uphill
@@ -3602,11 +3490,9 @@ impl HarborRound {
 
     fn pursue(&mut self, actor: &mut Giant, speed: f32, dt: f32) -> Vector3 {
         self.refresh_damage_targets(actor);
-        actor.ai_holding_stomp = false;
-        actor.ai_aim_yaw = None;
         if actor.human {
             // Humans only forage for coins. They cannot start a fight, so they never chase one,
-            // but a telegraphed stomp underfoot still outranks any coin.
+            // but a projected footfall underfoot still outranks any coin.
             actor.chase_target = None;
             actor.building_target = None;
             let position = actor.body.get_global_position();
@@ -3617,12 +3503,10 @@ impl HarborRound {
                 if rival.index == actor.index {
                     continue;
                 }
-                if let Some((center, radii)) = rival.windup {
-                    let reach = radii.x.max(radii.y) + radius;
-                    warnings.push((center, reach + 0.6));
-                    if horizontal(center - position).length() <= reach {
-                        immediate = true;
-                    }
+                if let Some(step) = &rival.footfall {
+                    let clearance = radius + step.sole.half_extents.x * 0.28;
+                    warnings.push((step.sole.center, step.sole.bounds() + clearance));
+                    immediate |= step.threatens(position, clearance);
                 }
                 if let Some((center, sit_radius)) = rival.sit_drop {
                     let reach = sit_radius + radius;
@@ -3647,8 +3531,10 @@ impl HarborRound {
                     actor.danger_note_in = 1.0;
                     actor.memory.note_danger(center, reach);
                 }
+                actor.intent = Intent::Evade;
                 return self.drive_escape(actor, position, &warnings, false, dt);
             }
+            actor.intent = Intent::Forage;
             return self.forage(actor, speed, dt);
         }
         let position = actor.body.get_global_position();
@@ -3660,7 +3546,7 @@ impl HarborRound {
         let my_height = actor.height(self.max_height);
         let radius = GIANT_RADIUS * scale;
 
-        // Telegraphed danger first: standing inside any stomp windup or sit
+        // Telegraphed danger first: standing inside any projected footfall or sit
         // drop warning circle overrides every scored intent (utility 100+).
         let mut warnings: Vec<(Vector3, f32)> = Vec::new();
         let mut immediate = false;
@@ -3668,12 +3554,10 @@ impl HarborRound {
             if rival.index == actor.index {
                 continue;
             }
-            if let Some((center, radii)) = rival.windup {
-                let reach = radii.x.max(radii.y) + radius;
-                warnings.push((center, reach + 1.0));
-                if horizontal(center - position).length() <= reach {
-                    immediate = true;
-                }
+            if let Some(step) = &rival.footfall {
+                let clearance = radius + step.sole.half_extents.x * 0.28;
+                warnings.push((step.sole.center, step.sole.bounds() + clearance));
+                immediate |= step.threatens(position, clearance);
             }
             if let Some((center, sit_radius)) = rival.sit_drop {
                 let reach = sit_radius + radius;
@@ -3742,7 +3626,7 @@ impl HarborRound {
                 continue;
             }
             let ratio = rival.scale / scale;
-            let reach = stomp_center_range(rival.scale) + FOOT_RADII.y * rival.scale + radius + 2.0;
+            let reach = footfall_reach(rival.scale) + radius + 2.0;
             if horizontal(rival.position - position).length() > reach * 1.6 {
                 continue;
             }
@@ -3806,71 +3690,53 @@ impl HarborRound {
                 actor.personality.destructiveness01() > 0.6,
             );
         }
-        if !matches!(actor.stomp, Stomp::Ready | Stomp::Cooldown(_)) {
-            return Vector3::ZERO;
-        }
-        let ready = matches!(actor.stomp, Stomp::Ready);
         let mut chase_goal = None;
         if let Some((mut target, visible, mut sight)) = target {
             let present = target.body.get_global_position();
             let offset = horizontal(present - position);
-            let windup = WINDUP * self.stomp_pace(actor);
-            let reach = stomp_center_range(scale);
+            let lead = actor.footfall.as_ref().map_or(0.25, |step| step.eta).clamp(0.0, 0.65);
             let target_radius = target.size.radius;
-            let lead_range =
-                reach + target_radius + target.body.get_real_velocity().length() * windup;
-            let lead_cap = stomp_lead_cap(
+            let lead_cap = footfall_lead_cap(
                 target.rival.map(|(target_scale, _)| target_scale),
                 self.settings.human_speed,
                 self.settings.giant_speed,
             );
+            let lead_range = footfall_reach(scale) + target_radius + lead_cap * lead;
             let predicted = if visible && offset.length_squared() <= lead_range.powi(2) {
-                predict_stomp_target(&mut target.body, present, windup, lead_cap)
+                let predicted = predict_footfall_target(&mut target.body, present, lead, lead_cap);
+                if predicted == present || sight.sees_at(predicted, target.size.height) {
+                    predicted
+                } else {
+                    present
+                }
             } else {
                 present
             };
-            let aim = StompArea::aim_at(horizontal(predicted - position));
-            let area = StompArea::new(position, aim, scale);
-            let reaches = if target.rival.is_some() || self.growth_rules.is_some() {
-                area.reaches(predicted, target_radius)
-            } else {
-                area.contains(predicted)
-            };
-            let stomp_in_reach = visible
-                && aim != Vector3::ZERO
-                && reaches
-                && (present == predicted || sight.sees_at(predicted, target.size.height));
-            if visible
-                && ready
-                && self.mode != Mode::Human
-                && self.start_ai_hand_move(actor, &target, stomp_in_reach)
+            let approaching = actor.footfall.as_ref()
+                .is_some_and(|step| step.threatens(predicted, target_radius));
+            if visible && self.mode != Mode::Human
+                && self.start_ai_hand_move(actor, &target, approaching)
             {
                 return Vector3::ZERO;
             }
-            if stomp_in_reach {
-                actor.ai_holding_stomp = true;
-                actor.ai_aim_yaw = Some((-aim.x).atan2(-aim.z));
-                let body_forward =
-                    Vector3::FORWARD.rotated(Vector3::UP, actor.body.get_rotation().y);
-                if ready && body_forward.dot(aim) >= AI_STOMP_ALIGN_COS {
-                    self.begin_stomp(actor, aim);
-                }
-                return Vector3::ZERO;
-            }
-            if visible && offset.length() < reach.max(GIANT_RADIUS * scale + target_radius) * 0.85 {
-                return -offset.normalized_or_zero();
-            }
-            // Only the tiers the matrix says to chase get a pursuit goal; the
-            // trivial tier still stomps in passing above without ever walking
-            // after the target. Human/civilian targets are always pursued.
-            let may_chase = tier.chases() || target.rival.is_none();
-            if actor.intent == Intent::Attack && may_chase {
-                chase_goal = Some(predicted);
+            // Trivial targets get incidental footfalls only. Pursued prey is
+            // intercepted ahead of its current velocity, offset to put an
+            // alternating shoe, rather than the gap between the feet, on course.
+            if actor.intent == Intent::Attack && (tier.chases() || target.rival.is_none()) {
+                let heading = offset.normalized_or_zero();
+                let side = actor.footfall.as_ref().map_or_else(
+                    || actor.last_footfall.as_ref().map_or(1.0, |sole| if sole.left { -1.0 } else { 1.0 }),
+                    |step| if step.sole.left { 1.0 } else { -1.0 },
+                );
+                let heel_alignment = if offset.length() <= lead_range {
+                    heading.cross(Vector3::UP) * (1.3 * scale * side)
+                } else {
+                    Vector3::ZERO
+                };
+                chase_goal = Some(predicted + heel_alignment);
             } else if actor.intent == Intent::Attack && tier == SizeTier::Peer
                 && target.rival.is_some()
             {
-                // Cautious peer engagement: close in with a side-step bias so the
-                // approach is not a straight line into the rival's foot.
                 let side = if actor.index % 2 == 0 { 0.45 } else { -0.45 };
                 chase_goal = Some(predicted + offset.normalized_or_zero().rotated(Vector3::UP, side) * offset.length().min(18.0));
             }
@@ -3891,30 +3757,11 @@ impl HarborRound {
         let blocker = actor
             .blocking_target
             .map(|index| self.targets[index].footprint);
-        let stomp_target = if !attacks_scenery {
-            None
-        } else if crush_buildings {
-            // Crushable buildings can be approached at full speed.
-            blocker.filter(|footprint| !footprint.building)
-        } else {
-            blocker.or(building)
-        };
-        if let Some(target) = stomp_target {
-            let offset = horizontal(closest_surface_point(target, position) - position);
-            let aim = StompArea::aim_at(offset);
-            if aim != Vector3::ZERO && StompArea::new(position, aim, scale).touches(target) {
-                actor.ai_holding_stomp = true;
-                actor.ai_aim_yaw = Some((-aim.x).atan2(-aim.z));
-                let body_forward =
-                    Vector3::FORWARD.rotated(Vector3::UP, actor.body.get_rotation().y);
-                if ready && body_forward.dot(aim) >= AI_STOMP_ALIGN_COS {
-                    self.begin_stomp(actor, aim);
-                }
-                return Vector3::ZERO;
-            }
-            if blocker.is_some() {
-                // The foot can overshoot a thin barrier when the body is touching it.
-                return -offset.normalized_or_zero();
+        if let Some(target) = blocker.or(building).filter(|_| attacks_scenery && chase_goal.is_none()) {
+            let surface = closest_surface_point(target, position);
+            if horizontal(surface - position).length() <= footfall_reach(scale) * 1.15 {
+                // Walk into the nearest facade until an actual sole overlaps it.
+                return horizontal(surface - position).normalized_or_zero();
             }
         }
 
@@ -4005,8 +3852,7 @@ impl HarborRound {
                 continue;
             }
             let ratio = rival.scale / actor.scale;
-            let reach = stomp_center_range(rival.scale)
-                + FOOT_RADII.y * rival.scale
+            let reach = footfall_reach(rival.scale)
                 + GIANT_RADIUS * actor.scale
                 + 2.0;
             if horizontal(rival.position - position).length() > reach {
@@ -4075,13 +3921,13 @@ impl HarborRound {
                 if let Some((_, enemy_health)) = target.rival {
                     attack += (1.0 - enemy_health) * 18.0;
                 }
-                // Punish recovery: an enemy not mid-windup is a window.
-                let winding_up = chosen.is_some_and(|id| {
+                // Attack in the gap between the opponent's pending footfalls.
+                let approaching_footfall = chosen.is_some_and(|id| {
                     self.rivals
                         .iter()
-                        .any(|rival| rival.body.instance_id() == id && rival.windup.is_some())
+                        .any(|rival| rival.body.instance_id() == id && rival.footfall.is_some())
                 });
-                if !winding_up {
+                if !approaching_footfall {
                     attack += 10.0;
                 }
                 attack = attack.min(100.0);
@@ -4441,164 +4287,58 @@ impl HarborRound {
         actor.roam_goal.unwrap_or(position)
     }
 
-    fn begin_stomp(&mut self, actor: &mut Giant, aim: Vector3) -> bool {
-        if actor.human
-            || actor.health_fraction <= 0.0
-            || actor.body.call("has_step_in_flight", &[]).to::<bool>()
-        {
-            return false;
-        }
-        actor.yaw_velocity = 0.0;
-        actor.stomp_animation_scale = self.stomp_pace(actor);
-        let giant = &mut actor.body;
-        face(giant, aim, 1.0);
-        let mut area = StompArea::new(giant.get_global_position(), aim, actor.scale);
-        // Probe the ground layer so stomps on a rubble slope show the warning at its surface.
-        let mut start = area.center;
-        start.y = (start.y + 2.0).max(8.0);
-        let warning_scale = if self.growth_rules.is_some() {
-            actor.scale.min(1.0)
-        } else {
-            1.0
-        };
-        area.center.y = (0.10 * warning_scale).max(0.002);
-        let query = PhysicsRayQueryParameters3D::create_ex(
-            start,
-            Vector3::new(area.center.x, -0.5, area.center.z),
-        )
-        .collision_mask(giant.get_collision_mask() & (1 | RUBBLE_LAYER))
-        .done()
-        .unwrap();
-        if let Some(mut space) = giant
-            .get_world_3d()
-            .and_then(|world| world.get_direct_space_state())
-            && let Some(position) = space.intersect_ray(&query).get("position")
-        {
-            area.center.y += position.to::<Vector3>().y;
-        }
-        actor.stomp = Stomp::Windup { area, elapsed: 0.0 };
-        // Telegraphed stomps mark a combat hotspot: nearby coins grade up and
-        // foragers remember to keep clear of the landing zone.
-        self.note_hotspot(
-            area.center,
-            (area.radii.x.max(area.radii.y) * 2.5)
-                .max(18.0)
-                + actor.height(self.max_height) * 0.2,
-        );
+    fn resolve_footfall(&mut self, actor: &mut Giant, sole: Footfall) {
+        actor.footfall_count += 1;
+        actor.last_footfall = Some(sole.clone());
+        let height = actor.height(self.max_height);
+        self.note_hotspot(sole.center, (sole.bounds() * 2.0).max(height * 0.5).max(3.0));
+        self.queue_giant_impact(actor, sole.center, GroundImpact::Footfall);
         self.effects.as_mut().unwrap().call(
-            "warn",
+            "footfall_effect",
             &[
-                area.center.to_variant(),
-                area.yaw.to_variant(),
-                area.radii.to_variant(),
-                (WINDUP * actor.stomp_animation_scale).to_variant(),
-                actor.index.to_variant(),
-                warning_scale.to_variant(),
+                sole.center.to_variant(),
+                sole.yaw.to_variant(),
+                sole.half_extents.to_variant(),
+                sole.left.to_variant(),
+                height.to_variant(),
+                (actor.index == 0 && self.player == PlayerRole::Giant).to_variant(),
+                sole.profile.to_variant(),
             ],
         );
-        true
+        self.apply_ground_strike(actor, StrikeArea::Sole(sole), DefeatMethod::Step);
     }
 
-    fn advance_stomp(&mut self, actor: &mut Giant, dt: f32) -> f32 {
-        // Hold the same animation tempo until the foot returns to its stance.
-        let animation_dt = dt / actor.stomp_animation_scale;
-        match actor.stomp {
-            Stomp::Windup { area, elapsed } if elapsed + animation_dt >= WINDUP => {
-                actor.stomp = Stomp::Recover {
-                    area,
-                    left: RECOVERY,
-                };
-                self.effects
-                    .as_mut()
-                    .unwrap()
-                    .call("cancel_warning", &[actor.index.to_variant()]);
-                self.impact(actor, area, DefeatMethod::Stomp);
-                1.0
-            }
-            Stomp::Windup { area, elapsed } => {
-                let elapsed = elapsed + animation_dt;
-                actor.stomp = Stomp::Windup { area, elapsed };
-                elapsed / WINDUP
-            }
-            Stomp::Recover { area, left } if left > animation_dt => {
-                let left = left - animation_dt;
-                actor.stomp = Stomp::Recover { area, left };
-                2.0 - left / RECOVERY
-            }
-            Stomp::Recover { .. } => {
-                actor.stomp = Stomp::Cooldown(COOLDOWN);
-                -1.0
-            }
-            Stomp::Cooldown(left) => {
-                actor.stomp = if left > dt {
-                    Stomp::Cooldown(left - dt)
-                } else {
-                    Stomp::Ready
-                };
-                -1.0
-            }
-            Stomp::Ready => -1.0,
-        }
-    }
-
-    fn stomp_pace(&self, actor: &Giant) -> f32 {
-        if !self.can_demolish(actor) {
-            return 1.0;
-        }
-        let scale = actor.scale.sqrt();
-        (if self.growth_rules.is_some() {
-            scale.max(0.65)
-        } else {
-            scale
-        }) / self.settings.giant_speed
-    }
-
-    fn impact(&mut self, actor: &mut Giant, area: StompArea, method: DefeatMethod) {
-        let stomp = method != DefeatMethod::Step;
+    fn impact(&mut self, actor: &mut Giant, area: ImpactArea, method: DefeatMethod) {
         let height = actor.height(self.max_height);
-        // Every landed impact refreshes the combat hotspot around it.
-        if stomp {
-            self.note_hotspot(
-                area.center,
-                (area.radii.x.max(area.radii.y) * 2.0)
-                    .max(16.0)
-                    .max(height * 0.6),
-            );
-        }
+        self.note_hotspot(area.center, (area.radii.length() * 2.0).max(16.0).max(height * 0.6));
         if let Some(mut audio) = self.audio() {
             audio.call(
-                "play_giant_step",
+                "play_giant_impact",
                 &[
                     area.center.to_variant(),
                     height.to_variant(),
-                    stomp.to_variant(),
                     (actor.index == 0 && self.player == PlayerRole::Giant).to_variant(),
                 ],
             );
         }
-        self.queue_giant_impact(
-            actor,
-            area.center,
-            if stomp {
-                GroundImpact::Stomp
-            } else {
-                GroundImpact::Step
-            },
-        );
+        self.queue_giant_impact(actor, area.center, GroundImpact::Sit);
+        let shattered = self.apply_ground_strike(actor, StrikeArea::Ellipse(area), method);
+        self.show_impact(area, shattered, true, actor.scale.min(1.0));
+    }
+
+    fn apply_ground_strike(&mut self, actor: &mut Giant, area: StrikeArea, method: DefeatMethod) -> bool {
+        let height = actor.height(self.max_height);
+        let center = area.center();
         let giant_damage = self.growth_stat(actor, self.combat_rules().base_attack);
+        let crush_buildings = method == DefeatMethod::Step && self.can_crush_buildings(actor);
+        let can_demolish = self.can_demolish(actor);
         self.giant_strikes.push(GiantStrike {
             attacker: actor.index as usize,
-            area,
+            area: area.clone(),
             damage: giant_damage,
             height,
             method,
         });
-        if !self.can_demolish(actor) {
-            if stomp {
-                self.show_impact(area, false, true, actor.scale.min(1.0));
-            }
-            return;
-        }
         // Every target in the same impact uses the upgrade state at its start.
         let growth = self.growth_rules.is_some();
         let damage = if growth { giant_damage } else { 1.0 };
@@ -4610,17 +4350,13 @@ impl HarborRound {
         };
         self.strike += 1;
         let rebuild_at = self.building_rebuild_time();
-        let mut hit = false;
         let mut shattered = false;
-        for index in self
-            .target_grid
-            .near(area.center, area.radii.x.max(area.radii.y))
-        {
+        for index in self.target_grid.near(center, area.bounds()).filter(|_| can_demolish) {
             let target = &mut self.targets[index];
             if target.grabbed || !target.integrity.blocks() || !area.touches(target.footprint) {
                 continue;
             }
-            let destroy_on_hit = one_hit_buildings && target.footprint.building;
+            let destroy_on_hit = (one_hit_buildings || crush_buildings) && target.footprint.building;
             let target_damage = if target.footprint.building {
                 building_damage
             } else if growth {
@@ -4634,20 +4370,22 @@ impl HarborRound {
             {
                 Damage::Ignored => {}
                 Damage::Cracked => {
-                    hit = true;
                     target.node.call("strike", &[false.to_variant()]);
                 }
                 Damage::Destroyed => {
-                    hit = true;
                     let rebuild = rebuild_at.filter(|_| target.footprint.building);
-                    target.node.call(
+                    let passed_by = if crush_buildings { actor.body.to_variant() } else { Variant::nil() };
+                    let rubble = target.node.call(
                         "strike",
                         &[
                             true.to_variant(),
-                            Variant::nil(),
+                            passed_by,
                             rebuild.is_some().to_variant(),
                         ],
                     );
+                    if crush_buildings && let Ok(body) = rubble.try_to::<Gd<StaticBody3D>>() {
+                        actor.rubble_passes.push((target.footprint, body));
+                    }
                     shattered = true;
                     if target.footprint.building {
                         if let Some(deadline) = rebuild {
@@ -4661,29 +4399,27 @@ impl HarborRound {
                 }
             }
         }
+        let sole_tolerance = (height * 0.04).clamp(0.003, 0.25);
+        let in_vertical_range = |floor: f32, target_height: f32| {
+            let reach = if method == DefeatMethod::Step { sole_tolerance } else { height };
+            floor <= center.y + reach && floor + target_height >= center.y - sole_tolerance
+        };
         for npc in &mut self.civilians {
+            if npc.remove_in.is_some() || npc.grabbed {
+                continue;
+            }
             let point = npc.body.get_global_position();
-            let in_range = if self.growth_rules.is_some() {
-                area.reaches(point, npc.size.radius) && (point.y - area.center.y).abs() < 1.0
-            } else {
-                area.contains(point)
-            };
-            if npc.remove_in.is_none()
-                && !npc.grabbed
-                && in_range
-                && method.allows_target_height(height, npc.size.height)
-            {
-                hit = true;
+            if in_vertical_range(point.y, npc.size.height) && area.reaches(point, npc.size.radius) {
                 npc.hurt(damage, self.growth_rules.is_none());
             }
         }
         let mut evacuee_hurt = false;
         if self.player == PlayerRole::Evacuee
+            && self.state.outcome == Outcome::Active
             && let Some(human) = &mut self.human
         {
             let position = human.get_global_position();
-            if method.allows_target_height(height, HUMAN_HEIGHT) && area.contains(position) {
-                hit = true;
+            if in_vertical_range(position.y, HUMAN_HEIGHT) && area.reaches(position, HUMAN_RADIUS) {
                 self.state.hurt();
                 if self.state.outcome == Outcome::Lost {
                     human.call("show_fall", &[]);
@@ -4695,15 +4431,13 @@ impl HarborRound {
         if evacuee_hurt {
             self.play_audio_2d("human_hurt", -1.5, 1.0, 0.04);
         }
-        if stomp || hit {
-            self.show_impact(area, shattered, stomp, 1.0);
-        }
         if shattered {
             self.refresh_damage_targets(actor);
         }
+        shattered
     }
 
-    fn show_impact(&mut self, area: StompArea, shattered: bool, stomp: bool, height_scale: f32) {
+    fn show_impact(&mut self, area: ImpactArea, shattered: bool, heavy: bool, height_scale: f32) {
         self.effects.as_mut().unwrap().call(
             "impact",
             &[
@@ -4711,82 +4445,10 @@ impl HarborRound {
                 area.yaw.to_variant(),
                 area.radii.to_variant(),
                 shattered.to_variant(),
-                stomp.to_variant(),
+                heavy.to_variant(),
                 height_scale.to_variant(),
             ],
         );
-    }
-
-    fn crush_touched_buildings(&mut self, actor: &mut Giant, step_delta: Vector3) {
-        if !self.can_crush_buildings(actor) {
-            return;
-        }
-        let giant = actor.body.clone();
-        let pos = giant.get_global_position();
-        let mid = pos + step_delta * 0.5;
-        let next = pos + step_delta;
-        let reach = GIANT_RADIUS * actor.scale + TOUCH_CRUSH_MARGIN;
-        let giant_yaw = giant.get_rotation().y;
-        let mut contacts = Vec::new();
-
-        self.strike += 1;
-        let rebuild_at = self.building_rebuild_time();
-        for index in self
-            .target_grid
-            .near(mid, reach + step_delta.length() * 0.5)
-        {
-            let target = &mut self.targets[index];
-            if target.grabbed || !target.footprint.building || !target.integrity.blocks() {
-                continue;
-            }
-            let touches = target.footprint.touches(pos, reach)
-                || target.footprint.touches(mid, reach)
-                || target.footprint.touches(next, reach);
-            if !touches {
-                continue;
-            }
-            if target.integrity.hit(self.strike, 0.0, true) == Damage::Destroyed {
-                let rubble = target.node.call(
-                    "strike",
-                    &[
-                        true.to_variant(),
-                        giant.to_variant(),
-                        rebuild_at.is_some().to_variant(),
-                    ],
-                );
-                if let Ok(body) = rubble.try_to::<Gd<StaticBody3D>>() {
-                    actor.rubble_passes.push((target.footprint, body));
-                }
-                if let Some(deadline) = rebuild_at {
-                    self.building_respawns.push((index, deadline));
-                }
-                actor.progress.destroyed += 1;
-                self.destroyed_buildings += 1;
-                actor.replan_in = 0.0;
-                contacts.push(closest_surface_point(target.footprint, next));
-                self.reward_building_growth(actor);
-            }
-        }
-
-        if contacts.is_empty() {
-            return;
-        }
-        let radii = Vector2::splat((GIANT_RADIUS * 0.45 * actor.scale).min(4.0));
-        let mut effects = self.effects.clone().unwrap();
-        for center in &contacts {
-            self.queue_giant_impact(actor, *center, GroundImpact::Demolition);
-            effects.call(
-                "impact",
-                &[
-                    center.to_variant(),
-                    giant_yaw.to_variant(),
-                    radii.to_variant(),
-                    true.to_variant(),
-                    false.to_variant(),
-                ],
-            );
-        }
-        self.refresh_damage_targets(actor);
     }
 
     fn can_crush_buildings(&self, actor: &Giant) -> bool {
@@ -4815,7 +4477,7 @@ impl HarborRound {
     }
 }
 
-/// Maximum sustained speed used to extrapolate a stomp target. Rival giants can move
+/// Maximum sustained speed used to extrapolate a footfall target. Rival giants can move
 /// several times faster than a sprinting human once the giant speed multiplier is applied,
 /// so their lead must not be capped by `HUMAN_SPRINT`.
 /// Whether the smaller side takes the uphill fight anyway: its `scale × HP`
@@ -4831,17 +4493,17 @@ fn ambush_uphill(
     own_scale * own_health >= enemy_scale * enemy_health * (0.85 - risk01 * 0.45)
 }
 
-fn stomp_lead_cap(rival_scale: Option<f32>, human_speed: f32, giant_speed: f32) -> f32 {
+fn footfall_lead_cap(rival_scale: Option<f32>, human_speed: f32, giant_speed: f32) -> f32 {
     match rival_scale {
         Some(scale) => GIANT_WALK * giant_speed * scale.min(1.0),
         None => HUMAN_SPRINT * human_speed,
     }
 }
 
-fn predict_stomp_target(
+fn predict_footfall_target(
     body: &mut Gd<CharacterBody3D>,
     position: Vector3,
-    windup: f32,
+    lead: f32,
     speed_cap: f32,
 ) -> Vector3 {
     let velocity = horizontal(body.get_real_velocity());
@@ -4849,7 +4511,7 @@ fn predict_stomp_target(
     if speed < 0.05 {
         return position;
     }
-    let motion = velocity * (windup * (speed_cap / speed).min(1.0));
+    let motion = velocity * (lead * (speed_cap / speed).min(1.0));
     let transform = body.get_global_transform();
     let collision = KinematicCollision3D::new_gd();
     if body
@@ -5035,9 +4697,9 @@ fn desk_hazard_camera_shake(distance: f32, impact_radius: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        FOOT_RADII, GIANT_RADIUS, GIANT_START_HEIGHT, GroundImpact, InstanceId, PI, SIGHT_RANGE,
-        Vector3, ambush_uphill, at_current_growth_cap, horizontal, ignores_human,
-        rival_engage_range, sight_range, stomp_center_range, stomp_lead_cap,
+        GIANT_RADIUS, GIANT_START_HEIGHT, GroundImpact, InstanceId, PI, SIGHT_RANGE,
+        Vector3, at_current_growth_cap, horizontal, ignores_human,
+        rival_engage_range, sight_range, footfall_reach, footfall_lead_cap,
     };
     use crate::rules::HUMAN_SPRINT;
 
@@ -5045,7 +4707,7 @@ mod tests {
         let scale = height / GIANT_START_HEIGHT;
         (
             scale,
-            stomp_center_range(scale) + FOOT_RADII.y * scale,
+            footfall_reach(scale),
             GIANT_RADIUS * scale,
         )
     }
@@ -5086,12 +4748,12 @@ mod tests {
     }
 
     #[test]
-    fn stomp_lead_uses_the_target_kind_speed() {
-        assert_eq!(stomp_lead_cap(None, 1.0, 4.0), HUMAN_SPRINT);
-        assert_eq!(stomp_lead_cap(None, 2.0, 4.0), HUMAN_SPRINT * 2.0);
-        assert_eq!(stomp_lead_cap(Some(1.0), 1.0, 4.0), 28.0);
-        assert_eq!(stomp_lead_cap(Some(19.8), 1.0, 4.0), 28.0);
-        assert!(stomp_lead_cap(Some(1.0), 1.0, 4.0) > 26.0);
+    fn footfall_lead_uses_the_target_kind_speed() {
+        assert_eq!(footfall_lead_cap(None, 1.0, 4.0), HUMAN_SPRINT);
+        assert_eq!(footfall_lead_cap(None, 2.0, 4.0), HUMAN_SPRINT * 2.0);
+        assert_eq!(footfall_lead_cap(Some(1.0), 1.0, 4.0), 28.0);
+        assert_eq!(footfall_lead_cap(Some(19.8), 1.0, 4.0), 28.0);
+        assert!(footfall_lead_cap(Some(1.0), 1.0, 4.0) > 26.0);
     }
 
     #[test]
@@ -5105,25 +4767,22 @@ mod tests {
     }
 
     #[test]
-    fn shake_falls_off_with_distance_and_stomps_are_stronger() {
-        for impact in [GroundImpact::Step, GroundImpact::Stomp] {
+    fn heavy_footfall_and_sit_shake_fall_off_with_distance() {
+        for impact in [GroundImpact::Footfall, GroundImpact::Sit] {
             assert!(impact.shake(4.0, 1.0) > impact.shake(40.0, 1.0));
             assert!(impact.shake(40.0, 1.0) > 0.0);
             assert_eq!(impact.shake(200.0, 1.0), 0.0);
         }
-        assert!(GroundImpact::Stomp.shake(40.0, 1.0) > GroundImpact::Step.shake(40.0, 1.0));
+        assert!(GroundImpact::Sit.shake(40.0, 1.0) > GroundImpact::Footfall.shake(40.0, 1.0));
     }
 
     #[test]
     fn growth_shake_increases_with_height_gap_and_falls_off_with_distance() {
-        let human = GroundImpact::HumanStep;
-        assert_eq!(human.relative_shake(1.0, 1.8, 1.8), 0.0);
-        assert_eq!(human.relative_shake(1.0, 1.8, 2.0), 0.0);
-        assert!(human.relative_shake(1.0, 1.8, 0.01) > human.relative_shake(1.0, 1.8, 0.5));
-        assert!(human.relative_shake(1.0, 1.8, 0.5) > human.relative_shake(8.0, 1.8, 0.5));
-        let giant = GroundImpact::Step;
+        let giant = GroundImpact::Footfall;
+        assert_eq!(giant.relative_shake(1.0, 1.8, 1.8), 0.0);
+        assert_eq!(giant.relative_shake(1.0, 1.8, 2.0), 0.0);
         assert!(giant.relative_shake(2.0, 2.0, 0.5) > giant.relative_shake(2.0, 1.0, 0.5));
-        assert_eq!(giant.relative_shake(12.0, 1.0, 0.5), 0.0);
+        assert_eq!(giant.relative_shake(18.0, 1.0, 0.5), 0.0);
     }
 
     #[test]

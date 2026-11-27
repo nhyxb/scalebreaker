@@ -16,9 +16,6 @@ pub const ONE_HIT_BUILDING_THRESHOLD: u32 = 3;
 pub const TOUCH_CRUSH_BUILDING_THRESHOLD: u32 = 6;
 pub const BUILDING_LAYER: u32 = 8;
 pub const RUBBLE_LAYER: u32 = 16;
-pub const WINDUP: f32 = 0.52;
-pub const RECOVERY: f32 = 0.48;
-pub const COOLDOWN: f32 = 0.72;
 pub const EXIT_RADIUS: f32 = 2.7;
 
 pub fn growth_building_hits(height: f32) -> u32 {

@@ -279,20 +279,37 @@ func _verify_kawaii_sit_crush_biomechanics() -> void:
 
 func _verify_walk_transition_and_pause_freeze() -> void:
 	var giant := (load("res://scenes/giant.tscn") as PackedScene).instantiate() as CharacterBody3D
+	var floor := StaticBody3D.new()
+	var ground_shape := BoxShape3D.new()
+	ground_shape.size = Vector3(30.0, 1.0, 30.0)
+	var ground_collision := CollisionShape3D.new()
+	ground_collision.shape = ground_shape
+	floor.add_child(ground_collision)
+	floor.position.y = -0.5
+	root.add_child(floor)
 	root.add_child(giant)
+	giant.position.y = 0.02
 	await process_frame
 	giant.call("_set_skin", &"Kawaii")
 	var skel: Skeleton3D = giant.get_node("Model/metarig/Skeleton3D")
 	var idx_hip := skel.find_bone("spine")
 	var idx_foot_l := skel.find_bone("foot.L")
 
-	# Walk forward for 0.6s, then enter sit-crush mid-stride: entry blend must prevent single-frame snap!
-	for i in 36:
-		giant.position.z -= 7.0 / 60.0
+	# Enter the sit animation with a shoe already airborne and locked onto a landing.
+	var had_locked_foot := false
+	for i in 105:
+		await physics_frame
+		giant.velocity = Vector3(0.0, -1.0, -7.0)
+		giant.move_and_slide()
 		giant.show_motion(7.0, -1.0, 1.0 / 60.0)
+		if giant.heavy_step_preview().get("locked", false):
+			had_locked_foot = true
+			break
 	var pre_hip := skel.get_bone_global_pose(idx_hip).origin
 	var pre_foot := skel.get_bone_global_pose(idx_foot_l).origin
 	giant.show_sit_crush(0.0, 1.0 / 60.0)
+	_check(had_locked_foot and giant.heavy_step_preview().is_empty(),
+			"Entering a sit cancels the pending walking footfall")
 	var entry_hip_jump := skel.get_bone_global_pose(idx_hip).origin.distance_to(pre_hip)
 	var entry_foot_jump := skel.get_bone_global_pose(idx_foot_l).origin.distance_to(pre_foot)
 	_check(entry_hip_jump < 0.005 and entry_foot_jump < 0.005,
@@ -321,6 +338,7 @@ func _verify_walk_transition_and_pause_freeze() -> void:
 	_check(exit_jump < 0.08, "Exiting sit-crush back to show_motion blends smoothly without instant snap (jump=%.4f)" % exit_jump)
 
 	giant.free()
+	floor.free()
 
 
 func _verify_all_three_skins() -> void:

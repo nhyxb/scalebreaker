@@ -6,6 +6,14 @@
 - **内部一律不改**：包名 `org.gba.harboralert`（改了旧包无法覆盖升级）、`assets/harbor-alert-icon.png` 等路径、Rust crate `harbor`、GDScript `class_name`、`user://` 存档路径与键、技能 `harbor-alert-workflow`、`native/harbor.gdextension`、`scripts/build_android.sh`。
 - 主菜单大标题用 `interface.gd::_set_menu_title()` 自适应字号（目标 428 px、≥44 px）：拉丁文名比中文页名宽，不缩放会把 442 px 菜单列撑宽。
 
+## 巨人重步与鞋印（2026-11-27）
+
+- `giant_visual.gd` 使用四种皮肤各自的左右鞋底凸轮廓，摆脚约到 46% 时锁定横向落点和朝向，后段加速垂落。支撑脚按世界坐标锁定，停步会完成当前摆脚，需要收脚时另一只鞋单独结算。只有着地事件才传给 `round/footfalls.rs`，每次包含 `center / yaw / half_extents / left / profile`。鞋底局部坐标 X 向右、-Z 向前，轮廓以半长宽归一化。
+- `HarborRound::resolve_footfall()` 用同一鞋底区域同时提交建筑、行人和对手的命中判定、扬尘、低频空间音效和一次震动。40 米门槛保留一脚拆楼和废墟通行，身体扫过建筑不结算。手部、坐压和人类撞击沿用各自入口。
+- `heavy_step_preview()` 提供预测 `eta / progress / locked / lift`，AI 可用早期预测避让。严格比较最终落点时等 `locked`，以 `growth_actors()` 的 `footfall_count` 和 `last_footfall_*` 确认。市民优先远离即将着地的鞋底，复用原有恐慌状态。
+- `round_effects.gd::footprint_debug()` 可以查看鞋印池。每局复用 72 个槽位，12 秒过期，末 4.5 秒淡出。鞋印从场景深度投影到可见表面，避免叠放平面产生 Z-fighting。
+- 撤离和成长人类观察视角可向上看约 83°。弹簧臂保留原上仰限位，摄像机本身补足抬头角度，保持街面上方。
+
 ## 全局合批、建筑三态与相机（2026-11-26 确认）
 
 - **静态资产一律全图一个 MultiMesh**：`scenes/district_expansion.gd::_batch_mesh()` 不再按 `RENDER_CHUNK_SIZE(108 m)` 分块，节点放在 District 原点、实例用绝对变换；只有 `Scenery` 里的独立小件仍按 108 m 分块裁剪（`district.gd` 只对 `$Scenery` 注册 chunk，`Roads/Lots/Targets/Batches` 不再参与）。全局小件批次挂在新的 `District/Batches` 下；`scripts/district_stats.gd` 的扫描根已包含 `Batches` 与 `BuildingBatches`，账单才完整。
@@ -20,7 +28,7 @@
 - **海雾**（`rust/src/game.rs::view_fog_bounds` & `view_fog_density` + `scenes/main.tscn`）：视距 ≥ 出厂默认（桌面 300 / 安卓 200）时将 `fog_density` 置 `0.0`（保留 `fog_enabled=true` 与 `map_side × 0.52 / 1.12 + 0.45h / 0.85h` 起止距离断言语义），消除微缩沙盘木框边缘发光白边；低于默认视距时恢复 `fog_density=0.85` 边界雾，旧设置语义与断言不变。
 - **巨人远距降级**：`giant_visual.set_detail_tier()` 由 `round.rs::update_distant_silhouettes()` 按 `max(180, height × 1.2)` / `max(240, 上一档 × 2.2)` 驱动；tier1 关实时阴影并跳过头发/狐尾弹簧，tier2 再隐藏眼睛/眼线/睫毛/眉/鼻线；第一人称的 `SHADOWS_ONLY` 头部不会被 tier 覆盖（tier 逻辑必须跳过 `SHADOWS_ONLY`）。
 - **测试落点**：核心街区 4×3 栋楼几乎贴满 24 m 地块，把 23–25 m 巨人放在 `DockPress1/Tidewater1` 南侧会插进 `MarineWorks1` 的碰撞盒，`is_on_floor()` 变假、手部攻击起不来。要放到北侧空街（`-(footprint.z*0.5 + 5)`）并把身体朝向设为 `PI`。
-- **卡墙缺陷已修（2026-11-26）**：踩踏蓄力/冷却期间按住前进不再取消原地转身。`update_giant` 里 pivot 标志跨 pending/Windup/Cooldown 存活（只松方向输入才取消，蓄力结束后从剩余角度续演，不再要求 >55° 重新入场）；`was_walking` 只在蓄力/冷却期间按实际位移判定（被墙挡＝站立），解锁阶段保持原输入意图语义——把"被挡判站立"扩到所有阶段会误伤 12 m 大乱斗 AI 漫游（贴楼原地把位移断言耗光，brawl 变红）。回归入口 `tests/playtest.gd::_stomp_charge_pivot` 与 Tidewater4 塔的自然转身收敛段。贴墙测试要用"胶囊贴边界墙"（`z ≈ -(play_edge)+半径+0.2`），随手放墙前 9 m 时甩视角的瞬间巨人仍在自由行走，测不出走-挡切换。
+- **贴墙转向**：`update_giant` 在实际位移不足时恢复原地小步转向，等当前转身小步落定后再切入重步。只有建筑和角色碰撞允许贴着接触迈重步，地图边界第 2 层不能触发空踏。回归入口为 `tests/playtest.gd::_blocked_walk_pivot`。
 
 ## 大乱斗与成长模式共用的回合逻辑
 
@@ -31,8 +39,8 @@
 
 ## 成长模式的人类/巨人两阶段（2026-11-23 确认）
 - 成长模式不再有行人 NPC。`Giant` 结构新增 `human` 阶段字段，由 `HarborRound::sync_actor_stage()` 按 `actor.scale` 与 `attack_height / GIANT_START_HEIGHT` 切换；`Giant::resize()` 在人类阶段使用 human 胶囊（半径 `HUMAN_RADIUS × 身高 / HUMAN_HEIGHT`）与 `HumanModel` 缩放（`身高 / HUMAN_HEIGHT`），巨人阶段恢复 `GIANT_RADIUS × scale` 和 `Model` 皮肤。
-- 人类阶段没有主动攻击：`begin_stomp()` 拒绝 `actor.human`，玩家输入在 `update_giant()` 里被清空，AI 在 `pursue()` 开头直接走 `forage()`。人类速度是 `HUMAN_WALK × 身高 / HUMAN_HEIGHT × settings.human_speed`，不乘 `settings.giant_speed`；巨人阶段才使用「巨人整体速度」。
-- 人类之间的伤害只在 `apply_giant_contact_stomps()`：双方都是 human 且较高者 ≥ 2× 较矮者时，由较高者造成 `growth_stat(base_attack)` 的撞击伤害（`DefeatMethod::Bump`）。人类与巨人混合时不走接触伤害，由巨人的踩踏/抓取处理。
+- 人类阶段没有主动攻击。玩家不能发出手部攻击，AI 只捡金币和避险。速度是 `HUMAN_WALK × 身高 / HUMAN_HEIGHT × settings.human_speed`。
+- 人类与人类相撞时，通过 `apply_human_bumps()` 由至少两倍身高的一方造成 `DefeatMethod::Bump`。巨人与角色之间的行走伤害在重步鞋底着地时结算。
 - 巨人 AI 的 `combat_target()` 把 human 阶段的其他 `Rival` 放进 humans 候选，行为与旧行人一致（近处才注意、可踩/抓/拳）；人类 AI 不做战斗，只捡金币和躲避两倍以上身高的角色。
 - 皮肤固定：`giant_visual.gd` 只在 `_ready()` 调 `_roll_skin()`，`show_respawn()` 不再重抽。人类/巨人切换走 `set_stage()`，人类第一人称隐藏 `head-mesh`。
 - 随机开局（`random_start`）在 `initial_growth_spawn()` 于 `[giant_height, giant_max_height]` 之间对数采样，按采样高度自动决定人类或巨人 AI。
@@ -52,16 +60,10 @@
 - 四种模式各自保存正整数 `map_side`，以米为单位，缺字段的旧存档采用 1418 米。新回合在 `District._ready()` 前传入设置，场景据此生成道路、街区、海岸和碰撞。Rust 读取 `District.play_edge` 作为 `world_limit`，出生点、金币、寻路和旁观镜头共用这个边界。
 - 48 米地图保留中央十字街和四栋全尺寸厂房。地图更小时按可用空间缩窄边墙、裁剪铺装、移除放不下的设施，并调整撤离圈和出生标记。边长超过 1800 米和低于 48 米的回归在 `tests/playtest.gd`。
 
-## AI 踩踏预判与后撤（2026-11-24 确认）
-- `predict_stomp_target()` 的第四参数是 `speed_cap`，不是固定的人类冲刺速度。巨人对手必须用 `stomp_lead_cap(Some(scale), human_speed, giant_speed)`，即 `GIANT_WALK × 巨人整体速度 × min(scale,1)`；人类/行人用 `HUMAN_SPRINT × 人类整体速度`。用人类上限去预判 4 倍速巨人会把落点算在身后。
-- 踩踏威胁下的后撤只在 `outmatched` 时触发，不能因为 `!ready`（自己冷却）就后退；否则两名同等体型的 AI 会同时后退并互相绕圈。
-- 踩踏命中仍需目标进入左脚脚底椭圆；锁定后蓄力期间不能改向。默认 100 生命 / 10 攻击需要 10 次命中，冷却固定 0.72 秒；攻击“慢”要先区分预判/后撤问题和这组数值。
-- 玩家踩踏落点相对身体是左脚前方约 `FOOT_FORWARD × 体型`、左侧约 `FOOT_LEFT × 体型`，不是准星中心；观察和测试都以橙色预警椭圆为准。
-
 ## 速度与忽略倍率（2026-11-24 确认）
 - `GameSettings.human_speed` 默认 1.0，乘在撤离玩家的 `HUMAN_WALK`/`HUMAN_SPRINT` 和成长人类阶段的 `HUMAN_WALK × 身高/HUMAN_HEIGHT` 上。`HUMAN_WALK` 和 `HUMAN_SPRINT` 仍是基础常量；`giant_visual.gd` 通过 `human_pace` 让人类走路动画跟随该倍率。
-- `GameSettings.rival_ignore_ratio` 默认 10，所有模式独立保存，控制 AI 巨人之间不再主动追击，并决定碰撞例外/通过和接触踩踏的门槛。它从 `GrowthSettings` 移到 `GameSettings`，但存档键仍是扁平的 `rival_ignore_ratio`，旧档无需迁移。
-- `GameSettings.human_ignore_ratio` 默认 30，所有模式独立保存。`combat_target()` 用 `ignores_human(巨人身高, 目标身高, 倍率)` 过滤人类/行人候选；该判定是非对称的，只有更大的巨人一侧能忽略，不会让较矮的巨人忽略更高的人类。达到倍率后 AI 巨人不再主动追击或踩踏该目标，但走路落脚仍按原命中规则造成踩踏伤害。25.2 米巨人对 1.8 米人类约 14 倍，默认仍会追击。
+- `GameSettings.rival_ignore_ratio` 默认 10，所有模式独立保存，控制 AI 巨人之间不再主动追击，并决定碰撞例外与通行的门槛。它从 `GrowthSettings` 移到 `GameSettings`，但存档键仍是扁平的 `rival_ignore_ratio`，旧档无需迁移。
+- `GameSettings.human_ignore_ratio` 默认 30，所有模式独立保存。`combat_target()` 用 `ignores_human(巨人身高, 目标身高, 倍率)` 过滤人类/行人候选；该判定是非对称的，只有更大的巨人一侧能忽略，不会让较矮的巨人忽略更高的人类。达到倍率后 AI 巨人不再主动追击该目标，实际落脚依旧按鞋底范围结算。25.2 米巨人对 1.8 米人类约 14 倍，默认仍会追击。
 - 两个倍率都必须用 `settings.*` 读取，不要再从 `combat_rules()`/`GrowthSettings` 取；`combat_rules()` 只保留成长/大乱斗的生命、攻击、金币和建筑参数。
 
 ## 地图路障（2026-11-24 确认）
@@ -72,27 +74,27 @@
 ## 巨人剪影与镜头震动
 - 150 米及以上的远处活巨人使用当前皮肤网格的淡色材质叠加，保留深度遮挡。渲染剪影时可以延长相机远裁剪面，`district_draw_distance` 仍决定城市区块和海雾。
 - `own_camera_shake` 由巨人沙盒、成长模式和大乱斗各自保存，旧存档默认开启。自身与附近震动各自保持衰减状态，关闭当局的自身震动时只清除自身的状态。
-- 巨人走路和重踏的镜头震动最远分别为 220 米和 352 米。成长和大乱斗的外来震动约在 27 米身高时达到上限，沙盒、撤离和自身震动按体型平方根缩放，约在 122 米达到上限。
+- 重步和坐压使用不同的震动强度与随距离衰减的范围。成长和大乱斗的外来震动按身高差计算，沙盒、撤离和自身震动按体型平方根缩放。
 
 ## 被动接触伤害
-- 行走落脚使用 `DefeatMethod::Step`，仅在来源身高大于等于目标时对生物结算，行人、撤离玩家和其他巨人共用该检查。身体碰撞按体型差由较高的一方结算。主动重踏拥有独立的命中判定。
-- 巨人之间的碰撞体按成对例外放行，默认身高相差 3 倍起生效，忽略倍率更低时取较低值。场景碰撞由原掩码处理。通过中的接触踩踏要用移动前后两端的相对位置检测胶囊扫掠，Godot 的滑动碰撞记录不会包含例外的对手。倍率变化时等身体分开再恢复碰撞。
+- 重步使用 `DefeatMethod::Step`。建筑与鞋底凸多边形求交，角色用脚下接地高度与水平碰撞半径和同一轮廓求交，因此敌方巨人可因真正被踩中受伤。
+- 巨人之间的碰撞体按成对例外放行，默认身高相差 3 倍起生效，忽略倍率更低时取较低值。倍率变化时等身体分开再恢复。
 
 ## 多角色性能：成对检查、寻路与动画（2026-11-24 确认）
-- `round.rs` 的 `PairFrame` 每帧只读一次位置、半径、高度、安全边距和步速。`update_giant_collision_passes()` 必须在移动前调用，`apply_giant_contact_stomps()` 必须在全部移动和手部攻击后调用；两轮都按 `i < j` 顺序遍历。接触踩踏的提前跳过只允许用于未被跟踪、且当前/起点水平距离超过 `clearance + max_travel`（通过例外用实际帧位移之和）的成对候选；被跟踪的对必须完整结算，否则分开后 `trample_contacts` 不会清除。
+- `PairFrame` 缓存角色位置、半径、高度、安全边距和步速。`update_giant_collision_passes()` 在移动前更新例外，`apply_human_bumps()` 在所有移动和手部攻击后结算同场人类的身体撞击。
 - `route.rs` 的寻路格使用 CSR 分桶：障碍的逆变换和水平包围盒在每次规划时预处理一次，再分桶到可能覆盖的格点。`bucketed_queries_match_a_full_obstacle_scan` 验证分桶与全量扫描输出完全一致；改分桶边界时必须保留该对照。`Footprint::touches()` 仍每次求逆，只用于非热路径。
 - AI 路线不再在 `pursue`/`forage` 内同步规划，而是 `request_route()` 写入每角色一个槽位，`process_path_requests()` 每帧最多 4 个、2.5 毫秒，按 `path_cursor` 轮转。请求带 `serial`，`Giant::clear_path()` 会把 `pending_path` 置 0；应用前必须同时检查存活、未被抓和序号，防止旧计划覆盖清空后的路径。增加角色数或改预算后先跑 `tests/perf_probe.gd` 看路径延迟。
-- 程序化骨骼按到镜头的距离分级：玩家/旁观巨人 0 号，以及 `max(120, 身高×1.2)` 内每帧；再远隔帧；`ANIMATION_HALF_DISTANCE` 外每三帧。`Giant::animate()` 累积 `visual_dt` 并限制 0.05 秒（GDScript 内部也会 clamp），回到近处会清空 `visual_wait`。远处行走落脚反馈最多延迟两帧；伤害仍由 `apply_giant_strikes` 按原时序结算，不能靠动画调用次数驱动伤害。
+- 巨人脚步每物理帧推进，落脚与预测不随镜头距离降频。巨人仍按剪影级别跳过远处头发和尾巴次级弹簧，人类动画仍可根据距镜头远近降频。
 - 60 角色 release headless 基线约：大乱斗 27.8ms、成长混合 29.5ms、沙盒 23.8ms；优化后约 17.2/21.5/19.2ms。20 角色大乱斗约 9.1 → 5.8ms。剩余瓶颈是 60 个 `CharacterBody3D` 的 `move_and_slide` 和完整程序化动画；成对检查约 0.01ms，A* 已由 135ms 降到 1.15ms 量级。
 - 性能探针 `tests/perf_probe.gd` 只打印，不进通过/失败统计。用 release 扩展测；把 release `.so` 覆盖到 debug 路径后，测完必须 `touch rust/src/lib.rs && cargo build`，否则 cargo 认为 debug 产物仍是最新，游戏会继续加载 release 扩展。
 
 ## 巨人分层转身与脚部跟踪（2026-11-25 确认）
-- `scenes/giant_visual.gd` 的 `show_motion(speed, stomp_pose, delta, turn_target := NAN, allow_standing_turn := false)` 后两参可选，保持外部与测试脚本的 3 参数调用兼容。
-- 玩家镜头环视（`self.yaw`）完全不影响巨人身体朝向与任何攻击方向：`Space` 踩踏、`Q` 抓捏、`E` 挥拳与对应触屏按钮全部严格按 `giant.get_rotation().y` 当前身体朝向结算（按后退键 + 攻击绝不转身打身后，必须先转身）。
+- `giant_visual.gd::show_motion()` 的第二参数是供已有三参数预览调用保留的空参数。巨人接触帧返回鞋底字典，其他帧返回空值。人类阶段仍返回脚步布尔值。
+- 手部攻击按身体当前朝向结算。玩家视角与第一人称跟转只引导走路朝向，摆脚完成落点锁定后，继续转视角不会移动鞋印。
 - `WASD` / 左摇杆保持画面相对方向；玩家与 AI 巨人在站立不动且目标方向夹角 `> STAND_PIVOT_ENTER_ANGLE (0.96 rad ≈ 55°)` 时都先原地小碎步转身，转到 `≤ STAND_PIVOT_EXIT_ANGLE (0.56 rad ≈ 32°)` 后无缝切入行走，中途松手会把抬起的一小步稳稳落完再停下。
-- AI 攻击同样受当前身体朝向约束：踩踏要求 `body_forward.dot(aim) >= AI_STOMP_ALIGN_COS (0.965)`（否则先靠 `ai_aim_yaw` 小碎步转正），`start_ai_hand_move()` 按 `actor.body.get_rotation().y` 校验手部攻击前方扇区；`drive_giant()` 将 `turn_giant_smooth()` 的转向倍速按 `pace.max(0.1).sqrt().min(1.65)` 亚线性限幅，防止高 `giant_speed`（如 4×）时急甩头。实机回归入口在 `tests/playtest.gd` 的 `_ai_smooth_turning()`。
+- AI 接近目标时按其速度提前量与鞋底摆动侧对准路线。`start_ai_hand_move()` 继续按身体当前朝向校验手部攻击前方扇区。
 - 巨人阶段行进速度沿当前身体正前方 `body_forward` 走弧线（急弯自动微减速 `0.25~1.0`），避免横向蟹行把支撑脚甩偏；`giant_visual.gd` 将急转步频平滑限制在正常步频的 `1.24×~1.32×` 内，并约束迈步落脚在髋部自然横向走廊内。
-- 站立小碎步转身仅由地面待机且未处于制动/重踏/手部动作时触发，落脚只给轻震动脉冲、不返回 `Vector4` 行走踩踏触地事件，避免原地转身误拆邻近建筑；实机回归入口在 `tests/playtest.gd` 的 `_giant_layered_turn()`。
+- 原地小碎步转身只调整朝向和提供轻量骨骼回弹。要检查支撑脚是否滑动，用 `get_turn_telemetry()` 的世界空间跟踪或 `tests/playtest.gd::_giant_layered_turn()`。
 - 独立原型 `prototypes/giant_turn/` 保留供交互预览，已在 `export_presets.cfg` 两个预设中通过 `prototypes/*` 排除出打包产物。
 
 ## 桌面沙盘 3D Skybox（2026-11-26 阶段 2 完整定稿）
@@ -116,14 +118,14 @@
 
 ## 阶段 4：金币风险分级 + 全场 Utility AI（2026-11-27 确认）
 
-- **金币 3 档**（`growth.rs::CoinTier`）：Normal/High/Extreme = 1×/2.5×/5× 奖励、0/2.0/3.75 s 读条；分级来源＝巨人脚边踩踏射程(Extreme)、活动区 `max(视距×1.4, 身高×2.2)`(High)、交战热区（踩踏预警/命中/拆迁/击杀喂入 `note_hotspot`，12 s TTL，容量 24）；热区与巨人位置每 0.5 s 对存量币重估（`update_hotspots_and_coin_tiers`，热区衰减在 `physics_process` 里无条件跑——`coin_count=0` 时波函数提前返回）。**离开拾取圈按 ~27 %/s 缓退不清零**（`advance_dwell`，纯函数有单测）；成长为巨人后全部瞬拾；brawl 击杀掉落币恒 Normal。读条状态在 `Giant.coin_dwell: Option<CoinDwell>`（按币 InstanceId 跟踪），玩家有地面进度环（`coins.gd::show_dwell`）与递增音效（`coin_dwell_tick`，复用 coin_pickup wav 的独立冷却别名），AI 无视觉但共用同一时序代码。
+- **金币 3 档**（`growth.rs::CoinTier`）：Normal/High/Extreme = 1×/2.5×/5× 奖励、0/2.0/3.75 s 读条；分级来源＝巨人脚边踩踏射程(Extreme)、活动区 `max(视距×1.4, 身高×2.2)`(High)、交战热区（重步落脚/拆迁/击杀喂入 `note_hotspot`，12 s TTL，容量 24）；热区与巨人位置每 0.5 s 对存量币重估（`update_hotspots_and_coin_tiers`，热区衰减在 `physics_process` 里无条件跑——`coin_count=0` 时波函数提前返回）。**离开拾取圈按 ~27 %/s 缓退不清零**（`advance_dwell`，纯函数有单测）；成长为巨人后全部瞬拾；brawl 击杀掉落币恒 Normal。读条状态在 `Giant.coin_dwell: Option<CoinDwell>`（按币 InstanceId 跟踪），玩家有地面进度环（`coins.gd::show_dwell`）与递增音效（`coin_dwell_tick`，复用 coin_pickup wav 的独立冷却别名），AI 无视觉但共用同一时序代码。
 - **模糊雷达**：`snapshot_growth` 仅在成长模式人类阶段发 `coin_radar`（angle/span≈40°/tier/proximity 3 档，110 m 内不发=淡出）；HUD 是 `interface.gd` 的 `CoinRadar` 类（顶部居中弧形扇区，tier 三色，脉冲速率 5.2/9.0/14.5 Hz）。成长模式**不再发** `coin_distance/coin_angle`（精确罗盘只保留给 brawl 小巨人）；`growth_playtest._mapwide_coins` 的旧精确断言已改为雷达断言。
 - **AI 模块 `rust/src/round/ai.rs`**：`Personality`（6 维 0–100，`roll()` 走 godot 随机流→测试 `seed()` 可复现，跨复活保留；**不要改回 wall-clock 随机**，会让回归按掷骰结果漂移）、`SizeTier`（7 档 +10 %/−10 % 滞回，`from_ratio_with_hysteresis`）、`CombatMemory`（目击 6 s/受击 2.5 s/仇恨 25 s/失败逃跑拉黑 4 s/危险区 13 s，全部 tick 衰减）、`escape_direction`（16 射线按"探针-威胁距离增量"给分 + 边界侵入斥力，**任何情况不返回零向量**，有单测）。
 - **pursue 重构要点**：预警圈内每帧直接 Evade（100+，绕过 0.25 s 重评），utility 重评带 +13 惯性；**逃避期间豁免站立小碎步转身**（`update_giant` 里 `intent == Evade` 清 pivot，否则 4× giant_speed 下 0.13 s 预警窗会被 180° 转身耗光——回归 `_ai_evades_warning_circles`）；Search 分数按目击点距离 60/(60+d) 衰减（远处逃兵让位给拆楼，否则 playtest 的拆楼回归会因 6 s 搜索超窗）；**击杀清空进攻方 last_seen/hit_from/grudge**（搜尸体无意义）；撤离/沙盒 AI 对人类/市民目标 attack 恒 100 分且 `chases()` 不拦（掠食者设计，性格不得让撤离巨人对人类摆烂）。
 - **挑高楼倾向**：`choose_building(actor, position, prefer_tall)` 只在**距最近楼 6 m 窗口内**取最高楼（destructiveness>0.6 触发）；窗口放宽会抢走明确最近楼、打破 playtest 的拆楼断言（该断言已改为"最近簇 ±7 m 内被拆"）。
-- **市民三态**（`update_civilians` + `CivilianState::{Calm,Panic,Cover}`）：0.28 s 节流感威胁（巨人活动圈/踩踏预警圈/倒塌震动都算），panic 速度 ×2.4、动画传 sprint=true，撞墙沿墙滑行；`round.civilian_debug()` 暴露 state/position。**测试市民恐慌时先等开局恐慌平息**（出生在巨人旁的市民开局就在 panic，最多 ~14 s 才回 calm，中途瞬移会因 cover 目标点在旧位置而拉长回程）。
+- **市民三态**（`update_civilians` + `CivilianState::{Calm,Panic,Cover}`）：0.28 s 节流感威胁（巨人活动范围/鞋底落点预测/落地震动都算），panic 速度 ×2.4、动画传 sprint=true，撞墙沿墙滑行；`round.civilian_debug()` 暴露 state/position。**测试市民恐慌时先等开局恐慌平息**（出生在巨人旁的市民开局就在 panic，最多 ~14 s 才回 calm，中途瞬移会因 cover 目标点在旧位置而拉长回程）。
 - **测试/调试接口**：`round.coin_debug()`（tier/dwell/position）、`round.civilian_debug()`、`growth_actors()` 新增 `intent/size_tier/evading/dwell/dwell_tier`。
-- **易踩坑**：`coins.gd` 的 dwell ring 挂在 Coins 根下，`_refresh_visible` 必须跳过无子节点的孩子（否则每帧 Index error 刷屏）；测试巨人瞬拾时场上必须仍有**人类阶段角色**（`update_coin_wave` 在全员巨化时清场退币）；growth 默认 `giant_speed=4×` 会把 WINDUP 压到 ~8 tick，躲预警圈类测试要按此排窗口。
+- **易踩坑**：`coins.gd` 的 dwell ring 挂在 Coins 根下，`_refresh_visible` 必须跳过无子节点的孩子（否则每帧 Index error 刷屏）；测试巨人瞬拾时场上必须仍有**人类阶段角色**（`update_coin_wave` 在全员巨化时清场退币）；重步预测回归可临时设 `giant_speed=1×` 留出可测的避让窗口。
 
 ## 阶段 3B-1 & 单世界 Vulkan `mobile` 渲染升级（2026-11-27 确认）
 
@@ -144,7 +146,7 @@
 
 - 坐压状态机在 `rust/src/round/sit.rs`：`SitPhase::{Drop, Hold, Rise}`，Drop/Rise 换算成 `giant_visual.gd` 的 0..0.67 / 0.67..1 进度，Hold 走 `show_sit_idle` 无缝循环。坐压期间**禁止调用 `animate()`**（`show_motion` 会覆盖坐姿），也不跑 AI/输入/成长。
 - 触发：AI 自动（条件 = 前方意向圈内 ≥ `sit_crush_targets` 个身高 ≤ 自身 `1/sit_crush_ratio` 的活物；半径 `4.366 × 体型`，圆心在身体正前方 `2.85 × 体型`）。玩家**只要是巨人阶段**按 `stand_up`（X）随时可坐，不需要目标、不看坐压冷却；`sit_crush_enabled` 只关 AI 的自动坐压。
-- **AI 坐压的闸门是 `stomp_allows_sit()`（2026-11-25 修）**：只有动画已锁定的 `Stomp::Windup`（预警圈已画出）和 `Stomp::Recover`（脚已落地）阻止坐压，`Ready` 和 `Cooldown` 都放行。原先只有 `Ready` 放行，而踩踏循环是 `Windup 0.52 s → Recover 0.48 s → Cooldown 0.72 s → Ready`，等于每约 1.72 秒只有 1 帧能看人群，追击中几乎抓不到窗口；`hand_attack`（抓捏 4.5 s / 挥拳 2.4 s）期间整帧跳过 `update_giant`，同样不看人群。改闸门时别把冷却重新当“忙碌”，否则这个缺陷会复发（判别性回归：`_crush_pre_empts_the_stomp_cooldown`，旧闸门下永不触发）。
+- AI 坐压在地面检查，没有重步预告时才启动。人群检查在下一次追击与迈步之前执行。玩家按 X 继续可主动坐下或起身。
 - 人群判定在 `update_giant()` 里排在 `pursue()` **之前**，所以群体坐压本来就优先于单点踩踏/抓捏；`seat_targets()` 统计人数**不看** `rival_ignore_ratio` / `human_ignore_ratio`，也不要求存在 `chase_target`，统计范围＝`rivals`（含人类阶段巨人）+ `civilians` + 撤离玩家。抓起的目标会从 `rivals` 摘除、不计入人数——抓捏射程 `0.29 × 身高` 比意向圈前沿 `0.2863 × 身高` 略大，这条约 `0.0037 × 身高`（25.2 m 时 9 cm）的窄带是唯一还能让单点攻击抢先的路径。
 - 落区预警：`round_effects.gd` 的 `sit_warn(center, radius, index)` / `sit_warn_end(index)` 画琥珀色落区圈（节点名 `SitWarning` / `SitWarning2`），`drive_sit` 在 Turn/Drop 阶段每帧更新、落座/起身/死亡时清除；不要在 Hold 阶段还留着圈。
 - 坐姿的骨盆落在身体**后方**：`sit_center = 位置 - forward × 2.85 × 体型`（实测 yaw=0 时骨盆在 +2.85 米），所以坐压前要先原地转身把背对准人群——`SitPhase::Turn` 调用 `giant_visual.gd` 的 `step_turn_in_place(aim, dt)`，`done` 或 7 秒超时后再进 Drop；没有目标就直接坐。**判定圈在前方、落地区在后方**，两者不要写反。
@@ -153,7 +155,7 @@
 - 被坐压：`Giant.pinned_by` 定身并每 `sit_pin_interval`（0.5 秒）掉 `攻击力/5` 的血，直到对方起身/死亡。**不要复用 `grabbed`**：被抓起会从 `rivals` 摘除、HUD 显示「被抓住」、手部逻辑当作持有目标，语义完全不同。
 - 设置键（`GameSettings.sit`）：`sit_crush_enabled / sit_crush_ratio / sit_crush_targets / sit_hold_base / sit_hold_per_scale / sit_idle_enabled / sit_idle_chance / sit_idle_timeout / sit_pin_ratio / sit_pin_interval`，四个模式共用。
 - 回归入口：`tests/sit_crush_gameplay_playtest.gd`（44 项）。测试里玩家巨人要按 X 才坐；AI 待机坐用 `debug_resize_giant` 造体型、把玩家挪远制造「无目标」。
-- 调试接口：`round.debug_resize_giant(index, height)` 仅供测试改体型；`growth_actors()` 有 `sit / sit_idle / pinned / stomp / stomp_phase` 字段（`stomp_phase` ∈ `ready / windup / impact / cooldown`，测试可据此等到某一踩踏阶段再动作）；`snapshot()` 增加 `sit_action / sit_progress / sit_idle / giant_pinned / sit_ready`。
+- 调试接口 `round.debug_resize_giant(index, height)` 改体型。`growth_actors()` 提供 `sit / sit_idle / pinned`，`snapshot()` 提供 `sit_action / sit_progress / sit_idle / giant_pinned / sit_ready`。
 
 ## 设置面板（2026-11-25 重构）
 
@@ -175,9 +177,9 @@
 
 ## 第一人称相机（2026-11-25 确认）
 
-- 眼位唯一来源是 `giant_visual.first_person_eye_position()`：巨人阶段 = 当前骨架 Head 骨骼世界坐标 + 前偏 `0.045 × 身高` + 上抬 `0.055 × 身高`；人类阶段或缺 Head 骨骼回退 `0.90 × 胶囊身高`。`round.rs::follow_camera()` 直接拿它当基准，只在 `pitch < -0.35` 时再叠 `0.06 × 身高` 的 smoothstep 前探（`FIRST_PERSON_LOOK_DOWN_PITCH/LEAN`），**不要再在 Rust 侧重复加基础前偏**。实测雪狐眼高 0.8916 h（Head 骨骼 0.8365 h），Kawaii 0.899 h，Hina 0.890 h，Chibi 0.820 h。
+- 眼位唯一来源是 `giant_visual.first_person_eye_position()`：巨人阶段 = 当前骨架 Head 骨骼世界坐标 + 前偏 `0.045 × 身高` + 上抬 `0.055 × 身高`；人类阶段或缺 Head 骨骼回退 `0.90 × 胶囊身高`。`round.rs::follow_camera()` 直接拿它当基准，只在 `pitch < -0.35` 时再最多叠 `0.105 × 身高` 的 smoothstep 前探（`FIRST_PERSON_LOOK_DOWN_PITCH/LEAN`），**不要再在 Rust 侧重复加基础前偏**。实测雪狐眼高 0.8916 h（Head 骨骼 0.8365 h），Kawaii 0.899 h，Hina 0.890 h，Chibi 0.820 h。
 - 第一人称转头夹紧：`self.yaw` 相对 `giants[0].body.get_rotation().y` 最多 ±`FIRST_PERSON_YAW_LIMIT (1.31 rad ≈ 75°)`，由 `clamp_first_person_view()` 在 `rotate_view()` 和每帧 `follow_camera()` 里执行；这是「看不到后背蝴蝶结和尾巴」的硬保证。
-- 设置键 `first_person_steer`（默认开，玩法页「巨人」组，立即生效）：开启时站立用 `show_motion(..., turn_target=视角 yaw, allow_standing_turn=true)` 原地小碎步带身体、行走用夹在 ±75° 的 `turn_giant_smooth`；关闭时身体不随视角。重踏蓄力/手部动作/坐压期间一律跳过（`steer_view` 条件），攻击锁定朝向不变。
+- 设置键 `first_person_steer`（默认开，玩法页「巨人」组，立即生效）：开启时站立用 `show_motion(..., turn_target=视角 yaw, allow_standing_turn=true)` 原地小碎步带身体、行走用夹在 ±75° 的 `turn_giant_smooth`；关闭时身体不随视角。手部动作和坐压期间跳过（`steer_view` 条件），攻击锁定朝向不变。
 - 注意 `giant_visual` 的原地转身自身死区是 `STAND_START_DEADZONE (0.22 rad)` 起步、`STAND_DONE_DEADZONE (0.06)` 收尾；`FIRST_PERSON_STEER_DEADZONE (0.05)` 只是「不再请求」的门槛，所以 12.6° 以内只转头不挪脚。
 - 测试：`tests/growth_playtest.gd` 的 `_first_person_eye_tracks_head()`、`_first_person_view_limits()`；`_first_person_camera_active()` 现在用 `first_person_eye_position()` 取期望高度（旧的 `0.90 × 身高` 已不适用）。
 

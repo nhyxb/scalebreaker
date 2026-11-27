@@ -28,8 +28,8 @@ func _run() -> void:
 	await process_frame
 	await _player_can_sit_anywhere()
 	await _crush_triggers_on_small_crowd()
-	await _ai_crush_wins_over_chase_and_stomp()
-	await _crush_pre_empts_the_stomp_cooldown()
+	await _ai_crush_wins_over_chase_and_footfall()
+	await _crush_can_begin_after_a_footfall()
 	await _crush_ignores_ignore_ratios()
 	await _hold_time_scales_with_size()
 	await _idle_sit_stands_when_someone_appears()
@@ -227,9 +227,9 @@ func _crush_triggers_on_small_crowd() -> void:
 	_check(int(phases["rise"]) > 30, "The rise plays out before control returns (%d frames)" % int(phases["rise"]))
 
 
-func _ai_crush_wins_over_chase_and_stomp() -> void:
+func _ai_crush_wins_over_chase_and_footfall() -> void:
 	# 常规追击:AI-1 追着前方 40 m 的 25 m 对手,同时脚边站着两个 1 m 的小目标。
-	# 期望:群体坐压抢先触发,把小目标压死;而不是被普通踩踏/抓捏逐个处理掉。
+	# 期望：群体坐压优先触发，小目标在落座时一起受击。
 	await _start_growth({"giant_count": 5, "giant_height": BASE_HEIGHT})
 	_place(0, FAR_AWAY)
 	_place(1, OPEN_STREET)
@@ -257,7 +257,7 @@ func _ai_crush_wins_over_chase_and_stomp() -> void:
 		if float(_actor(index).get("health", 0.0)) > 0.0:
 			alive += 1
 	_check(alive == 2,
-			"The crowd sit starts before either small target is stomped (both alive: %d)" % alive)
+			"The crowd sit starts before either small target is struck (both alive: %d)" % alive)
 	# 落座伤害在 drop 段末结算,期间必须把人留在落区里。
 	var reached_hold := false
 	for frame in 700:
@@ -269,12 +269,11 @@ func _ai_crush_wins_over_chase_and_stomp() -> void:
 	_check(reached_hold, "The chase-triggered crowd sit reaches the seated hold")
 	for index in crowd_at_feet:
 		_check(float(_actor(index).get("health", 0.0)) <= 0.001,
-				"The crowd sit crushes small target #%d instead of a stomp" % index)
+				"The crowd sit crushes small target #%d with the seated impact" % index)
 
 
 func _pin_crowd_at_feet() -> void:
-	# 两个 1 m 小目标固定在 AI-1 身体正前方 2.4 m:落在坐压意向圈内
-	# (圆心前方 2.85 m、半径 4.366 m),但远离 7.05 m 处的落脚椭圆。
+	# 两个 1 m 小目标固定在 AI-1 身体前方 2.4 m，持续满足人数判定。
 	var anchor: Vector3 = _body(1).global_position
 	for pair in [[3, Vector3(0.7, 0.0, -2.4)], [4, Vector3(-0.7, 0.0, -2.4)]]:
 		var npc := _body(pair[0])
@@ -282,72 +281,53 @@ func _pin_crowd_at_feet() -> void:
 		npc.velocity = Vector3.ZERO
 
 
-func _crush_pre_empts_the_stomp_cooldown() -> void:
-	# 坐压的群体判定必须在「踩踏冷却」期间也能开闸:否则 AI 每次行动完都要等
-	# 0.72 秒冷却走完才看人群,追击中几乎抓不到窗口。这里先让 AI 踩一脚进入
-	# 冷却,再把人放进意向圈,要求几帧内就坐下。
+func _crush_can_begin_after_a_footfall() -> void:
 	await _start_growth({"giant_count": 5, "giant_height": BASE_HEIGHT})
 	_place(0, FAR_AWAY)
 	_place(1, OPEN_STREET)
-	_place(2, OPEN_STREET + Vector3(0.0, 0.0, -8.0))
+	_place(2, OPEN_STREET + Vector3(0.0, 0.0, -40.0))
 	_place(3, OPEN_STREET + Vector3(40.0, 0.0, 0.0))
 	_place(4, OPEN_STREET + Vector3(-40.0, 0.0, 0.0))
 	_round().debug_resize_giant(2, BASE_HEIGHT)
 	_round().debug_resize_giant(3, 1.0)
 	_round().debug_resize_giant(4, 1.0)
 	await _ticks(4)
-	var sat_in_cooldown := false
+	var landed := false
+	for frame in 240:
+		await physics_frame
+		if int(_actor(1).get("footfall_count", 0)) > 0:
+			landed = true
+			break
+	_check(landed, "A chasing giant completes a heavy footfall before the crowd approaches")
 	var frames_to_sit := -1
-	var attempts := 0
-	while attempts < 4 and not sat_in_cooldown:
-		attempts += 1
-		# 让 AI-1 对着前方 8 m 的对手踩一脚,等它进入冷却。
-		var reached_cooldown := false
-		for frame in 400:
-			_place(2, _body(1).global_position + Vector3(0.0, 0.0, -8.0))
-			await physics_frame
-			if String(_actor(1).get("stomp_phase", "")) == "cooldown":
-				reached_cooldown = true
-				break
-		if not reached_cooldown:
-			continue
-		# 冷却刚开始的这一刻把人放进圈内,并在这几帧里一直钉住。
-		var forward: Vector3 = Vector3(0.0, 0.0, -1.0).rotated(Vector3.UP, _body(1).rotation.y)
-		var side: Vector3 = forward.cross(Vector3.UP)
-		var anchor: Vector3 = _body(1).global_position
-		var spots: Array[Vector3] = [
-			anchor + forward * 2.4 + side * 0.8,
-			anchor + forward * 2.4 - side * 0.8,
-		]
-		for step in 6:
-			_body(3).global_position = spots[0]
-			_body(3).velocity = Vector3.ZERO
-			_body(4).global_position = spots[1]
-			_body(4).velocity = Vector3.ZERO
-			await physics_frame
-			if String(_actor(1).get("sit", "")) != "":
-				sat_in_cooldown = true
-				frames_to_sit = step + 1
-				break
-	_check(sat_in_cooldown,
-			"A qualifying crowd opens the sit during the stomp cooldown (%d frame(s))" % frames_to_sit)
-	_check(frames_to_sit > 0 and frames_to_sit <= 6,
-			"The group sit pre-empts the stomp cooldown instead of waiting it out")
-	var alive := 0
-	for index in [3, 4]:
-		if float(_actor(index).get("health", 0.0)) > 0.0:
-			alive += 1
-	_check(alive == 2, "The cooldown sit starts before either small target is stomped (%d)" % alive)
+	for frame in 16:
+		var giant := _body(1)
+		var forward := -giant.global_basis.z
+		for index in [3, 4]:
+			var civilian := _body(index)
+			var lateral := 0.8 if index == 3 else -0.8
+			civilian.global_position = giant.global_position + forward * 2.4 + giant.global_basis.x * lateral
+			civilian.velocity = Vector3.ZERO
+		await physics_frame
+		if not String(_actor(1).get("sit", "")).is_empty():
+			frames_to_sit = frame + 1
+			break
+	_check(frames_to_sit > 0 and frames_to_sit <= 16,
+			"A qualifying crowd opens a sit directly after a footfall (%d frames)" % frames_to_sit)
+	_check(float(_actor(3).get("health", 0.0)) > 0.0 and float(_actor(4).get("health", 0.0)) > 0.0,
+			"The crowd sit starts while both small targets are alive")
 
 
 func _crush_ignores_ignore_ratios() -> void:
 	# 坐压人数统计不看 rival_ignore_ratio / human_ignore_ratio:即使 AI 完全
 	# 不想追击这些小目标(倍率门槛极低),它们也必须算进坐压人数。
 	await _start_growth({"giant_count": 5, "giant_height": BASE_HEIGHT,
-			"rival_ignore_ratio": 1.01, "human_ignore_ratio": 1.01})
+			"rival_ignore_ratio": 1.01, "human_ignore_ratio": 1.01, "base_attack": 1.0})
 	_place(0, FAR_AWAY)
 	_place(1, OPEN_STREET)
-	_place(2, OPEN_STREET + Vector3(0.0, 0.0, -40.0))
+	_place(2, FAR_AWAY + Vector3(50.0, 0.0, 0.0))
+	_place(3, OPEN_STREET + Vector3(40.0, 0.0, 0.0))
+	_place(4, OPEN_STREET + Vector3(-40.0, 0.0, 0.0))
 	_round().debug_resize_giant(2, BASE_HEIGHT)
 	_round().debug_resize_giant(3, 1.0)
 	_round().debug_resize_giant(4, 1.0)
@@ -357,9 +337,10 @@ func _crush_ignores_ignore_ratios() -> void:
 		var forward: Vector3 = Vector3(0.0, 0.0, -1.0).rotated(Vector3.UP, _body(1).rotation.y)
 		var side: Vector3 = forward.cross(Vector3.UP)
 		var anchor: Vector3 = _body(1).global_position
-		for pair in [[3, 0.9], [4, -0.9]]:
+		# Keep both bodies in the seating zone and clear of either shoe's lane.
+		for pair in [[3, 3.25], [4, -3.25]]:
 			var npc := _body(pair[0])
-			npc.global_position = anchor + forward * 2.4 + side * float(pair[1])
+			npc.global_position = anchor + forward * 3.1 + side * float(pair[1])
 			npc.velocity = Vector3.ZERO
 		await physics_frame
 		if String(_actor(1).get("sit", "")) != "":

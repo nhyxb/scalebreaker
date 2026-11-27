@@ -1,11 +1,11 @@
 extends CharacterBody3D
-## Procedural locomotion, heavy stomp, terrain foot IK, multi-layer hair spring dynamics,
+## Procedural heavy gait, terrain foot IK, multi-layer hair spring dynamics,
 ## and living eye/facial animation on the imported Kawaii skeleton.
 ## The skeleton faces +Z in model space, while the gameplay CharacterBody3D faces -Z.
 
 const CONTACT_FRACTION := 0.60
 const HALF_STEP := 0.285
-const SWING_HEIGHT := 0.165
+const SWING_HEIGHT := 0.35
 const WALK_REF_SPEED := 7.0
 const STOP_SWING_SECONDS := 0.56
 const STANCE_SETTLE_SECONDS := 0.50
@@ -51,11 +51,7 @@ const SKINS := {
 }
 
 # Foot pivot geometry in model space (derived from foot/toe rest and shoe sole).
-const HEEL_OFFSET := Vector3(0.0, -0.125, -0.046)
 const TOE_OFFSET := Vector3(0.0, -0.096, 0.064)
-const LEFT_SOLE_CENTER := Vector3(0.06208, 0.0, 0.02071)
-const STOMP_STEP := Vector3(0.028, 0.0, 0.455)
-const STOMP_SOLE_OFFSET := Vector3(-0.0087, 0.0, 0.0609)
 
 const IDLE_FOOT_YAW := 0.045
 
@@ -81,6 +77,45 @@ const HEEL_ROLL_SECONDS := 0.13         # Heel-strike to flat sole roll duration
 const HEEL_STRIKE_PITCH := -0.25        # Clear anatomical heel-first dorsiflexion (~-14.3 deg)
 const WALK_SHARP_ENTER := 0.40          # Metric above which walking curve transitions into sharp turn
 const WALK_SHARP_FULL := 1.50           # Metric at which sharp turn reaches full stride adaptation
+const SWING_TARGET_LOCK := 0.46
+
+# Bounds and silhouettes measured from the lower shoe vertices of each imported skin.
+# Offsets and half extents are in the unscaled driver model's units; X is world right
+# and -Z is forward. Alternate-skin centers are expressed in that skin's foot-bone space.
+const KAWAII_SOLE: Array[Vector2] = [
+	Vector2(-1.0, -0.21), Vector2(-0.93, -0.58), Vector2(-0.65, -0.77),
+	Vector2(0.14, -1.0), Vector2(0.59, -1.0), Vector2(0.91, -0.91),
+	Vector2(1.0, -0.76), Vector2(0.95, -0.23), Vector2(0.74, 0.17),
+	Vector2(0.16, 0.96), Vector2(-0.02, 1.0), Vector2(-0.52, 0.89),
+	Vector2(-0.85, 0.58),
+]
+const HINA_SOLE_L: Array[Vector2] = [
+	Vector2(-1.0, -0.42), Vector2(-0.85, -0.66), Vector2(-0.43, -0.92),
+	Vector2(0.06, -1.0), Vector2(0.56, -0.94), Vector2(1.0, -0.44),
+	Vector2(0.81, 0.58), Vector2(0.54, 0.94), Vector2(0.21, 1.0),
+	Vector2(-0.35, 0.83), Vector2(-0.51, 0.60), Vector2(-0.99, -0.18),
+]
+const HINA_SOLE_R: Array[Vector2] = [
+	Vector2(-1.0, -0.40), Vector2(-0.62, -0.92), Vector2(-0.16, -1.0),
+	Vector2(0.33, -0.94), Vector2(0.72, -0.68), Vector2(1.0, -0.20),
+	Vector2(0.57, 0.81), Vector2(0.37, 0.94), Vector2(0.05, 1.0),
+	Vector2(-0.38, 0.94), Vector2(-0.62, 0.60), Vector2(-0.95, -0.19),
+]
+const CHIBI_SOLE: Array[Vector2] = [
+	Vector2(-1.0, -0.01), Vector2(-0.96, -0.36), Vector2(-0.77, -0.68),
+	Vector2(-0.41, -0.93), Vector2(0.05, -1.0), Vector2(0.51, -0.94),
+	Vector2(0.80, -0.75), Vector2(0.95, -0.46), Vector2(1.0, -0.07),
+	Vector2(0.94, 0.34), Vector2(0.75, 0.69), Vector2(0.43, 0.92),
+	Vector2(0.0, 1.0), Vector2(-0.43, 0.91), Vector2(-0.73, 0.70),
+	Vector2(-0.93, 0.37),
+]
+const SNOW_FOX_SOLE: Array[Vector2] = [
+	Vector2(-1.0, -0.22), Vector2(-0.94, -0.50), Vector2(-0.76, -0.77),
+	Vector2(-0.24, -0.94), Vector2(0.35, -1.0), Vector2(0.75, -0.86),
+	Vector2(0.90, -0.75), Vector2(1.0, -0.35), Vector2(0.75, 0.67),
+	Vector2(0.67, 0.90), Vector2(0.21, 1.0), Vector2(-0.37, 0.87),
+	Vector2(-0.54, 0.63),
+]
 
 const HAIR_FRONT := 0
 const HAIR_SIDE_L := 1
@@ -114,8 +149,10 @@ class Leg:
 	var toe_rest: Quaternion
 	var ankle_rest: Vector3
 	var foot_basis: Quaternion
-	var sole_center: Vector3
-	var sole_forward: Vector3
+	var sole_offset: Vector3
+	var skin_sole_center: Vector3
+	var sole_half_extents: Vector2
+	var sole_profile: PackedVector2Array
 	var ground_y := 0.0
 	var ground_pitch := 0.0
 	var ground_roll := 0.0
@@ -150,13 +187,6 @@ class HairChain:
 	var lateral_bias: float = 0.0
 
 
-class StepSample:
-	var offset: Vector3 = Vector3.ZERO
-	var foot_pitch: float = 0.0
-	var toe_bend: float = 0.0
-	var grounded: float = 1.0
-
-
 class FootTrack:
 	var side: String = "L"
 	var sign_x: float = 1.0
@@ -179,6 +209,7 @@ class FootTrack:
 	var swing_bow_sign: float = 1.0
 	var swing_start_phase: float = CONTACT_FRACTION
 	var swing_t: float = 0.0
+	var swing_remaining: float = 0.0
 	var last_step_length: float = 0.0
 	var last_landing_pitch: float = 0.0
 	var last_pre_land_yaw_err: float = 0.0
@@ -241,8 +272,11 @@ var _stop_carry_enabled := false
 var _stop_heading := Vector3.FORWARD
 var _stop_support_is_left := false
 var _stop_support_world := Vector3.ZERO
+var _stop_support_yaw := 0.0
 var _stop_swing_start_world := Vector3.ZERO
 var _stop_swing_target_world := Vector3.ZERO
+var _stop_swing_start_yaw := 0.0
+var _stop_swing_target_yaw := 0.0
 var _stop_swing_start_y := 0.0
 var _stop_swing_start_pitch := 0.0
 var _stop_swing_start_toe := 0.0
@@ -255,18 +289,16 @@ var _stop_swing_landing := 0.5
 var _stop_lead_is_left := true
 var _stop_lead_world := Vector3.ZERO
 var _stop_trail_start_world := Vector3.ZERO
-var _stop_lead_pitch := 0.0
-var _stop_trail_pitch := 0.0
-var _stop_trail_toe := 0.0
+var _stop_trail_target_world := Vector3.ZERO
+var _stop_lead_yaw := 0.0
+var _stop_trail_start_yaw := 0.0
+var _stop_trail_target_yaw := 0.0
 var _stop_carry_dist := 0.0
 var _stop_settle_elapsed := 0.0
 var _stop_settle_dur := 0.50
 var _stop_just_landed := "" # "", "L", or "R"
 var _prev_giant_pos := Vector3.ZERO
 var _giant_pos_tracked := false
-var _resume_blend := 0.0
-var _resume_left_ankle := Vector3.ZERO
-var _resume_right_ankle := Vector3.ZERO
 var _prev_speed := 0.0
 var _stop_momentum := 0.0
 var _was_on_floor := true
@@ -275,7 +307,6 @@ var _prev_body_yaw := 0.0
 var _yaw_initialized := false
 var _turn_rate := 0.0
 var _visual_yaw_offset := 0.0
-var _stomp_turn_start := 0.0
 
 # Hierarchical top-down turn cascade (Eyes -> Head -> Chest -> Pelvis -> Feet) & world-locked feet.
 var _foot_l: FootTrack
@@ -339,12 +370,6 @@ var _last_spine_s_curve := 0.0
 # Current & transition pose tracking.
 var _left_ankle: Vector3
 var _right_ankle: Vector3
-var _left_at_windup: Vector3
-var _right_at_windup: Vector3
-var _was_stomping := false
-var _was_impacted := false
-var _stomp_enter_blend := 0.0
-var _stomp_exit_blend := 0.0
 var _snap_hip: Vector3
 var _snap_rots := {}
 var _snap_left_ankle: Vector3
@@ -352,7 +377,6 @@ var _snap_right_ankle: Vector3
 var _snap_left_foot := Vector4.ZERO   # pitch, roll, yaw, toe
 var _snap_right_foot := Vector4.ZERO
 var _pelvis_ground_drop := 0.0
-var _stomp_target_ground_y := 0.0
 
 # Crouch-pickup-crush action state.
 var _pickup_crush_active := false
@@ -479,6 +503,7 @@ func _ready() -> void:
 
 	_left = _make_leg("L")
 	_right = _make_leg("R")
+	_configure_soles()
 	_arm_l = _make_arm("L")
 	_arm_r = _make_arm("R")
 	_hip_rest = _skeleton.get_bone_pose_position(_bone["spine"])
@@ -566,6 +591,7 @@ func _set_skin(next: StringName) -> void:
 		_model.add_child(_active_skin)
 		_active_skin.configure(_skeleton)
 		_active_skin.follow_pose()
+	_configure_soles()
 	_skeleton.visible = _active_skin == null
 	set_first_person(_first_person_enabled)
 	_refresh_silhouette_overlay()
@@ -615,7 +641,7 @@ func _refresh_silhouette_overlay() -> void:
 
 
 ## World-space eye point for the first-person camera. Reads the live Head bone of the rig
-## that is currently drawn, so the view rides walking bob, the stomp lean, hand actions and
+## that is currently drawn, so the view rides walking bob, heavy ground contact, hand actions and
 ## the sit-down drop instead of a fixed fraction of the capsule. The human stage and any rig
 ## without a usable Head bone fall back to the old height formula.
 func first_person_eye_position() -> Vector3:
@@ -874,7 +900,7 @@ func stop_carry_velocity(delta: float) -> Vector3:
 	_check_teleport()
 	var dt := clampf(delta, 0.0, 0.05)
 	_stop_carry_enabled = true
-	if dt <= 0.0 or _was_stomping or not is_on_floor():
+	if dt <= 0.0 or not is_on_floor():
 		return Vector3.ZERO
 	if _stop_phase == STOP_NONE:
 		if _foot_stride <= 0.15:
@@ -912,7 +938,6 @@ func show_hand_action(kind: int, progress: float, delta: float, target: Vector3)
 		_punch_impact_emitted = false
 		_pickup_exit_blend = 0.0
 		_punch_exit_blend = 0.0
-		_stomp_exit_blend = 0.0
 		_hand_start_yaw = angle_difference(global_rotation.y, _prev_body_yaw + _visual_yaw_offset)
 		_prev_body_yaw = global_rotation.y
 		_stride = 0.0
@@ -923,7 +948,6 @@ func show_hand_action(kind: int, progress: float, delta: float, target: Vector3)
 		_clear_stop_state()
 		_cancel_standing_turn()
 		_walk_was_moving = false
-		_resume_blend = 0.0
 	_visual_yaw_offset = lerpf(_hand_start_yaw, 0.0, smoothstep(0.0, 0.2, progress))
 	_model.rotation.y = _model_base_yaw + _visual_yaw_offset
 	_hand_aim = _skeleton.to_local(target)
@@ -936,7 +960,7 @@ func show_hand_action(kind: int, progress: float, delta: float, target: Vector3)
 	_prev_giant_pos = global_position
 	_update_impact_jolt(dt)
 	_update_hair(dt, true)
-	_update_face(dt, -1.0)
+	_update_face(dt)
 	if _active_skin != null:
 		_active_skin.follow_pose()
 	return _skeleton.to_global(_skeleton.get_bone_global_pose(_arm_r.hand) * _arm_r.palm_offset)
@@ -970,7 +994,6 @@ func show_sit_crush(progress: float, delta: float) -> Dictionary:
 		_sit_crush_exit_blend = 0.0
 		_pickup_exit_blend = 0.0
 		_punch_exit_blend = 0.0
-		_stomp_exit_blend = 0.0
 		_sit_crush_start_yaw = angle_difference(global_rotation.y, _prev_body_yaw + _visual_yaw_offset)
 		_prev_body_yaw = global_rotation.y
 		_stride = 0.0
@@ -981,7 +1004,6 @@ func show_sit_crush(progress: float, delta: float) -> Dictionary:
 		_clear_stop_state()
 		_cancel_standing_turn()
 		_walk_was_moving = false
-		_resume_blend = 0.0
 	if t < SIT_CRUSH_IMPACT_TIME - 0.02:
 		_sit_crush_impact_emitted = false
 	if dt > 0.0 and _sit_crush_from_idle_blend > 0.0:
@@ -994,7 +1016,7 @@ func show_sit_crush(progress: float, delta: float) -> Dictionary:
 	_prev_giant_pos = global_position
 	_update_impact_jolt(dt)
 	_update_hair(dt, true)
-	_update_face(dt, -1.0)
+	_update_face(dt)
 	if _active_skin != null:
 		_active_skin.follow_pose(_active_skin.pelvis_height_ratio())
 	var phase := "prepare"
@@ -1072,7 +1094,6 @@ func show_sit_idle(delta: float, blend_in := true) -> Dictionary:
 		_sit_idle_exit_blend = 0.0
 		_pickup_exit_blend = 0.0
 		_punch_exit_blend = 0.0
-		_stomp_exit_blend = 0.0
 		_sit_idle_enter_blend = 1.0 if (blend_in and dt > 0.0) else 0.0
 		_sit_idle_time = 0.0
 		_prev_body_yaw = global_rotation.y
@@ -1084,7 +1105,6 @@ func show_sit_idle(delta: float, blend_in := true) -> Dictionary:
 		_clear_stop_state()
 		_cancel_standing_turn()
 		_walk_was_moving = false
-		_resume_blend = 0.0
 	if dt > 0.0:
 		_sit_idle_time = fmod(_sit_idle_time + dt, 1000.0)
 		_breath = fmod(_breath + dt * 1.32, TAU)
@@ -1099,7 +1119,7 @@ func show_sit_idle(delta: float, blend_in := true) -> Dictionary:
 	_prev_giant_pos = global_position
 	_update_impact_jolt(dt)
 	_update_hair(dt, false)
-	_update_face(dt, -1.0)
+	_update_face(dt)
 	if _active_skin != null:
 		_active_skin.follow_pose(_active_skin.pelvis_height_ratio())
 	var hip_pose := _skeleton.get_bone_global_pose(_bone["spine"])
@@ -1124,13 +1144,12 @@ func finish_sit_idle(immediate := false) -> void:
 		_sit_idle_exit_blend = 0.0
 
 
-func show_motion(speed: float, stomp_pose: float, delta: float,
+func show_motion(speed: float, _legacy_pose: float, delta: float,
 		turn_target: float = NAN, allow_standing_turn: bool = false) -> Variant:
 	if _human_stage:
 		return _human_motion(speed, delta)
 	_init_foot_tracks()
-	var stomping := stomp_pose >= 0.0
-	_check_teleport(stomping)
+	_check_teleport()
 	var dt := clampf(delta, 0.0, 0.05)
 	_breath = fmod(_breath + dt * 1.55, TAU)
 	_idle_look_time = fmod(_idle_look_time + dt, 1000.0)
@@ -1157,12 +1176,12 @@ func show_motion(speed: float, stomp_pose: float, delta: float,
 	# Detect landing after briefly leaving ground (e.g., stepping off tall rubble mounds).
 	var on_floor := is_on_floor()
 	if dt > 0.0:
-		if not _was_on_floor and on_floor and stomp_pose < 0.0:
+		if not _was_on_floor and on_floor:
 			_trigger_impact_impulse(0.32)
 		_air_weight = move_toward(_air_weight, 0.0 if on_floor else 1.0, dt * 8.0)
 		_was_on_floor = on_floor
 
-	# Track body yaw velocity and smoothly ease any abrupt stomp turn over windup.
+	# Track body yaw velocity and decay any remaining action turn offset.
 	var body_yaw := global_rotation.y
 	if not _yaw_initialized:
 		_prev_body_yaw = body_yaw
@@ -1174,16 +1193,7 @@ func show_motion(speed: float, stomp_pose: float, delta: float,
 	var yaw_step := angle_difference(_prev_body_yaw, body_yaw)
 	_prev_body_yaw = body_yaw
 	var prev_visual_offset := _visual_yaw_offset
-	if stomping:
-		if not _was_stomping:
-			if absf(yaw_step) > 0.03:
-				_stomp_turn_start = clampf(_visual_yaw_offset - yaw_step, -PI, PI)
-			else:
-				_stomp_turn_start = _visual_yaw_offset
-		var turn_u := clampf(stomp_pose / 0.84, 0.0, 1.0)
-		_visual_yaw_offset = lerpf(_stomp_turn_start, 0.0, smoothstep(0.0, 1.0, turn_u))
-	elif dt > 0.0:
-		_stomp_turn_start = 0.0
+	if dt > 0.0:
 		if absf(_visual_yaw_offset) > 0.0005:
 			_visual_yaw_offset = lerpf(_visual_yaw_offset, 0.0, minf(dt * 8.0, 1.0))
 		else:
@@ -1201,77 +1211,36 @@ func show_motion(speed: float, stomp_pose: float, delta: float,
 	# Stop / acceleration momentum for weighty settling.
 	if dt > 0.0:
 		var accel := (speed - _prev_speed) / dt
-		if accel < -12.0 and _prev_speed > 2.5 and stomp_pose < 0.0:
+		if accel < -12.0 and _prev_speed > 2.5:
 			_stop_momentum = clampf(_stop_momentum + 0.60, 0.0, 1.0)
 		_stop_momentum = move_toward(_stop_momentum, 0.0, dt * 2.6)
 	_prev_speed = speed
 
-	var contact: Variant = null
-	if stomping:
-		if not _was_stomping:
-			_capture_snapshot()
-			_left_at_windup = _left_ankle
-			_right_at_windup = _right_ankle
-			_stomp_enter_blend = 1.0
-			_was_impacted = false
-			_stomp_target_ground_y = _probe_stomp_ground()
-		if stomp_pose >= 1.0 and not _was_impacted:
-			_was_impacted = true
-			_trigger_impact_impulse(1.0)
-			_impact_flinch = 1.0
-		_stride = 0.0
-		_foot_stride = 0.0
-		_move_drive = 0.0
-		_cycle = 0.0
-		_clear_stop_state()
-		_cancel_standing_turn()
-		_walk_was_moving = false
-		_resume_blend = 0.0
-		_stomp_exit_blend = 0.0
-		_stomp_pose(stomp_pose, dt)
-	else:
-		if _was_stomping:
-			_capture_snapshot()
-			_stomp_exit_blend = 1.0
-			_was_impacted = false
-			_reset_turn_tracks()
-		_stomp_exit_blend = move_toward(_stomp_exit_blend, 0.0, dt * 6.5)
-		_pickup_exit_blend = move_toward(_pickup_exit_blend, 0.0, dt * 6.5)
-		_punch_exit_blend = move_toward(_punch_exit_blend, 0.0, dt * 6.5)
-		_sit_crush_exit_blend = move_toward(_sit_crush_exit_blend, 0.0, dt * 6.5)
-		_sit_idle_exit_blend = move_toward(_sit_idle_exit_blend, 0.0, dt * 6.5)
-		var previous_cycle := _cycle
-		_stop_just_landed = ""
-		_walk_just_landed = ""
-		var finishing_step := _advance_walk(speed, dt, turn_target, allow_standing_turn, raw_body_yaw_vel, on_floor)
-		_walk_pose(dt)
-		if _stomp_exit_blend < 0.001 and on_floor:
-			if _stop_just_landed == "L":
-				contact = _foot_contact(_left)
-			elif _stop_just_landed == "R":
-				contact = _foot_contact(_right)
-			elif _walk_just_landed == "L":
-				contact = _foot_contact(_left)
-			elif _walk_just_landed == "R":
-				contact = _foot_contact(_right)
-			elif (_foot_stride > 0.35 or finishing_step) and _stop_phase == STOP_NONE and not _stand_step_active:
-				if _cycle < previous_cycle:
-					contact = _foot_contact(_left)
-				elif previous_cycle < 0.5 and _cycle >= 0.5:
-					contact = _foot_contact(_right)
-			if contact != null:
-				_trigger_impact_impulse(0.28 * maxf(_stride, 0.45))
-
-	_was_stomping = stomping
+	_pickup_exit_blend = move_toward(_pickup_exit_blend, 0.0, dt * 6.5)
+	_punch_exit_blend = move_toward(_punch_exit_blend, 0.0, dt * 6.5)
+	_sit_crush_exit_blend = move_toward(_sit_crush_exit_blend, 0.0, dt * 6.5)
+	_sit_idle_exit_blend = move_toward(_sit_idle_exit_blend, 0.0, dt * 6.5)
+	_stop_just_landed = ""
+	_walk_just_landed = ""
+	_advance_walk(speed, dt, turn_target, allow_standing_turn, raw_body_yaw_vel, on_floor)
+	var landed_side := _stop_just_landed if not _stop_just_landed.is_empty() else _walk_just_landed
+	var landed := on_floor and not landed_side.is_empty()
+	if landed:
+		_trigger_impact_impulse(1.0)
+		_impact_flinch = 0.65
+	_update_impact_jolt(dt)
+	_walk_pose(dt)
 	_stop_carry_enabled = false
 	_prev_giant_pos = global_position
-
-	_update_impact_jolt(dt)
-	_update_hair(dt, stomping or _pickup_crush_active or _punch_active or _sit_crush_active)
-	_update_face(dt, stomp_pose)
+	_update_hair(dt, false)
+	_update_face(dt)
 	if _active_skin != null:
 		_active_skin.follow_pose()
-	return contact
+		if maxf(maxf(_pickup_exit_blend, _punch_exit_blend), maxf(_sit_crush_exit_blend, _sit_idle_exit_blend)) <= 0.001:
+			_pin_skin_feet()
+	if landed:
+		return _foot_contact(_left if landed_side == "L" else _right)
+	return null
 
 
 func has_step_in_flight() -> bool:
@@ -1279,13 +1248,61 @@ func has_step_in_flight() -> bool:
 		return is_on_floor()
 	if _stop_phase == STOP_SETTLE:
 		return false
-	# The right leg's cycle is shifted by half a step.
-	return is_on_floor() and _foot_stride > 0.15 and (
-		_cycle >= CONTACT_FRACTION or fposmod(_cycle + 0.5, 1.0) >= CONTACT_FRACTION
-	)
+	return is_on_floor() and _walk_was_moving and (not _foot_l.planted or not _foot_r.planted)
 
 
-func _check_teleport(stomping := false) -> void:
+func has_standing_step_in_flight() -> bool:
+	return _stand_step_active
+
+
+func heavy_step_preview() -> Dictionary:
+	if _human_stage or not is_on_floor() or _stand_step_active:
+		return {}
+	var leg: Leg
+	var ankle: Vector3
+	var yaw: float
+	var progress: float
+	var eta: float
+	var locked: bool
+	match _stop_phase:
+		STOP_SWING:
+			leg = _right if _stop_support_is_left else _left
+			ankle = _stop_swing_target_world
+			yaw = _stop_swing_target_yaw
+			progress = clampf(_stop_swing_elapsed / _stop_swing_dur, 0.0, 1.0)
+			eta = _stop_swing_dur - _stop_swing_elapsed
+			locked = true
+		STOP_SETTLE:
+			progress = clampf(inverse_lerp(0.08, 0.92, _stop_settle_elapsed / _stop_settle_dur), 0.0, 1.0)
+			if progress <= 0.0 or progress >= 1.0 or not _stop_trail_is_stepping():
+				return {}
+			leg = _right if _stop_lead_is_left else _left
+			ankle = _stop_trail_target_world
+			yaw = _stop_trail_target_yaw
+			eta = _stop_settle_dur * 0.92 - _stop_settle_elapsed
+			locked = true
+		_:
+			if not _walk_was_moving or (_foot_l.planted and _foot_r.planted):
+				return {}
+			var track := _foot_r if _foot_l.planted else _foot_l
+			leg = _right if _foot_l.planted else _left
+			ankle = track.swing_target_world
+			yaw = track.swing_target_yaw
+			progress = track.swing_t
+			eta = track.swing_remaining
+			locked = progress >= SWING_TARGET_LOCK
+	var center := ankle + (leg.sole_offset * _model.scale.z).rotated(Vector3.UP, yaw)
+	center.y = _foot_ground_height(center)
+	var area := _sole_payload(leg, center, yaw)
+	var pose := _skeleton.get_bone_global_pose(leg.foot)
+	area["eta"] = maxf(eta, 0.0)
+	area["progress"] = progress
+	area["locked"] = locked
+	area["lift"] = maxf(_source_sole_world(leg, pose).y - center.y, 0.0)
+	return area
+
+
+func _check_teleport() -> void:
 	if not _giant_pos_tracked:
 		_prev_giant_pos = global_position
 		_giant_pos_tracked = true
@@ -1293,7 +1310,7 @@ func _check_teleport(stomping := false) -> void:
 	var scale_ratio := maxf(_model.scale.z / _model_base_scale, 0.25)
 	var jump := Vector2(global_position.x - _prev_giant_pos.x, global_position.z - _prev_giant_pos.z).length()
 	var yaw_jump := absf(angle_difference(_prev_body_yaw, global_rotation.y)) if _yaw_initialized else 0.0
-	var external_yaw_snap := (not stomping and not _pickup_crush_active and not _punch_active and not _sit_crush_active and not _sit_idle_active and yaw_jump > 0.65)
+	var external_yaw_snap := (not _pickup_crush_active and not _punch_active and not _sit_crush_active and not _sit_idle_active and yaw_jump > 0.65)
 	if jump > maxf(2.5 * scale_ratio, 2.5) or external_yaw_snap:
 		_clear_stop_state()
 		_foot_stride = 0.0
@@ -1327,7 +1344,7 @@ func _stop_time_scale() -> float:
 
 
 func _begin_stop_swing(with_carry: bool) -> void:
-	var right_swing := _cycle < 0.5
+	var right_swing := not _foot_r.planted
 	_stop_phase = STOP_SWING
 	_stop_support_is_left = right_swing
 	_stop_heading = _world_heading()
@@ -1338,8 +1355,13 @@ func _begin_stop_swing(with_carry: bool) -> void:
 	var swg_leg := _right if _stop_support_is_left else _left
 	var sup_ankle := _left_ankle if _stop_support_is_left else _right_ankle
 	var swg_ankle := _right_ankle if _stop_support_is_left else _left_ankle
+	var sup_track := _foot_l if _stop_support_is_left else _foot_r
+	var swg_track := _foot_r if _stop_support_is_left else _foot_l
 	_stop_support_world = _skeleton.to_global(sup_ankle)
+	_stop_support_yaw = sup_track.world_yaw
 	_stop_swing_start_world = _skeleton.to_global(swg_ankle)
+	_stop_swing_start_yaw = swg_track.world_yaw
+	_stop_swing_target_yaw = swg_track.swing_target_yaw
 	_stop_swing_start_y = maxf(swg_ankle.y - swg_leg.ankle_rest.y - swg_leg.ground_y, 0.0)
 	_stop_swing_start_pitch = swg_leg.last_pitch - swg_leg.ground_pitch
 	_stop_swing_start_toe = swg_leg.last_toe
@@ -1373,7 +1395,8 @@ func _begin_stop_swing(with_carry: bool) -> void:
 	var sup_fwd := (_stop_support_world - global_position).dot(_stop_heading)
 	var min_fwd := maxf(cur_swg_fwd + eff_half_world * 0.30, sup_fwd + eff_half_world * 0.28)
 	var target_fwd := clampf(maxf(swing_travel + brake_ahead, min_fwd), min_fwd, swing_travel + eff_half_world * 0.94)
-	_stop_swing_target_world = swg_rest_world + _stop_heading * (target_fwd - rest_fwd)
+	_stop_swing_target_world = swg_track.swing_target_world if swg_track.swing_t >= SWING_TARGET_LOCK \
+			else swg_rest_world + _stop_heading * (target_fwd - rest_fwd)
 
 
 func _begin_stop_settle(with_carry: bool) -> void:
@@ -1388,12 +1411,17 @@ func _begin_stop_settle(with_carry: bool) -> void:
 	var trail_ankle := _right_ankle if _stop_lead_is_left else _left_ankle
 	_stop_lead_world = _skeleton.to_global(lead_ankle)
 	_stop_trail_start_world = _skeleton.to_global(trail_ankle)
-	_stop_lead_pitch = lead_leg.last_pitch - lead_leg.ground_pitch
-	_stop_trail_pitch = trail_leg.last_pitch - trail_leg.ground_pitch
-	_stop_trail_toe = trail_leg.last_toe
+	_stop_lead_yaw = global_rotation.y + lead_leg.last_yaw
+	_stop_trail_start_yaw = global_rotation.y + trail_leg.last_yaw
+	_stop_trail_target_yaw = global_rotation.y + trail_leg.sign_x * IDLE_FOOT_YAW
 
 	var lead_ahead := maxf(lead_ankle.z - lead_leg.ankle_rest.z, 0.0) * _model.scale.z
 	_stop_carry_dist = lead_ahead if with_carry else 0.0
+	var end_position := global_position + _stop_heading * _stop_carry_dist
+	_stop_trail_target_world = _rest_ankle_world(trail_leg, end_position, global_rotation.y, 0.0, 0.0)
+	if not _stop_trail_is_stepping():
+		_stop_trail_target_world = _stop_trail_start_world
+		_stop_trail_target_yaw = _stop_trail_start_yaw
 
 	var time_scale := _stop_time_scale()
 	var base_dur := STANCE_SETTLE_SECONDS * time_scale
@@ -1407,8 +1435,13 @@ func _begin_stop_settle(with_carry: bool) -> void:
 	_stop_swing_v1 = 0.0
 
 
+func _stop_trail_is_stepping() -> bool:
+	var offset := _stop_trail_target_world - _stop_trail_start_world
+	return Vector2(offset.x, offset.z).length() > 0.022 * _model.scale.z
+
+
 func _advance_walk(speed: float, dt: float, turn_target := NAN,
-		allow_standing_turn := false, raw_body_yaw_vel := 0.0, on_floor := true) -> bool:
+		allow_standing_turn := false, raw_body_yaw_vel := 0.0, on_floor := true) -> void:
 	var body_ratio := _model.scale.z / _model_base_scale
 	var scale_ratio := maxf(body_ratio, 0.15)
 	var tempo_scale := clampf(pace / sqrt(scale_ratio), 0.35, 2.5)
@@ -1417,15 +1450,11 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 	if speed > 0.12 * minf(body_ratio, 1.0):
 		var was_standing_turn := _stand_turning or _stand_step_active
 		if _stop_phase != STOP_NONE:
-			_resume_left_ankle = _left_ankle
-			_resume_right_ankle = _right_ankle
-			_resume_blend = 1.0
 			_clear_stop_state()
 			_sync_feet_to_current_ankles()
 		_stand_turning = false
 		_stand_step_active = false
 		_stand_anticipation = 0.0
-		_resume_blend = move_toward(_resume_blend, 0.0, dt * 6.5)
 		_last_walk_speed = speed
 
 		_pelvis_world_yaw = model_world_yaw
@@ -1485,17 +1514,13 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		var turn_ceil_rate := maxf(base_walk_rate, straight_rate) * 1.32
 		cycle_rate = clampf(maxf(cycle_rate, turn_floor_rate), 0.0, turn_ceil_rate)
 
-		# Track actual world travel vs synthetic walk speed (handles both open-ground zero-slip and in-place tests / wall pushes).
-		var fwd_heading := _yaw_forward(_pelvis_world_yaw)
+		# Extrapolate actual translation. A blocked body can still reach a target with its swing leg.
 		var world_disp := Vector3(global_position.x - _prev_giant_pos.x, 0.0, global_position.z - _prev_giant_pos.z)
 		var expected_disp := speed * dt
-		var synthetic_drift := 0.0
 		if dt > 0.0 and world_disp.length() > expected_disp * 0.25:
 			_actual_world_vel = world_disp / dt
 		else:
-			_actual_world_vel = fwd_heading * speed
-			if dt > 0.0:
-				synthetic_drift = maxf(cycle_speed * dt - maxf(world_disp.dot(fwd_heading), 0.0), 0.0)
+			_actual_world_vel = Vector3.ZERO
 
 		if not _walk_was_moving:
 			_walk_was_moving = true
@@ -1510,13 +1535,9 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 				_foot_r.swing_start_phase = CONTACT_FRACTION
 				_foot_l.planted = true
 			else:
-				if _turn_sign > 0.25:
-					_cycle = 0.08
-				elif _turn_sign < -0.25:
-					_cycle = 0.58
-				else:
-					_cycle = 0.0
-					_walk_init_step = true
+				# Both feet start under the pelvis, so lift earlier than in a full stride.
+				_cycle = 0.17 if _turn_sign >= -0.25 else 0.67
+				_walk_init_step = _cycle < 0.5
 				_foot_l.planted = true
 				_foot_r.planted = true
 			_walk_cycle_prev = _cycle
@@ -1532,26 +1553,25 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 			_walk_init_step = false
 
 		var swing_dur := (1.0 - CONTACT_FRACTION) / maxf(cycle_rate, 0.15)
-		if _update_walk_foot(_foot_l, _left, _foot_r, _right, _cycle, _walk_cycle_prev, swing_dur, dt, synthetic_drift):
+		if _update_walk_foot(_foot_l, _left, _foot_r, _right, _cycle, _walk_cycle_prev, swing_dur, dt):
 			_walk_just_landed = "L"
 		var r_phase := fposmod(_cycle + 0.5, 1.0)
 		var r_prev := fposmod(_walk_cycle_prev + 0.5, 1.0)
-		if _update_walk_foot(_foot_r, _right, _foot_l, _left, r_phase, r_prev, swing_dur, dt, synthetic_drift):
+		if _update_walk_foot(_foot_r, _right, _foot_l, _left, r_phase, r_prev, swing_dur, dt):
 			_walk_just_landed = "R"
 
 		_update_yaw_cascade(dt, tempo_scale)
 		_update_body_dynamics(dt, tempo_scale, true, speed)
-		return false
+		return
 
-	_walk_was_moving = false
 	_walk_init_step = false
 	_actual_world_vel = Vector3.ZERO
-	_resume_blend = move_toward(_resume_blend, 0.0, dt * 6.5)
 	if _stop_phase == STOP_NONE and _foot_stride > 0.15 and on_floor:
 		if has_step_in_flight():
 			_begin_stop_swing(_stop_carry_enabled)
 		else:
 			_begin_stop_settle(_stop_carry_enabled)
+	_walk_was_moving = false
 
 	if _stop_phase == STOP_SWING:
 		_cancel_standing_turn()
@@ -1583,11 +1603,11 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 				_right_ankle = sup_local
 				_left_ankle = swg_local
 				_stop_just_landed = "L"
-			swg_leg.last_pitch = -0.12 + swg_leg.ground_pitch
+			swg_leg.last_pitch = swg_leg.ground_pitch
+			swg_leg.last_yaw = angle_difference(global_rotation.y, _stop_swing_target_yaw)
 			_cycle = fposmod(_stop_swing_landing, 1.0)
 			_begin_stop_settle(_stop_carry_enabled)
-			return false
-		return true
+		return
 
 	if _stop_phase == STOP_SETTLE:
 		_cancel_standing_turn()
@@ -1597,6 +1617,7 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		_turn_sharpness = move_toward(_turn_sharpness, 0.0, dt * 5.0)
 		_turn_stride_mult = lerpf(_turn_stride_mult, 1.0, minf(dt * 5.0, 1.0))
 		_turn_cadence_mult = lerpf(_turn_cadence_mult, 1.0, minf(dt * 5.0, 1.0))
+		var previous_u := clampf(_stop_settle_elapsed / maxf(_stop_settle_dur, 0.01), 0.0, 1.0)
 		_stop_settle_elapsed += dt
 		var u := clampf(_stop_settle_elapsed / maxf(_stop_settle_dur, 0.01), 0.0, 1.0)
 		_stride = move_toward(_stride, 0.0, dt * 3.2)
@@ -1604,14 +1625,16 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		_foot_stride = lerpf(_foot_stride, 0.0, smoothstep(0.0, 1.0, u))
 		_update_yaw_cascade(dt, tempo_scale)
 		_update_body_dynamics(dt, tempo_scale, false, 0.0)
+		if previous_u < 0.92 and u >= 0.92 and _stop_trail_is_stepping():
+			_stop_just_landed = "R" if _stop_lead_is_left else "L"
 		if u >= 1.0:
 			_foot_stride = 0.0
 			_stride = 0.0
 			_move_drive = 0.0
 			_cycle = 0.0
 			_clear_stop_state()
-			_sync_feet_to_rest()
-		return false
+			_sync_feet_to_current_ankles()
+		return
 
 	# Standing still: decay residual walk scalars cleanly.
 	_stride = move_toward(_stride, 0.0, dt * 4.2)
@@ -1672,7 +1695,7 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		var rest_r := _rest_ankle_world(_right, global_position, model_world_yaw, 0.0, 0.0)
 		var cur_l := _foot_ankle_world(_foot_l, _left)
 		var cur_r := _foot_ankle_world(_foot_r, _right)
-		var drift_limit := 0.18 * _model.scale.z
+		var drift_limit := 0.38 * _model.scale.z
 		var l_yaw_err := absf(angle_difference(model_world_yaw + IDLE_FOOT_YAW, _foot_l.world_yaw))
 		var r_yaw_err := absf(angle_difference(model_world_yaw - IDLE_FOOT_YAW, _foot_r.world_yaw))
 		if not _foot_l.planted or not _foot_r.planted or not on_floor \
@@ -1686,7 +1709,6 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 	var head_ang_vel := _head_yaw_vel if absf(_head_yaw_vel) > absf(_pelvis_yaw_vel) else _pelvis_yaw_vel
 	if dt > 0.0 and (_stand_turning or _stand_step_active):
 		_turn_rate = lerpf(_turn_rate, clampf(head_ang_vel, -4.5, 4.5), minf(dt * 8.0, 1.0))
-	return false
 
 
 func _walk_pose(dt: float) -> void:
@@ -1712,40 +1734,40 @@ func _walk_pose(dt: float) -> void:
 		var swg_leg := _right if _stop_support_is_left else _left
 		var sup_local := _skeleton.to_local(_stop_support_world)
 		sup_local.y = sup_leg.ankle_rest.y
-		var behind_ratio := clampf(inverse_lerp(-0.08, -HALF_STEP * _step_scale, sup_local.z), 0.0, 1.0)
-		var sup_pitch := 0.18 * behind_ratio
-		var sup_toe := sup_pitch * 0.85
-
-		var swg_world := _stop_swing_start_world.lerp(_stop_swing_target_world, smoothstep(0.0, 1.0, u))
+		var swg_world := _stop_swing_start_world.lerp(_stop_swing_target_world, smoothstep(0.0, 0.8, u))
 		var swg_local := _skeleton.to_local(swg_world)
-		var arc_boost := SWING_HEIGHT * 0.42 * _stop_swing_rem * lerpf(0.55, 1.0, clampf(_step_scale, 0.30, 1.0))
-		var swg_y := _stop_swing_start_y * pow(1.0 - u, 1.15) + sin(PI * u) * arc_boost
+		var arc_boost := SWING_HEIGHT * 0.32 * _stop_swing_rem * lerpf(0.55, 1.0, clampf(_step_scale, 0.30, 1.0))
+		var swg_y := _stop_swing_start_y * pow(1.0 - u, 0.70) + _heavy_swing_arc(u) * arc_boost
 		swg_local.y = swg_leg.ankle_rest.y + swg_y
-		var swg_pitch := lerpf(_stop_swing_start_pitch, -0.14, smoothstep(0.0, 0.88, u))
+		var swg_pitch := lerpf(_stop_swing_start_pitch, 0.0, smoothstep(0.25, 0.94, u))
 		var swg_toe := lerpf(_stop_swing_start_toe, 0.0, smoothstep(0.0, 0.35, u))
+		var sup_yaw := angle_difference(model_world_yaw, _stop_support_yaw)
+		var swg_yaw := angle_difference(model_world_yaw, lerp_angle(_stop_swing_start_yaw, _stop_swing_target_yaw, smoothstep(0.0, 0.60, u)))
 
 		if _stop_support_is_left:
 			left_base = sup_local
 			right_base = swg_local
-			l_step_pitch = sup_pitch
+			l_step_pitch = 0.0
 			r_step_pitch = swg_pitch
-			l_step_toe = sup_toe
+			l_step_toe = 0.0
 			r_step_toe = swg_toe
 			l_grounded = 1.0
 			r_grounded = 0.0
 			settle_hip_x = 0.022 * (1.0 - u)
+			l_foot_yaw = sup_yaw
+			r_foot_yaw = swg_yaw
 		else:
 			right_base = sup_local
 			left_base = swg_local
-			r_step_pitch = sup_pitch
+			r_step_pitch = 0.0
 			l_step_pitch = swg_pitch
-			r_step_toe = sup_toe
+			r_step_toe = 0.0
 			l_step_toe = swg_toe
 			r_grounded = 1.0
 			l_grounded = 0.0
 			settle_hip_x = -0.022 * (1.0 - u)
-		l_foot_yaw = IDLE_FOOT_YAW
-		r_foot_yaw = -IDLE_FOOT_YAW
+			l_foot_yaw = swg_yaw
+			r_foot_yaw = sup_yaw
 	elif _stop_phase == STOP_SETTLE:
 		# Front (lead) foot stays 100% locked in world space while the body continues gliding
 		# smoothly forward over it; trailing foot peels heel-first and steps FORWARD beside it!
@@ -1755,52 +1777,45 @@ func _walk_pose(dt: float) -> void:
 
 		var lead_local := _skeleton.to_local(_stop_lead_world)
 		lead_local.y = lead_leg.ankle_rest.y
-		var expected_rem := _stop_carry_dist * (1.0 - sin(u * PI * 0.5))
-		var actual_rem := maxf((lead_local.z - lead_leg.ankle_rest.z) * _model.scale.z, 0.0)
-		var blocked_excess := maxf(actual_rem - expected_rem - 0.12, 0.0)
-		var wall_resolve := smoothstep(0.65, 1.0, u) * clampf(blocked_excess / maxf(0.18 * _model.scale.z, 0.25), 0.0, 1.0)
-		if _stop_carry_dist <= 0.005:
-			wall_resolve = smoothstep(0.35, 1.0, u)
-		lead_local = lead_local.lerp(lead_leg.ankle_rest, wall_resolve)
-		var lead_pitch := lerpf(_stop_lead_pitch, 0.0, smoothstep(0.0, 0.22, u))
-
-		var trail_start_local := _skeleton.to_local(_stop_trail_start_world)
-		trail_start_local.y = trail_leg.ankle_rest.y
 		var trail_u := smoothstep(0.08, 0.92, u)
-		var trail_lift := sin(PI * clampf(inverse_lerp(0.10, 0.90, u), 0.0, 1.0))
-		var trail_peel := smoothstep(0.02, 0.24, u) * (1.0 - smoothstep(0.32, 0.62, u))
-		var trail_dist := clampf(absf(trail_start_local.z - trail_leg.ankle_rest.z) / maxf(HALF_STEP, 0.01), 0.20, 1.0)
-		var peel_pitch := 0.26 * trail_peel * trail_dist
-		var peel_delta := _toe_pivot_ankle_delta(peel_pitch) * (1.0 - smoothstep(0.22, 0.42, u))
-		var trail_local := trail_start_local.lerp(trail_leg.ankle_rest, trail_u)
-		trail_local.y = trail_leg.ankle_rest.y + maxf(0.088 * trail_lift * trail_dist, peel_delta.y)
-		var trail_pitch := lerpf(_stop_trail_pitch, 0.0, smoothstep(0.0, 0.30, u)) + peel_pitch + 0.10 * trail_lift * trail_dist * (1.0 - smoothstep(0.55, 0.92, u))
-		var trail_toe := lerpf(_stop_trail_toe, 0.0, smoothstep(0.0, 0.30, u)) + 0.22 * trail_peel * trail_dist
+		var trail_dist := clampf(_stop_trail_start_world.distance_to(_stop_trail_target_world) /
+				maxf(HALF_STEP * _model.scale.z, 0.01), 0.0, 1.0)
+		var trail_swing := clampf(inverse_lerp(0.08, 0.92, u), 0.0, 1.0)
+		var trail_lift := _heavy_swing_arc(trail_swing) if _stop_trail_is_stepping() else 0.0
+		var trail_world := _stop_trail_start_world.lerp(_stop_trail_target_world, trail_u)
+		var trail_local := _skeleton.to_local(trail_world)
+		trail_local.y = trail_leg.ankle_rest.y + 0.16 * trail_lift * trail_dist
+		var trail_pitch := -0.22 * trail_lift * trail_dist
+		var trail_yaw := angle_difference(model_world_yaw,
+				lerp_angle(_stop_trail_start_yaw, _stop_trail_target_yaw, trail_u))
+		var lead_yaw := angle_difference(model_world_yaw, _stop_lead_yaw)
 		var weight_over_lead := sin(PI * clampf(inverse_lerp(0.0, 0.92, u), 0.0, 1.0))
 
 		if _stop_lead_is_left:
 			left_base = lead_local
 			right_base = trail_local
-			l_step_pitch = lead_pitch
+			l_step_pitch = 0.0
 			r_step_pitch = trail_pitch
 			l_step_toe = 0.0
-			r_step_toe = trail_toe
+			r_step_toe = 0.0
 			l_grounded = 1.0
 			r_grounded = 1.0 - trail_lift * 0.90
 			settle_hip_x = 0.034 * weight_over_lead * trail_dist
+			l_foot_yaw = lead_yaw
+			r_foot_yaw = trail_yaw
 		else:
 			right_base = lead_local
 			left_base = trail_local
-			r_step_pitch = lead_pitch
+			r_step_pitch = 0.0
 			l_step_pitch = trail_pitch
 			r_step_toe = 0.0
-			l_step_toe = trail_toe
+			l_step_toe = 0.0
 			r_grounded = 1.0
 			l_grounded = 1.0 - trail_lift * 0.90
 			settle_hip_x = -0.034 * weight_over_lead * trail_dist
+			l_foot_yaw = trail_yaw
+			r_foot_yaw = lead_yaw
 		settle_hip_y = -0.012 * sin(PI * clampf(u * 1.25, 0.0, 1.0))
-		l_foot_yaw = IDLE_FOOT_YAW
-		r_foot_yaw = -IDLE_FOOT_YAW
 	else:
 		# World-locked footwork for walking (straight, gentle curve, sharp turn), standing ship-like pivot, & idle!
 		var l_ankle_w := _foot_ankle_world(_foot_l, _left)
@@ -1813,8 +1828,8 @@ func _walk_pose(dt: float) -> void:
 		r_step_toe = _foot_r.toe_bend
 		l_grounded = 1.0 if _foot_l.planted else 0.0
 		r_grounded = 1.0 if _foot_r.planted else 0.0
-		l_foot_yaw = clampf(angle_difference(model_world_yaw, _foot_l.world_yaw), -1.15, 1.15)
-		r_foot_yaw = clampf(angle_difference(model_world_yaw, _foot_r.world_yaw), -1.15, 1.15)
+		l_foot_yaw = angle_difference(model_world_yaw, _foot_l.world_yaw)
+		r_foot_yaw = angle_difference(model_world_yaw, _foot_r.world_yaw)
 
 	# Probe terrain under each foot for rubble slope adaptation (zero delta on flat roads).
 	_update_leg_ground(_left, left_base, l_grounded, dt)
@@ -1830,10 +1845,6 @@ func _walk_pose(dt: float) -> void:
 	_left_ankle = left_base + Vector3(0.0, left_ground_lift, 0.0)
 	_right_ankle = right_base + Vector3(0.0, right_ground_lift, 0.0)
 
-	if _resume_blend > 0.001:
-		var rb := smoothstep(0.0, 1.0, _resume_blend)
-		_left_ankle = _left_ankle.lerp(_resume_left_ankle, rb)
-		_right_ankle = _right_ankle.lerp(_resume_right_ankle, rb)
 
 	# Lower pelvis slightly on slopes so the downhill leg never over-stretches.
 	var target_drop := minf(_left.ground_y, _right.ground_y)
@@ -1845,8 +1856,8 @@ func _walk_pose(dt: float) -> void:
 	# Biomechanically accurate gait phases.
 	var angle := _cycle * TAU
 	var stride_phase := cos(angle)
-	var weight_shift := sin(angle - 0.16)
-	var bob_wave := -cos(2.0 * (angle - 0.32))
+	var weight_shift := sin(angle - 0.10)
+	var bob_wave := -cos(2.0 * (angle - 0.25))
 	var arm_lag := cos(angle - 0.15)
 	var elbow_lag := cos(angle - 0.40)
 	var upper_drive := _move_drive
@@ -1862,17 +1873,16 @@ func _walk_pose(dt: float) -> void:
 	var idle_pitch := _head_idle_gaze.y * calm_idle
 
 	# Pelvis position: poised idle (-0.016), grounded turn crouch (-_turn_crouch), weight press (_turn_weight_x).
-	var base_hip_drop := lerpf(-0.016, -0.036, _stride * step_amp)
-	var bob_y := bob_wave * 0.018 * _stride * step_amp
+	var base_hip_drop := lerpf(-0.016, -0.050, _stride * step_amp)
+	var bob_y := bob_wave * 0.026 * _stride * step_amp
 	var breath_y := breath_sin * (0.0042 * calm_idle + 0.002 * (1.0 - calm_idle))
 	var stop_dip := -sin(_stop_momentum * PI) * 0.014
 	var air_tuck := -0.022 * _air_weight
 	var hip := _hip_rest + Vector3(
-		weight_shift * 0.040 * _stride * step_amp + _turn_weight_x + idle_sway_x + settle_hip_x,
-		base_hip_drop - _turn_crouch + bob_y + breath_y + stop_dip + settle_hip_y + air_tuck + _pelvis_ground_drop - _impact_jolt * 0.014,
+		weight_shift * 0.058 * _stride * step_amp + _turn_weight_x + idle_sway_x + settle_hip_x,
+		base_hip_drop - _turn_crouch + bob_y + breath_y + stop_dip + settle_hip_y + air_tuck + _pelvis_ground_drop - _impact_jolt * 0.038,
 		0.014 * upper_drive + 0.008 * clampf(absf(_inward_lean) * 4.0, 0.0, 1.0) + sin(_stop_momentum * PI) * 0.018
 	)
-	_last_hip_local = hip
 
 	# Hierarchical Spine S-Curve:
 	#   chest_twist > 0 => chest twisted LEFT (+yaw) relative to pelvis (~half of head turn).
@@ -1983,8 +1993,8 @@ func _walk_pose(dt: float) -> void:
 	var l_foot_toe := l_step_toe
 	var r_foot_toe := r_step_toe
 
-	# Blend smoothly out of stomp, pickup-crush, punch, or sit-crush recovery if we just returned to locomotion.
-	var exit_blend := maxf(maxf(maxf(_stomp_exit_blend, _sit_crush_exit_blend), _sit_idle_exit_blend), maxf(_pickup_exit_blend, _punch_exit_blend))
+	# Blend smoothly back into locomotion after hand or seated actions.
+	var exit_blend := maxf(maxf(_sit_crush_exit_blend, _sit_idle_exit_blend), maxf(_pickup_exit_blend, _punch_exit_blend))
 	if exit_blend > 0.001:
 		var t := smoothstep(0.0, 1.0, exit_blend)
 		hip = hip.lerp(_snap_hip, t)
@@ -2000,7 +2010,16 @@ func _walk_pose(dt: float) -> void:
 		r_foot_roll = lerpf(r_foot_roll, _snap_right_foot.y, t)
 		r_foot_yaw = lerpf(r_foot_yaw, _snap_right_foot.z, t)
 		r_foot_toe = lerpf(r_foot_toe, _snap_right_foot.w, t)
+	else:
+		# Preserve the contact even at full leg extension. Give at the pelvis
+		# rather than dragging a target toward the body as the stride stretches.
+		if l_grounded >= 0.75:
+			hip.y = minf(hip.y, _max_hip_height(_left, _left_ankle, hip, hip_rot))
+		if r_grounded >= 0.75:
+			hip.y = minf(hip.y, _max_hip_height(_right, _right_ankle, hip, hip_rot))
+		_skeleton.set_bone_pose_position(_bone["spine"], hip)
 
+	_last_hip_local = hip
 	var turn_knee_splay := 0.05 * turn_mag
 	_plant(_left, _left_ankle, hip, hip_rot, l_foot_pitch, l_foot_roll, l_foot_yaw, l_foot_toe, turn_knee_splay)
 	_plant(_right, _right_ankle, hip, hip_rot, r_foot_pitch, r_foot_roll, r_foot_yaw, r_foot_toe, turn_knee_splay)
@@ -2349,10 +2368,9 @@ func _start_standing_pivot_step(tempo_scale: float) -> void:
 
 
 func _update_walk_foot(ft: FootTrack, leg: Leg, other_ft: FootTrack, other_leg: Leg,
-		phase: float, prev_phase: float, swing_dur: float, dt: float, synthetic_drift: float) -> bool:
+		phase: float, prev_phase: float, swing_dur: float, dt: float) -> bool:
 	var S := _model.scale.z
 	var in_swing := phase >= CONTACT_FRACTION
-	var landed_now := false
 
 	if in_swing:
 		if ft.planted:
@@ -2367,10 +2385,10 @@ func _update_walk_foot(ft: FootTrack, leg: Leg, other_ft: FootTrack, other_leg: 
 			ft.swing_bow_sign = leg.sign_x
 			ft.active_pivoting = 0.0
 		var swing_t := clampf(inverse_lerp(ft.swing_start_phase, 1.0, phase), 0.0, 1.0)
-
 		ft.swing_t = swing_t
-		if swing_t <= 0.82 or ft.swing_target_world == Vector3.ZERO:
-			var t_rem := maxf(1.0 - swing_t, 0.0) * swing_dur
+		ft.swing_remaining = (1.0 - swing_t) * swing_dur
+		if swing_t <= SWING_TARGET_LOCK:
+			var t_rem := ft.swing_remaining
 			var pred_yaw := _pelvis_world_yaw + _pelvis_yaw_vel * t_rem * 0.78
 			var yaw_err_rem := angle_difference(_pelvis_world_yaw, _turn_target_yaw)
 			var gentle_toe_bias := clampf((_pelvis_yaw_vel * 0.28 + yaw_err_rem * 0.22), -0.22, 0.22) * (1.0 - _turn_sharpness * 0.4)
@@ -2379,7 +2397,7 @@ func _update_walk_foot(ft: FootTrack, leg: Leg, other_ft: FootTrack, other_leg: 
 
 			var actual_spd := Vector2(_actual_world_vel.x, _actual_world_vel.z).length()
 			var arc_mid_yaw := _pelvis_world_yaw + _pelvis_yaw_vel * t_rem * 0.45
-			var pred_pos := global_position + (_yaw_forward(arc_mid_yaw) * (actual_spd * t_rem) if synthetic_drift <= 0.0001 else Vector3.ZERO)
+			var pred_pos := global_position + _yaw_forward(arc_mid_yaw) * actual_spd * t_rem
 			var is_inside := (leg.sign_x * _turn_sign > 0.0)
 			var leg_diff_mult: float
 			if is_inside:
@@ -2421,84 +2439,32 @@ func _update_walk_foot(ft: FootTrack, leg: Leg, other_ft: FootTrack, other_leg: 
 			ft.swing_target_yaw = target_heading + leg.sign_x * IDLE_FOOT_YAW + gentle_toe_bias
 			ft.last_step_length = Vector2(land_ankle.x - ft.swing_start_world.x, land_ankle.z - ft.swing_start_world.z).length()
 
-		ft.world_yaw = lerp_angle(ft.swing_start_yaw, ft.swing_target_yaw, smoothstep(0.10, 0.78, swing_t))
+		ft.world_yaw = lerp_angle(ft.swing_start_yaw, ft.swing_target_yaw, smoothstep(0.10, 0.70, swing_t))
 		if swing_t >= 0.80 and swing_t < 0.96:
 			ft.last_pre_land_yaw_err = absf(angle_difference(ft.world_yaw, ft.swing_target_yaw))
 
-		if swing_t < 0.36:
-			var k := smoothstep(0.0, 0.36, swing_t)
-			ft.foot_pitch = lerpf(ft.swing_start_pitch, 0.20, k)
-			ft.toe_bend = lerpf(ft.swing_start_toe, 0.0, smoothstep(0.0, 0.24, swing_t))
-		else:
-			var k := smoothstep(0.36, 0.92, swing_t)
-			ft.foot_pitch = lerpf(0.20, HEEL_STRIKE_PITCH, k)
-			ft.toe_bend = 0.0
-	else:
-		var u := clampf(phase / CONTACT_FRACTION, 0.0, 1.0)
-		var wrapped := prev_phase >= CONTACT_FRACTION or not ft.planted
-		if wrapped:
-			ft.planted = true
-			ft.world_yaw = ft.swing_target_yaw
-			ft.foot_pitch = HEEL_STRIKE_PITCH
-			ft.toe_bend = 0.0
-			ft.last_landing_pitch = ft.foot_pitch
-			ft.pivot_mode = PIVOT_HEEL
-			ft.heel_settle_t = 0.0
-			ft.active_pivoting = 0.0
-			ft.swing_start_phase = CONTACT_FRACTION
-			var heel_w := ft.swing_target_world - Vector3.UP * (ANKLE_GROUND_Y * S) + _yaw_forward(ft.world_yaw) * (HEEL_Z_FROM_ANKLE * S)
-			heel_w.y = global_position.y
-			ft.pivot_world = heel_w
-			landed_now = true
-		elif synthetic_drift > 0.0001:
-			# Stationary wall-push or in-place walk test: drift stance foot backward so legs still cycle naturally.
-			ft.pivot_world -= _yaw_forward(_pelvis_world_yaw) * synthetic_drift
-		ft.pivot_world.y = global_position.y
-
-		if u < 0.10:
-			var h := 1.0 - smoothstep(0.0, 0.10, u)
-			ft.foot_pitch = HEEL_STRIKE_PITCH * h
-			ft.toe_bend = 0.0
-			ft.heel_settle_t = u / 0.10
-			ft.active_pivoting = 0.0
-		elif u <= 0.72:
-			ft.heel_settle_t = 1.0
-			var is_inside := (leg.sign_x * _turn_sign > 0.0)
-			var want_pivot := PIVOT_HEEL if is_inside else PIVOT_BALL
-			if ft.pivot_mode != want_pivot:
-				_switch_planted_pivot(ft, want_pivot)
-			var body_foot_twist := angle_difference(ft.world_yaw, _pelvis_world_yaw + leg.sign_x * IDLE_FOOT_YAW)
-			var piv_active := 0.0
-			if absf(_pelvis_yaw_vel) > 0.25 and absf(body_foot_twist) > 0.18:
-				var max_piv_step := clampf(absf(_pelvis_yaw_vel) * 0.55, 0.0, 1.1) * dt
-				var step_yaw := clampf(body_foot_twist, -max_piv_step, max_piv_step)
-				ft.world_yaw += step_yaw
-				piv_active = clampf(absf(step_yaw / maxf(dt, 0.001)) / 0.75, 0.0, 1.0)
-			ft.active_pivoting = lerpf(ft.active_pivoting, piv_active, minf(dt * 12.0, 1.0)) if dt > 0.0 else piv_active
-			if ft.pivot_mode == PIVOT_BALL:
-				ft.foot_pitch = 0.065 * ft.active_pivoting
-				ft.toe_bend = ft.foot_pitch * 0.85
-			else:
-				ft.foot_pitch = -0.045 * ft.active_pivoting
-				ft.toe_bend = 0.0
-		else:
-			if ft.pivot_mode != PIVOT_BALL:
-				_switch_planted_pivot(ft, PIVOT_BALL)
-			ft.heel_settle_t = 1.0
-			ft.active_pivoting = 0.0
-			var p := smoothstep(0.72, 1.0, u)
-			var push_max := lerpf(0.24, 0.40, clampf(_step_scale * _turn_stride_mult, 0.28, 1.0))
-			ft.foot_pitch = push_max * p
-			ft.toe_bend = ft.foot_pitch * 0.90
-
-		var ankle_w := _foot_ankle_world(ft, leg)
-		var hip_w := global_position + Vector3.UP * (_hip_rest.y * S)
-		var max_horiz := 0.38 * S
-		var horiz := Vector3(ankle_w.x - hip_w.x, 0.0, ankle_w.z - hip_w.z)
-		if horiz.length() > max_horiz:
-			ft.pivot_world -= horiz.normalized() * (horiz.length() - max_horiz)
-
-	return landed_now
+		var knee_drive := smoothstep(0.12, 0.44, swing_t) * (1.0 - smoothstep(0.72, 0.98, swing_t))
+		ft.foot_pitch = ft.swing_start_pitch * (1.0 - smoothstep(0.0, 0.23, swing_t)) - 0.54 * knee_drive
+		ft.toe_bend = lerpf(ft.swing_start_toe, 0.0, smoothstep(0.0, 0.24, swing_t))
+		return false
+	if prev_phase >= CONTACT_FRACTION and not ft.planted:
+		ft.planted = true
+		ft.world_yaw = ft.swing_target_yaw
+		ft.foot_pitch = 0.0
+		ft.toe_bend = 0.0
+		ft.last_landing_pitch = ft.foot_pitch
+		ft.pivot_mode = PIVOT_HEEL
+		ft.heel_settle_t = 1.0
+		ft.active_pivoting = 0.0
+		ft.swing_start_phase = CONTACT_FRACTION
+		ft.swing_remaining = 0.0
+		var heel_w := ft.swing_target_world - Vector3.UP * (ANKLE_GROUND_Y * S) + _yaw_forward(ft.world_yaw) * (HEEL_Z_FROM_ANKLE * S)
+		heel_w.y = global_position.y
+		ft.pivot_world = heel_w
+		return true
+	_advance_heel_settle(ft, dt)
+	ft.pivot_world.y = global_position.y
+	return false
 
 
 func _advance_heel_settle(ft: FootTrack, dt: float) -> void:
@@ -2523,6 +2489,12 @@ func _switch_planted_pivot(ft: FootTrack, next_mode: int) -> void:
 	ft.pivot_mode = next_mode
 
 
+static func _heavy_swing_arc(t: float) -> float:
+	# Lift and hold through the reach, then accelerate vertically into a flat-footed strike.
+	var down := clampf(inverse_lerp(0.69, 1.0, t), 0.0, 1.0)
+	return smoothstep(0.0, 0.43, t) * (1.0 - down * down)
+
+
 func _foot_ankle_world(ft: FootTrack, _leg: Leg) -> Vector3:
 	var S := _model.scale.z
 	var fwd := _yaw_forward(ft.world_yaw)
@@ -2537,11 +2509,12 @@ func _foot_ankle_world(ft: FootTrack, _leg: Leg) -> Vector3:
 			return ft.pivot_world + Vector3.UP * ((BALL_JOINT_Y + v_rot.y) * S) + fwd * (v_rot.z * S)
 	else:
 		var t := clampf(ft.swing_t, 0.0, 1.0)
-		var xz_t := smoothstep(0.0, 1.0, t)
+		var xz_t := smoothstep(0.0, 1.0, t) if _stand_step_active else smoothstep(0.08, 0.76, t)
 		var pos := ft.swing_start_world.lerp(ft.swing_target_world, xz_t)
 		var bow_mag := (0.024 if _stand_step_active else 0.028 * _turn_sharpness) * S
 		var bow_dir := _yaw_left(_pelvis_world_yaw) * ft.swing_bow_sign
-		pos += bow_dir * (sin(PI * t) * bow_mag)
+		var bow := sin(PI * (t if _stand_step_active else clampf(t / 0.8, 0.0, 1.0)))
+		pos += bow_dir * (bow * bow_mag)
 
 		var other_ft := _foot_r if ft == _foot_l else _foot_l
 		var other_leg := _right if ft == _foot_l else _left
@@ -2552,25 +2525,21 @@ func _foot_ankle_world(ft: FootTrack, _leg: Leg) -> Vector3:
 			var rel := pos - other_ankle
 			var fwd_dist := absf(rel.dot(fwd_vec))
 			var lat_signed := rel.dot(lat_vec)
-			var pass_weight := (1.0 - smoothstep(0.10 * S, 0.34 * S, fwd_dist)) * sin(PI * t)
+			var pass_weight := (1.0 - smoothstep(0.10 * S, 0.34 * S, fwd_dist)) * bow
 			var min_lat_clear := 0.135 * S
 			if lat_signed < min_lat_clear and pass_weight > 0.001:
 				pos += lat_vec * ((min_lat_clear - lat_signed) * clampf(pass_weight * 1.45, 0.0, 1.0))
 
-		var arc := sin(PI * pow(t, 0.86))
-		var lift_h: float
-		if _stand_step_active:
-			lift_h = 0.105 * S
-		else:
-			var step_h_scale := lerpf(0.55, 1.0, clampf(_step_scale, 0.28, 1.0)) * lerpf(1.0, 0.78, _turn_sharpness)
-			lift_h = SWING_HEIGHT * step_h_scale * S
-		var v_land := Quaternion(Vector3.RIGHT, HEEL_STRIKE_PITCH) * Vector3(0.0, ANKLE_GROUND_Y, -HEEL_Z_FROM_ANKLE)
-		var land_blend := smoothstep(0.55, 1.0, t)
-		var land_extra_y := (v_land.y - ANKLE_GROUND_Y) * S * land_blend
-		var land_extra_z := (v_land.z + HEEL_Z_FROM_ANKLE) * S * land_blend
-		pos += _yaw_forward(ft.world_yaw) * land_extra_z
 		var base_y := global_position.y + ANKLE_GROUND_Y * S
-		pos.y = base_y + lift_h * arc + ft.swing_start_lift * pow(1.0 - t, 1.35) + land_extra_y
+		var start_lift := ft.swing_start_lift * pow(1.0 - t, 1.35)
+		if _stand_step_active:
+			var v_land := Quaternion(Vector3.RIGHT, HEEL_STRIKE_PITCH) * Vector3(0.0, ANKLE_GROUND_Y, -HEEL_Z_FROM_ANKLE)
+			var land_blend := smoothstep(0.55, 1.0, t)
+			pos += _yaw_forward(ft.world_yaw) * (v_land.z + HEEL_Z_FROM_ANKLE) * S * land_blend
+			pos.y = base_y + start_lift + (0.105 * sin(PI * pow(t, 0.86)) + (v_land.y - ANKLE_GROUND_Y) * land_blend) * S
+		else:
+			var step_h_scale := lerpf(0.66, 1.0, clampf(_step_scale, 0.28, 1.0)) * lerpf(1.0, 0.78, _turn_sharpness)
+			pos.y = base_y + start_lift + SWING_HEIGHT * step_h_scale * S * _heavy_swing_arc(t)
 		return pos
 
 
@@ -2792,232 +2761,6 @@ static func _dir_to_yaw(dir: Vector3) -> float:
 
 static func _mean_angle(a: float, b: float) -> float:
 	return a + angle_difference(a, b) * 0.5
-
-
-func _sample_step(cycle: float) -> StepSample:
-	var s := StepSample.new()
-	var eff_half_step := HALF_STEP * _step_scale
-	var eff_swing_h := SWING_HEIGHT * lerpf(0.55, 1.0, clampf(_step_scale, 0.28, 1.0))
-	var push_pitch_max := lerpf(0.28, 0.44, clampf(_step_scale, 0.28, 1.0))
-	var push_carry := _toe_pivot_ankle_delta(push_pitch_max)
-
-	if cycle < CONTACT_FRACTION:
-		var u := cycle / CONTACT_FRACTION
-		var z := lerpf(eff_half_step, -eff_half_step, u)
-		var y := 0.0
-		var pitch := 0.0
-		var toe := 0.0
-
-		if u < 0.11:
-			# Heel-strike settle onto flat foot (keeps ankle y inside flat contact tolerance).
-			var h := 1.0 - smoothstep(0.0, 0.11, u)
-			pitch = -0.15 * h
-			y = 0.003 * h
-		elif u > 0.72:
-			# Expressive toe-off push: heel rises smoothly around the toe joint while toes stay planted.
-			var p := smoothstep(0.72, 1.0, u)
-			pitch = push_pitch_max * p
-			toe = pitch * 0.90
-			var pivot_delta := _toe_pivot_ankle_delta(pitch)
-			y = pivot_delta.y
-			z += pivot_delta.z * 0.65
-
-		s.offset = Vector3(0.0, y, z)
-		s.foot_pitch = pitch
-		s.toe_bend = toe
-		s.grounded = 1.0 if u <= 0.78 else lerpf(1.0, 0.30, inverse_lerp(0.78, 1.0, u))
-		return s
-
-	# Swing phase: graceful knee lift early-mid swing, trailing toe release, reaching forward to heel strike.
-	var swing := inverse_lerp(CONTACT_FRACTION, 1.0, cycle)
-	var arc := sin(PI * pow(swing, 0.86))
-	var start_z := -eff_half_step + push_carry.z * 0.65
-	var z_swing := lerpf(start_z, eff_half_step, smoothstep(0.0, 1.0, swing))
-	var y_swing := eff_swing_h * arc + push_carry.y * (1.0 - smoothstep(0.0, 0.28, swing))
-
-	var foot_pitch: float
-	var toe_bend: float
-	if swing < 0.38:
-		# Foot trails with relaxed plantarflexion as the shoe clears the street.
-		var k := smoothstep(0.0, 0.38, swing)
-		foot_pitch = lerpf(push_pitch_max, 0.22, k)
-		toe_bend = lerpf(push_pitch_max * 0.90, 0.0, smoothstep(0.0, 0.24, swing))
-	else:
-		# Crisp dorsiflexion ahead of heel strike.
-		var k := smoothstep(0.38, 0.95, swing)
-		foot_pitch = lerpf(0.22, -0.15, k)
-		toe_bend = 0.0
-
-	s.offset = Vector3(0.0, y_swing, z_swing)
-	s.foot_pitch = foot_pitch
-	s.toe_bend = toe_bend
-	s.grounded = 0.0
-	return s
-
-
-func _stomp_pose(time: float, dt: float) -> void:
-	# The controller scales the duration by size and supplies normalized time:
-	# windup 0..1, impact at 1.0, and recovery 1..2.
-	# Phase 1 (0.00..0.70): Weight shift onto R, high poised lift of L with brief apex hang-time.
-	# Phase 2 (0.70..1.00): Continuous accelerating slam down (zero teleport, max velocity at t=1.0).
-	# Phase 3 (1.00..1.24): Locked flat sole contact & delayed overlapping torso/arm follow-through.
-	# Phase 4 (1.24..2.00): Weight shifts back to R, L peels heel-first around toe pivot & returns smoothly.
-
-	var support_settle := smoothstep(0.0, 0.24, time)
-	var enter_t := 1.0 - smoothstep(0.0, 0.20, time)
-	_stomp_enter_blend = enter_t
-
-	# Windup climbs to a dramatic brief hang-time apex (0.54..0.70), then accelerates smoothly to t=1.00.
-	var windup_rise := smoothstep(0.0, 0.54, time)
-	var slam_u := clampf(inverse_lerp(0.70, 1.00, time), 0.0, 1.0)
-	var slam_curve := pow(slam_u, 2.65)
-	var lifted := windup_rise * (1.0 - slam_curve)
-
-	# Forward reach of the striking foot onto STOMP_STEP: coils slightly under the raised knee
-	# during windup lift (avoiding a stiff 90-deg box silhouette), then drives onto exact target by t=0.88.
-	var reach_out := smoothstep(0.18, 0.88, time)
-	var return_u := clampf(inverse_lerp(1.26, 1.94, time), 0.0, 1.0)
-	var reach := reach_out * (1.0 - smoothstep(0.0, 1.0, return_u))
-	var windup_coil := -0.045 * sin(PI * clampf(inverse_lerp(0.05, 0.72, time), 0.0, 1.0))
-
-	# Delayed follow-through compression: strong downward drive into contact (t=1.0), deepest cushion
-	# at t~1.09, with chest/shoulders peaking slightly later (t~1.12) for authentic overlapping action.
-	var compression := smoothstep(0.76, 1.09, time) * (1.0 - smoothstep(1.16, 1.84, time))
-	var chest_follow := smoothstep(0.84, 1.12, time) * (1.0 - smoothstep(1.20, 1.80, time))
-	var post_squash := smoothstep(0.96, 1.10, time) * (1.0 - smoothstep(1.16, 1.66, time))
-	var loaded := windup_rise * (1.0 - smoothstep(0.70, 0.96, time))
-
-	# Continuous recovery peel & lift starting cleanly at t=1.24 (zero single-frame snap or toe clipping).
-	var return_peel := smoothstep(1.24, 1.40, time) * (1.0 - smoothstep(1.44, 1.66, time))
-	var return_lift := sin(PI * clampf(inverse_lerp(1.30, 1.94, time), 0.0, 1.0))
-	var peel_pitch := 0.30 * return_peel
-	var peel_pivot := _toe_pivot_ankle_delta(peel_pitch) * (1.0 - smoothstep(1.34, 1.52, time))
-
-	# Support foot (R) adapts to terrain & plants firmly.
-	var r_target := _right.ankle_rest
-	_update_leg_ground(_right, r_target, 1.0, dt)
-	_right_ankle = _right_at_windup.lerp(r_target + Vector3(0.0, _right.ground_y, 0.0), support_settle)
-
-	# Striking foot (L): preserve any upward/forward momentum from walking so the foot never dips
-	# or retracts awkwardly before lifting into the stomp, and hit exact target at t=1.00 continuously.
-	var l_start := _left_at_windup
-	var l_ground_y := _stomp_target_ground_y * reach + _left.ground_y * (1.0 - reach)
-	var l_x := lerpf(l_start.x, _left.ankle_rest.x + STOMP_STEP.x * reach, smoothstep(0.0, 0.30, time))
-	var l_z_target := _left.ankle_rest.z + STOMP_STEP.z * reach
-	var l_z: float
-	if time <= 1.0:
-		var z_desired := l_z_target + windup_coil
-		var carry_z := lerpf(l_start.z, z_desired, smoothstep(0.0, 0.52, time))
-		l_z = maxf(carry_z, l_z_target) if l_start.z > _left.ankle_rest.z else carry_z
-	else:
-		l_z = l_z_target + peel_pivot.z * 0.55
-
-	var l_y: float
-	if time < 1.0:
-		var start_lift := maxf(0.0, l_start.y - _left.ankle_rest.y) * (1.0 - smoothstep(0.0, 0.45, time))
-		var target_lift := 0.415 * lifted
-		var ground_blend := 1.0 - lifted * 0.65
-		l_y = _left.ankle_rest.y + maxf(target_lift, start_lift) + l_ground_y * ground_blend
-	elif time <= 1.24:
-		# Firmly locked to target surface during impact hold!
-		l_y = _left.ankle_rest.y + _stomp_target_ground_y
-	else:
-		l_y = _left.ankle_rest.y + maxf(0.145 * return_lift, peel_pivot.y) + l_ground_y
-	_left_ankle = Vector3(l_x, l_y, l_z)
-
-	# Pelvis: clean lateral weight shift over right leg during lift & recovery peel,
-	# forward drive + weighted absorption cushion on impact.
-	var recover_shift := smoothstep(1.16, 1.38, time) * (1.0 - smoothstep(1.72, 1.98, time))
-	var slope_drop := minf(_right.ground_y, _stomp_target_ground_y * reach)
-	var hip := _hip_rest + Vector3(
-		-0.098 * loaded - 0.022 * reach * (1.0 - loaded) - 0.048 * recover_shift,
-		-0.016 - 0.032 * loaded - 0.105 * compression + slope_drop - _impact_jolt * 0.016,
-		-0.045 * loaded + 0.185 * reach
-	)
-
-	var hip_rot := _pose(
-		"spine",
-		-0.08 * loaded + 0.10 * compression,
-		-0.12 * loaded + 0.08 * compression,
-		0.11 * loaded - 0.03 * compression + 0.04 * recover_shift
-	)
-	_skeleton.set_bone_pose_position(_bone["spine"], hip)
-
-	# Spine whip: poised athletic arch on windup, controlled authoritative forward drive on impact
-	# (never folding in half). During a turn-into-stomp, upper torso and head lead into the target.
-	var turn_lead := clampf(-_visual_yaw_offset * 0.45, -0.42, 0.42)
-	_pose("spine.001", -0.05 * loaded + 0.07 * compression, 0.04 * loaded - 0.02 * compression + turn_lead * 0.15, -0.04 * loaded)
-	_pose("spine.002", -0.07 * loaded + 0.10 * chest_follow, 0.09 * loaded - 0.04 * chest_follow + turn_lead * 0.25, -0.06 * loaded)
-	_pose("spine.003", -0.04 * loaded + 0.09 * chest_follow, 0.11 * loaded - 0.05 * chest_follow + turn_lead * 0.30, -0.05 * loaded)
-	_pose("spine.004", 0.06 * loaded - 0.06 * chest_follow, 0.04 * loaded + turn_lead * 0.22)
-
-	# Gaze locks cleanly down onto the target beneath her shoe, with subtle impact nod.
-	var look_down := 0.23 * smoothstep(0.08, 0.52, time) * (1.0 - smoothstep(1.36, 1.96, time))
-	var impact_nod := 0.09 * post_squash
-	_pose("Neck", (look_down + impact_nod) * 0.45, -0.04 * loaded + turn_lead * 0.38, 0.02 * loaded)
-	_pose("Head", (look_down + impact_nod) * 0.55, -0.06 * loaded + turn_lead * 0.48, 0.03 * loaded)
-
-	# Shoulders & arms:
-	# - Windup: wide, poised athletic balance wings clearly above/outside the raised left knee & bear bag.
-	# - Impact: true contralateral power drive (left arm sweeps back-and-out as left leg slams forward;
-	#   right arm drives forward-and-down cleanly outside the right-hip bear bag).
-	_pose_local("shoulder.L", 0.11 * loaded - 0.07 * chest_follow, 0.0, 0.07 * loaded + 0.08 * compression)
-	_pose_local("shoulder.R", 0.10 * loaded - 0.05 * chest_follow, 0.0, -0.05 * loaded + 0.07 * compression)
-
-	_pose(
-		"upper_arm.L",
-		0.02 + 0.34 * loaded + 0.58 * compression,
-		-0.05 - 0.10 * loaded + 0.04 * compression,
-		-0.44 + 0.86 * loaded + 0.56 * compression + 0.10 * recover_shift
-	)
-	_pose(
-		"upper_arm.R",
-		0.03 + 0.08 * loaded - 0.52 * compression,
-		0.06 + 0.10 * loaded - 0.12 * compression,
-		0.29 - 0.66 * loaded - 0.50 * compression - 0.08 * recover_shift
-	)
-
-	_pose_local("forearm.L", 0.17 + 0.22 * loaded + 0.16 * chest_follow, 0.0, 0.0)
-	_pose_local("forearm.R", 0.18 + 0.24 * loaded + 0.36 * chest_follow, 0.0, 0.0)
-
-	_pose_local("hand.L", 0.06 + 0.14 * loaded - 0.12 * chest_follow, 0.14, -0.22 - 0.06 * loaded)
-	_pose_local("hand.R", 0.06 + 0.12 * loaded - 0.08 * chest_follow, -0.14, 0.22 + 0.06 * loaded)
-
-	# Clench fists purposefully during peak impact, relaxing smoothly back to 0.32 by t=2.0.
-	var fist := 0.32 + 0.48 * clampf(loaded * 0.55 + compression * 0.95, 0.0, 1.0)
-	_pose_fingers("L", fist)
-	_pose_fingers("R", fist)
-
-	# Striking foot orientation: relaxed graceful plantarflexion during windup lift, levels flat
-	# well ahead of impact for crushing full-sole contact, then peels heel-first around toe pivot.
-	var l_pitch := 0.26 * lifted * (1.0 - smoothstep(0.56, 0.88, time)) + peel_pitch + 0.16 * return_lift * (1.0 - smoothstep(0.64, 1.0, return_u))
-	var l_toe := 0.26 * return_peel
-	if time >= 0.94 and time <= 1.24:
-		l_pitch = 0.0
-		l_toe = 0.0
-	var l_yaw := lerpf(IDLE_FOOT_YAW, 0.06, reach)
-	var r_yaw := -IDLE_FOOT_YAW - 0.07 * loaded
-	var l_roll := 0.0
-	var r_pitch := _right.ground_pitch
-	var r_roll := _right.ground_roll
-	var r_toe := 0.0
-
-	# Smoothly blend upper body, pelvis & foot angles from pre-stomp pose to eliminate frame-0 snap!
-	if enter_t > 0.001:
-		hip = hip.lerp(_snap_hip, enter_t)
-		_skeleton.set_bone_pose_position(_bone["spine"], hip)
-		hip_rot = _blend_core_from_snapshot(enter_t)
-		l_pitch = lerpf(l_pitch, _snap_left_foot.x, enter_t)
-		l_roll = lerpf(l_roll, _snap_left_foot.y, enter_t)
-		l_yaw = lerpf(l_yaw, _snap_left_foot.z, enter_t)
-		l_toe = lerpf(l_toe, _snap_left_foot.w, enter_t)
-		r_pitch = lerpf(r_pitch, _snap_right_foot.x, enter_t)
-		r_roll = lerpf(r_roll, _snap_right_foot.y, enter_t)
-		r_yaw = lerpf(r_yaw, _snap_right_foot.z, enter_t)
-		r_toe = lerpf(r_toe, _snap_right_foot.w, enter_t)
-
-	_plant(_left, _left_ankle, hip, hip_rot, l_pitch, l_roll, l_yaw, l_toe, 0.14 * lifted)
-	_plant(_right, _right_ankle, hip, hip_rot, r_pitch, r_roll, r_yaw, r_toe)
 
 
 static func _smoother(edge0: float, edge1: float, x: float) -> float:
@@ -4301,18 +4044,92 @@ func _make_leg(side: String) -> Leg:
 	var ankle := _skeleton.get_bone_global_rest(leg.foot)
 	leg.ankle_rest = ankle.origin
 	leg.foot_basis = ankle.basis.orthonormalized().get_rotation_quaternion()
-	var center := LEFT_SOLE_CENTER
-	center.x *= leg.sign_x
-	leg.sole_center = ankle.affine_inverse() * center
-	leg.sole_forward = ankle.basis.inverse() * Vector3.BACK
 	return leg
 
 
-func _foot_contact(leg: Leg) -> Vector4:
+func _configure_soles() -> void:
+	match skin_name:
+		&"Hina":
+			_set_sole(_left, Vector2(-0.00439, -0.05249), Vector2(0.04299, 0.11174),
+					HINA_SOLE_L, Vector3(0.004431, 0.107319, 0.059587))
+			_set_sole(_right, Vector2(0.00776, -0.05771), Vector2(0.04481, 0.11239),
+					HINA_SOLE_R, Vector3(0.001811, 0.107269, 0.061577))
+		&"Chibi Catgirl":
+			_set_sole(_left, Vector2(0.00232, -0.05770), Vector2(0.06916, 0.10712),
+					CHIBI_SOLE, Vector3(0.053673, 0.252530, 0.155612))
+			_set_sole(_right, Vector2(-0.00112, -0.05898), Vector2(0.06962, 0.10730),
+					_mirror_sole(CHIBI_SOLE), Vector3(-0.047441, 0.246573, 0.151885))
+		&"Snow Fox":
+			_set_sole(_left, Vector2(-0.00345, -0.06277), Vector2(0.03903, 0.10355),
+					SNOW_FOX_SOLE, Vector3(0.002914, -0.076119, 0.053432))
+			_set_sole(_right, Vector2(0.00345, -0.06270), Vector2(0.03903, 0.10362),
+					_mirror_sole(SNOW_FOX_SOLE), Vector3(-0.002914, -0.076119, 0.053372))
+		_:
+			_set_sole(_left, Vector2(0.01038, -0.06827), Vector2(0.04747, 0.09271), KAWAII_SOLE)
+			_set_sole(_right, Vector2(-0.01038, -0.06826), Vector2(0.04747, 0.09272), _mirror_sole(KAWAII_SOLE))
+
+
+func _set_sole(leg: Leg, offset: Vector2, half_extents: Vector2, outline: Array[Vector2],
+		skin_center := Vector3.ZERO) -> void:
+	leg.sole_offset = Vector3(offset.x, -ANKLE_GROUND_Y, offset.y)
+	leg.skin_sole_center = skin_center
+	leg.sole_half_extents = half_extents
+	leg.sole_profile = PackedVector2Array(outline)
+
+
+static func _mirror_sole(outline: Array[Vector2]) -> Array[Vector2]:
+	var mirrored: Array[Vector2] = []
+	for i in range(outline.size() - 1, -1, -1):
+		mirrored.append(Vector2(-outline[i].x, outline[i].y))
+	return mirrored
+
+
+func _source_sole_world(leg: Leg, source_pose: Transform3D) -> Vector3:
+	var offset := Vector3(-leg.sole_offset.x, leg.sole_offset.y, -leg.sole_offset.z)
+	return _skeleton.to_global(source_pose * (leg.foot_basis.inverse() * offset))
+
+
+func _pin_skin_feet() -> void:
+	_active_skin.pin_soles(_left.foot, _left.skin_sole_center,
+			_source_sole_world(_left, _skeleton.get_bone_global_pose(_left.foot)),
+			_right.foot, _right.skin_sole_center,
+			_source_sole_world(_right, _skeleton.get_bone_global_pose(_right.foot)))
+
+
+func _sole_payload(leg: Leg, center: Vector3, yaw: float) -> Dictionary:
+	return {
+		"center": center,
+		"yaw": yaw,
+		"half_extents": leg.sole_half_extents * _model.scale.z,
+		"profile": leg.sole_profile,
+		"left": leg.sign_x > 0.0,
+	}
+
+
+func _foot_contact(leg: Leg) -> Dictionary:
 	var pose := _skeleton.get_bone_global_pose(leg.foot)
-	var center := _skeleton.to_global(pose * leg.sole_center)
-	var forward := _skeleton.global_basis * (pose.basis * leg.sole_forward)
-	return Vector4(center.x, center.y, center.z, atan2(-forward.x, -forward.z))
+	var center := _source_sole_world(leg, pose)
+	var forward := _skeleton.global_basis * (pose.basis * (leg.foot_basis.inverse() * Vector3.BACK))
+	center.y = _foot_ground_height(center)
+	return _sole_payload(leg, center, _dir_to_yaw(forward))
+
+
+func _foot_ground_height(center: Vector3) -> float:
+	var space := get_world_3d().direct_space_state
+	var reach := _model.scale.z * 0.4
+	var query := PhysicsRayQueryParameters3D.create(
+			Vector3(center.x, global_position.y + reach, center.z),
+			Vector3(center.x, global_position.y - reach, center.z), collision_mask & 17)
+	var hit := space.intersect_ray(query)
+	return global_position.y if hit.is_empty() else (hit["position"] as Vector3).y
+
+
+static func _max_hip_height(leg: Leg, ankle: Vector3, hip: Vector3, hip_rotation: Quaternion) -> float:
+	var socket_offset := hip_rotation * leg.hip_socket
+	var delta := ankle - (hip + socket_offset)
+	var reach := (leg.upper_length + leg.lower_length - 0.002) * 0.992
+	var height := sqrt(maxf(reach * reach - delta.x * delta.x - delta.z * delta.z, 0.0))
+	return ankle.y + height - socket_offset.y
 
 
 func _plant(leg: Leg, ankle: Vector3, hip: Vector3, hip_rotation: Quaternion,
@@ -4429,27 +4246,6 @@ func _update_leg_ground(leg: Leg, model_ankle: Vector3, ground_weight: float, dt
 		leg.ground_y = target_y
 		leg.ground_pitch = target_pitch
 		leg.ground_roll = target_roll
-
-
-func _probe_stomp_ground() -> float:
-	if not is_inside_tree() or get_world_3d() == null:
-		return 0.0
-	var space := get_world_3d().direct_space_state
-	if space == null:
-		return 0.0
-	var scale_mult := maxf(_model.scale.y / _model_base_scale, 0.35)
-	var target_local := _left.ankle_rest + STOMP_STEP + STOMP_SOLE_OFFSET
-	var world_pt := to_global((target_local * _model.scale).rotated(Vector3.UP, _model_base_yaw))
-	var from := Vector3(world_pt.x, global_position.y + 6.5 * scale_mult, world_pt.z)
-	var to := Vector3(world_pt.x, global_position.y - 4.0 * scale_mult, world_pt.z)
-	var query := PhysicsRayQueryParameters3D.create(from, to, collision_mask & 17)
-	var hit := space.intersect_ray(query)
-	if hit.is_empty():
-		return 0.0
-	var rel_y := clampf((hit["position"] as Vector3).y - global_position.y, -2.0 * scale_mult, 3.0 * scale_mult)
-	if absf(rel_y) < 0.04:
-		return 0.0
-	return rel_y / _model.scale.y
 
 
 func _capture_snapshot() -> void:
@@ -4578,7 +4374,7 @@ func _update_impact_jolt(dt: float) -> void:
 	_impact_jolt = clampf(_impact_jolt + _impact_jolt_vel * dt, -0.5, 1.2)
 
 
-func _update_hair(dt: float, stomping: bool) -> void:
+func _update_hair(dt: float, action_pose: bool) -> void:
 	if _detail_tier >= 1:
 		# Mid and far tiers skip the hair/tail spring chain entirely.
 		return
@@ -4608,7 +4404,7 @@ func _update_hair(dt: float, stomping: bool) -> void:
 		# Primary root spring in skeleton space (+Z forward, +X left, +Y up).
 		var target_sway := Vector2(
 			clampf(-head_accel_local.x * 0.016, -0.36, 0.36),
-			clampf(-head_accel_local.z * 0.018 - (_move_drive * 0.09 if not stomping else 0.0), -0.40, 0.34)
+			clampf(-head_accel_local.z * 0.018 - (_move_drive * 0.09 if not action_pose else 0.0), -0.40, 0.34)
 		)
 		var sway_acc := (target_sway - _hair_sway) * 46.0 - _hair_sway_vel * 8.0
 		_hair_sway_vel += sway_acc * dt
@@ -4619,7 +4415,7 @@ func _update_hair(dt: float, stomping: bool) -> void:
 		_hair_tip_sway_vel += tip_sway_acc * dt
 		_hair_tip_sway += _hair_tip_sway_vel * dt
 
-		# Vertical bounce wave (footfalls, stomp shockwaves, growth surge, sit-crush upward float).
+		# Vertical bounce wave (footfalls, growth surge, sit-crush upward float).
 		var sit_float := _sit_crush_hair_float if _sit_crush_active else 0.0
 		var vertical_drive := -head_accel_local.y * 0.015
 		if _sit_crush_active and sit_float > 0.05:
@@ -4645,7 +4441,7 @@ func _update_hair(dt: float, stomping: bool) -> void:
 		_hair_tip_rot_vel += tip_rot_acc * dt
 		_hair_tip_rot += _hair_tip_rot_vel * dt
 
-	# Head forward tilt (positive when looking down during stomp) for subtle gravity drape.
+	# Head forward tilt (positive when looking down during attacks) for subtle gravity drape.
 	var head_fwd_local := head_pose.basis.orthonormalized() * Vector3.BACK
 	var head_down_tilt := clampf(-head_fwd_local.y, -0.35, 0.55)
 	var centrifugal := clampf(absf(_hair_rot) * 0.65, 0.0, 0.25)
@@ -4691,7 +4487,7 @@ func _update_hair(dt: float, stomping: bool) -> void:
 					roll = -clampf(flare * 0.60 + absf(flutter) * 0.45, -0.02, 0.30 + float_boost * 0.24) * weight
 					pitch = clampf(-sway.y * 0.78 + rot_lag * 0.50 - maxf(head_down_tilt, 0.0) * 0.16 + flutter, -0.22, 0.30 + float_boost * 0.16) * weight
 				_:
-					# Back hair lifts backward (-Z -> positive pitch) on stride & stomp shockwaves,
+					# Back hair lifts backward (-Z -> positive pitch) on stride and impact,
 					# and trails +X on left turn (exact angular inertia!), keeping a cohesive bob silhouette.
 					var back_lift := maxf(0.0, -sway.y * 0.85 + bounce * 0.82 + centrifugal * 0.65 + maxf(-head_down_tilt, 0.0) * 0.25)
 					pitch = clampf(back_lift * 0.72 + maxf(flutter, 0.0) * 0.75, -0.02, 0.38 + float_boost * 0.32) * weight
@@ -4740,7 +4536,7 @@ func _next_rand() -> float:
 	return float(_blink_seed % 10000) / 10000.0
 
 
-func _update_face(dt: float, stomp_pose: float) -> void:
+func _update_face(dt: float) -> void:
 	if dt > 0.0:
 		# Natural blinking with occasional double-blink for genuine life.
 		if _blink_progress >= 0.0:
@@ -4768,12 +4564,7 @@ func _update_face(dt: float, stomp_pose: float) -> void:
 		_head_idle_gaze = _head_idle_gaze.lerp(_eye_idle_target * 0.65, minf(dt * 2.4, 1.0))
 
 		var target_eye := Vector2.ZERO
-		if stomp_pose >= 0.0:
-			# Eyes lock decisively down onto the target during stomp.
-			var lock := smoothstep(0.04, 0.30, stomp_pose) * (1.0 - smoothstep(1.38, 1.92, stomp_pose))
-			var turn_glance := clampf(-_visual_yaw_offset * 0.14, -0.10, 0.10)
-			target_eye = Vector2(turn_glance, 0.105 * lock)
-		elif _pickup_crush_active and _pickup_eye_override > 0.001:
+		if _pickup_crush_active and _pickup_eye_override > 0.001:
 			target_eye = _pickup_eye_target * _pickup_eye_override
 		elif _punch_active and _punch_eye_override > 0.001:
 			target_eye = _punch_eye_target * _punch_eye_override
@@ -4797,9 +4588,7 @@ func _update_face(dt: float, stomp_pose: float) -> void:
 			_eye_gaze = target_eye
 
 		var target_tension := 0.0
-		if stomp_pose >= 0.0:
-			target_tension = smoothstep(0.05, 0.45, stomp_pose) * (1.0 - smoothstep(1.35, 1.95, stomp_pose))
-		elif _pickup_crush_active:
+		if _pickup_crush_active:
 			target_tension = _pickup_brow_target
 		elif _punch_active:
 			target_tension = _punch_brow_target
@@ -4835,7 +4624,7 @@ func _update_face(dt: float, stomp_pose: float) -> void:
 			blink_val = smoothstep(0.0, 0.38, _blink_progress)
 		else:
 			blink_val = 1.0 - smoothstep(0.38, 1.0, _blink_progress)
-	# Subtle determined squint during stomp/crush/punch/sit-crush + brief impact-reflex flinch on touchdown/impact.
+	# Subtle determined squint during crush/punch/sit-crush + brief impact-reflex flinch on touchdown/impact.
 	var flinch_curve := sin(_impact_flinch * PI) * 0.24
 	var action_squint := _pickup_squint if _pickup_crush_active else (_punch_squint if _punch_active else (_sit_crush_squint if _sit_crush_active else 0.0))
 	blink_val = maxf(blink_val, maxf(_brow_tension * 0.14 + action_squint, flinch_curve))

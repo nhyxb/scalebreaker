@@ -17,7 +17,7 @@ var label_font: Font
 var round_node: Node
 var mode := 0
 var bedroom_controls := false
-var can_stomp := true
+var can_use_hands := true
 var sitting := false
 var sit_ready := false
 var _allow_sprint := false
@@ -46,7 +46,9 @@ func _ready() -> void:
 func present(screen: String, new_mode: int, current_round: Node, allow_sprint: bool, allow_giant: bool) -> void:
 	mode = new_mode
 	round_node = current_round if screen == "playing" else null
-	can_stomp = true
+	can_use_hands = true
+	sitting = false
+	sit_ready = false
 	_allow_sprint = allow_sprint
 	_allow_giant = allow_giant
 	_player_rank = 0
@@ -93,11 +95,10 @@ func _press_finger(id: int, at: Vector2) -> void:
 	elif mode in [GROWTH_MODE, BRAWL_MODE] and _ranking_rect().has_point(at):
 		if _ranking_id == -1:
 			_ranking_id = id
-	elif (_allow_sprint or _allow_giant) and _action_rect().has_point(at):
+	elif _allow_sprint and _action_rect().has_point(at):
 		if _action_id == -1:
 			_action_id = id
-			if _allow_sprint:
-				_send_motion()
+			_send_motion()
 	elif _allow_giant and _sit_rect().has_point(at):
 		if _sit_id == -1:
 			_sit_id = id
@@ -128,25 +129,20 @@ func _release_finger(id: int, at: Vector2, canceled: bool) -> void:
 		_look_id = -1
 	elif id == _action_id:
 		_action_id = -1
-		if _allow_sprint:
-			_send_motion()
-		elif sitting and not canceled and _action_rect().has_point(at):
-			round_node.tap_stand_up()
-		elif can_stomp and not canceled and _action_rect().has_point(at):
-			round_node.tap_stomp()
+		_send_motion()
 	elif id == _sit_id:
 		_sit_id = -1
 		if not canceled and _sit_rect().has_point(at):
 			if sitting:
 				round_node.tap_stand_up()
-			else:
+			elif sit_ready:
 				round_node.tap_sit_down()
 	elif id == _view_id:
 		_view_id = -1
 		if not canceled and _view_rect().has_point(at):
 			round_node.toggle_view()
 	elif id == _hand_id:
-		if can_stomp and not canceled and _hand_rect(_hand_button).has_point(at):
+		if can_use_hands and not canceled and _hand_rect(_hand_button).has_point(at):
 			if _hand_button == 0:
 				round_node.tap_grab_crush()
 			else:
@@ -213,11 +209,11 @@ func _view_rect() -> Rect2:
 
 
 func _sit_rect() -> Rect2:
-	return Rect2(size.x - 490.0, size.y - 201.0, 140.0, 67.0)
+	return Rect2(size.x - 317.0, size.y - 201.0, 140.0, 67.0)
 
 
 func _hand_rect(index: int) -> Rect2:
-	return Rect2(size.x - 490.0 + 153.0 * index, size.y - 122.0, 140.0, 96.0)
+	return Rect2(size.x - 317.0 + 153.0 * index, size.y - 122.0, 140.0, 96.0)
 
 
 func _ranking_rect() -> Rect2:
@@ -237,11 +233,11 @@ func _draw() -> void:
 	if _allow_giant:
 		_draw_button(_view_rect(), "切换视角", PAPER, _view_id != -1)
 		_draw_button(_sit_rect(), "起身" if sitting else "坐压", AMBER, _sit_id != -1, sitting or sit_ready)
-		_draw_button(_hand_rect(0), "捡起捏碎", AMBER, _hand_button == 0, can_stomp)
-		_draw_button(_hand_rect(1), "挥拳", AMBER, _hand_button == 1, can_stomp)
-	if _allow_sprint or _allow_giant:
-		var action := "按住攀爬" if bedroom_controls else ("按住疾跑" if _allow_sprint else ("起身" if sitting else "踩踏"))
-		_draw_button(_action_rect(), action, accent, _action_id != -1, _allow_sprint or can_stomp)
+		_draw_button(_hand_rect(0), "捡起捏碎", AMBER, _hand_button == 0, can_use_hands)
+		_draw_button(_hand_rect(1), "挥拳", AMBER, _hand_button == 1, can_use_hands)
+	if _allow_sprint:
+		var action := "按住攀爬" if bedroom_controls else "按住疾跑"
+		_draw_button(_action_rect(), action, accent, _action_id != -1)
 
 
 func _draw_button(rect: Rect2, text: String, accent: Color, pressed: bool, enabled := true) -> void:

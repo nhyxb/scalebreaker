@@ -918,8 +918,8 @@ func _play_impact_audio(at: Vector3) -> void:
 	var audio := get_node_or_null("/root/HarborAudio")
 	if audio == null:
 		return
-	if audio.has_method("play_giant_stomp"):
-		audio.call("play_giant_stomp", at, 25.2)
+	if audio.has_method("play_giant_impact"):
+		audio.call("play_giant_impact", at, 25.2)
 	if audio.has_method("play_camera_shake"):
 		audio.call("play_camera_shake", 0.92, 25.2)
 

@@ -3,7 +3,7 @@ use super::*;
 const GRASP_TIME: f32 = 0.30;
 const CRUSH_TIME: f32 = 0.745;
 const PUNCH_TIME: f32 = 0.455;
-const AI_GRAB_CHANCE_WITH_STOMP: f64 = 0.10;
+const AI_GRAB_CHANCE_NEAR_LANDING: f64 = 0.10;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HandMove {
@@ -193,7 +193,7 @@ impl HarborRound {
         &self,
         actor: &mut Giant,
         target: &CombatTarget,
-        stomp_in_reach: bool,
+        footfall_in_reach: bool,
     ) -> bool {
         if !Self::ready_for_hand_move(actor) || !self.can_demolish(actor) {
             return false;
@@ -217,14 +217,14 @@ impl HarborRound {
         // AI hand moves also require facing the target within the forward cone rather than
         // snapping 180 degrees around to grab or punch behind.
         let aim = Vector3::FORWARD.rotated(Vector3::UP, actor.body.get_rotation().y);
-        let moves: &[HandMove] = if stomp_in_reach {
+        let moves: &[HandMove] = if footfall_in_reach {
             &[HandMove::GrabCrush]
         } else {
             &[HandMove::GrabCrush, HandMove::Punch]
         };
         for &kind in moves {
             if let Some(point) = self.valid_hand_point(actor, kind, &pose, aim) {
-                if stomp_in_reach && godot::global::randf() >= AI_GRAB_CHANCE_WITH_STOMP {
+                if footfall_in_reach && godot::global::randf() >= AI_GRAB_CHANCE_NEAR_LANDING {
                     return false;
                 }
                 self.begin_hand_move(actor, kind, victim, point);
@@ -458,14 +458,9 @@ impl HarborRound {
             HandTarget::Giant(_) => {
                 let rival = rival.unwrap();
                 rival.grabbed = true;
-                rival.stomp = Stomp::Ready;
-                rival.pending_stomp_aim = None;
+                rival.footfall = None;
                 rival.pending_hand = None;
                 self.rivals.retain(|other| other.index != rival.index);
-                self.effects
-                    .as_mut()
-                    .unwrap()
-                    .call("cancel_warning", &[rival.index.to_variant()]);
                 let height = rival.height(self.max_height);
                 (&mut rival.body, height)
             }
@@ -580,7 +575,7 @@ impl HarborRound {
         }
         let radius = actor.height(self.max_height) * 0.065;
         self.show_impact(
-            StompArea {
+            ImpactArea {
                 center: palm,
                 yaw: 0.0,
                 radii: Vector2::splat(radius),

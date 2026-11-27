@@ -24,7 +24,7 @@ const HOTSPOT_TTL: f32 = 12.0;
 pub(super) enum CoinTier {
     /// Safe/outskirts: 1× value, instant pickup (0 s dwell).
     Normal,
-    /// Near a large giant's stomping grounds: 2.5× value, ~2.0 s dwell.
+    /// Near a large giant's footfall paths: 2.5× value, ~2.0 s dwell.
     High,
     /// At a giant's feet or inside a multi-way combat hotspot: 5× value,
     /// ~3.5–4.0 s dwell.
@@ -87,8 +87,8 @@ pub(super) struct CoinDwell {
 #[derive(Clone, Copy)]
 pub(super) struct CoinThreat {
     pub at: Vector3,
-    /// Stomp reach around the giant's feet: inside it coins are `Extreme`.
-    pub stomp_reach: f32,
+    /// Footfall reach around the giant's feet: inside it coins are `Extreme`.
+    pub footfall_reach: f32,
     /// Activity zone radius: inside it coins are at least `High`.
     pub zone: f32,
 }
@@ -103,7 +103,7 @@ pub(super) fn coin_threat_tier(
     let mut tier = CoinTier::Normal;
     for threat in threats {
         let distance = horizontal(threat.at - point).length();
-        if distance <= threat.stomp_reach {
+        if distance <= threat.footfall_reach {
             return CoinTier::Extreme;
         }
         if distance <= threat.zone {
@@ -292,8 +292,8 @@ pub(super) struct Rival {
     pub velocity: Vector3,
     /// Human-stage flag snapshot for cheap stage checks during the actor loop.
     pub human: bool,
-    /// Active stomp warning ellipse (center, radii) while this rival is in windup.
-    pub windup: Option<(Vector3, Vector2)>,
+    /// The planted area forecast by the current airborne shoe.
+    pub footfall: Option<FootfallPreview>,
     /// Sit-crush drop zone (center, radius) while this rival is turning/dropping.
     pub sit_drop: Option<(Vector3, f32)>,
 }
@@ -301,15 +301,11 @@ pub(super) struct Rival {
 impl Rival {
     pub fn from_giant(giant: &Giant) -> Self {
         let body = giant.body.clone();
-        let windup = match &giant.stomp {
-            Stomp::Windup { area, .. } => Some((area.center, area.radii)),
-            _ => None,
-        };
         Self {
             index: giant.index,
             position: body.get_global_position(),
             velocity: body.get_real_velocity(),
-            windup,
+            footfall: giant.footfall.clone(),
             sit_drop: giant.sit_drop_zone(),
             human: giant.human,
             body,
@@ -321,7 +317,7 @@ impl Rival {
 
 pub(super) struct GiantStrike {
     pub attacker: usize,
-    pub area: StompArea,
+    pub area: StrikeArea,
     pub damage: f32,
     pub height: f32,
     pub method: DefeatMethod,
@@ -330,8 +326,6 @@ pub(super) struct GiantStrike {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum DefeatMethod {
     Step,
-    Stomp,
-    ContactStomp,
     Bump,
     Punch,
     GrabCrush,
@@ -340,15 +334,9 @@ pub(super) enum DefeatMethod {
 }
 
 impl DefeatMethod {
-    pub(super) fn allows_target_height(self, attacker: f32, target: f32) -> bool {
-        !matches!(self, Self::Step) || attacker >= target
-    }
-
     fn key(self) -> &'static str {
         match self {
             Self::Step => "step",
-            Self::Stomp => "stomp",
-            Self::ContactStomp => "contact_stomp",
             Self::Bump => "bump",
             Self::Punch => "punch",
             Self::GrabCrush => "grab_crush",
@@ -368,27 +356,6 @@ fn separation(from: Vector3, to: Vector3) -> f32 {
     let path = to - from;
     let t = (-from.dot(path) / path.length_squared().max(1e-10)).clamp(0.0, 1.0);
     (from + t * path).length()
-}
-
-fn swept_capsules_touch(
-    from: Vector3,
-    to: Vector3,
-    axis_min: f32,
-    axis_max: f32,
-    clearance: f32,
-) -> bool {
-    let flat_motion = horizontal(to - from);
-    let t = (-horizontal(from).dot(flat_motion) / flat_motion.length_squared().max(1e-10))
-        .clamp(0.0, 1.0);
-    let nearest = from.lerp(to, t);
-    if (axis_min..=axis_max).contains(&nearest.y) {
-        horizontal(nearest).length_squared() <= clearance.powi(2)
-    } else {
-        [axis_min, axis_max].into_iter().any(|height| {
-            let end = Vector3::UP * height;
-            separation(from - end, to - end) <= clearance
-        })
-    }
 }
 
 fn overlaps_height(a_floor: f32, a_height: f32, b_floor: f32, b_height: f32) -> bool {
@@ -573,8 +540,15 @@ impl HarborRound {
                 "chase",
                 giant.chase_target.map_or(0, InstanceId::to_i64),
             );
-            entry.set("stomp", matches!(giant.stomp, Stomp::Ready));
-            entry.set("stomp_phase", giant.stomp_phase());
+            entry.set("footfall_count", giant.footfall_count);
+            entry.set("footfall_pending", giant.footfall.is_some());
+            if let Some(step) = &giant.footfall {
+                step.sole.set_debug(&mut entry, false);
+                entry.set("footfall_eta", step.eta);
+            }
+            if let Some(sole) = &giant.last_footfall {
+                sole.set_debug(&mut entry, true);
+            }
             entry.set("sit", giant.sit.map_or("", |action| action.phase_key()));
             entry.set("sit_idle", giant.sit.is_some_and(|action| action.idle));
             entry.set("pinned", giant.pinned_by.is_some());
@@ -840,12 +814,12 @@ impl HarborRound {
             .filter(|giant| giant.health_fraction > 0.0)
             .map(|giant| {
                 let capsule = radius + GIANT_RADIUS * giant.scale + 2.0;
-                let stomp =
-                    radius + stomp_center_range(giant.scale) + FOOT_RADII.y * giant.scale + 4.0;
+                let footfall =
+                    radius + footfall_reach(giant.scale) + 4.0;
                 (
                     giant.body.get_global_position(),
                     capsule.max(12.0).powi(2),
-                    stomp.max(12.0).powi(2),
+                    footfall.max(12.0).powi(2),
                 )
             })
             .collect();
@@ -860,10 +834,10 @@ impl HarborRound {
             )
             .map(|body| body.get_global_position())
             .collect();
-        move |point, outside_stomp_range| {
+        move |point, outside_footfall_range| {
             point.x.abs().max(point.z.abs()) + clearance < self.world_limit
-                && occupied.iter().all(|&(at, capsule, stomp)| {
-                    let min_distance_sq = if outside_stomp_range { stomp } else { capsule };
+                && occupied.iter().all(|&(at, capsule, footfall)| {
+                    let min_distance_sq = if outside_footfall_range { footfall } else { capsule };
                     horizontal(at - point).length_squared() >= min_distance_sq
                 })
                 && humans
@@ -898,8 +872,8 @@ impl HarborRound {
             .iter()
             .copied()
             .chain(self.open_ground_points(12.0));
-        for outside_stomp_range in [true, false] {
-            let safe = |point| away_from_former(point) && clear(point, outside_stomp_range);
+        for outside_footfall_range in [true, false] {
+            let safe = |point| away_from_former(point) && clear(point, outside_footfall_range);
             let Some((farthest, distance_sq)) =
                 most_separated_spawn(candidates.clone(), &living, safe)
             else {
@@ -971,18 +945,18 @@ impl HarborRound {
             return self.growth_spawn_position(scale, Some(former));
         }
         let clear = self.giant_spawn_safety(scale);
-        let safe = |point: Vector3, outside_stomp_range| {
+        let safe = |point: Vector3, outside_footfall_range| {
             horizontal(former - point).length_squared() >= 16.0_f32.powi(2)
-                && clear(point, outside_stomp_range)
+                && clear(point, outside_footfall_range)
         };
         let largest = self.largest_giant_positions();
         let roll = godot::global::randf();
-        let draw = |outside_stomp_range| {
+        let draw = |outside_footfall_range| {
             choose_respawn(
                 self.spawn_points
                     .iter()
                     .copied()
-                    .filter(|&point| safe(point, outside_stomp_range)),
+                    .filter(|&point| safe(point, outside_footfall_range)),
                 &largest,
                 roll,
             )
@@ -1032,8 +1006,8 @@ impl HarborRound {
             // Search the spaces between the usual candidates before relaxing search clearance.
             .or_else(|| draw_weighted_spawn(fine().filter(safe), weight, roll))
             .or_else(|| {
-                [true, false].into_iter().find_map(|outside_stomp_range| {
-                    let clear = |&point: &Vector3| clear(point, outside_stomp_range);
+                [true, false].into_iter().find_map(|outside_footfall_range| {
+                    let clear = |&point: &Vector3| clear(point, outside_footfall_range);
                     draw_weighted_spawn(candidates.clone().filter(clear), weight, roll)
                         .or_else(|| draw_weighted_spawn(fine().filter(clear), weight, roll))
                 })
@@ -1182,7 +1156,7 @@ impl HarborRound {
     }
 
     /// Giant-stage actors and combat hotspots that grade map coins, snapshotted
-    /// once per grading pass. Human-stage actors cannot stomp and never grade.
+    /// once per grading pass. Human-stage actors cannot attack with a footfall and never grade.
     pub(super) fn coin_threats(&self) -> (Vec<CoinThreat>, Vec<(Vector3, f32)>) {
         let threats: Vec<CoinThreat> = self
             .giants
@@ -1193,8 +1167,7 @@ impl HarborRound {
                 let at = giant.body.get_global_position();
                 CoinThreat {
                     at,
-                    stomp_reach: stomp_center_range(giant.scale)
-                        + FOOT_RADII.y * giant.scale
+                    footfall_reach: footfall_reach(giant.scale)
                         + GIANT_RADIUS * giant.scale
                         + (6.0 + height * 0.05),
                     zone: (sight_range(giant.scale) * 1.4).max(height * 2.2),
@@ -1251,7 +1224,7 @@ impl HarborRound {
         entries
     }
 
-    /// Records a combat hotspot (stomp windup/impact, demolition, kill) that
+    /// Records a combat hotspot (footfalls, demolition, kill) that
     /// grades nearby coins up and keeps foragers away for ~12–15 s.
     pub(super) fn note_hotspot(&mut self, at: Vector3, radius: f32) {
         const MAX_HOTSPOTS: usize = 24;
@@ -1683,12 +1656,8 @@ impl HarborRound {
         actor.sit = None;
         actor.pinned_by = None;
         actor.pin_tick = 0.0;
-        actor.stomp = Stomp::Ready;
+        actor.footfall = None;
         actor.respawn_in = self.settings.growth.respawn_delay;
-        self.effects
-            .as_mut()
-            .unwrap()
-            .call("cancel_warning", &[actor.index.to_variant()]);
         self.effects
             .as_mut()
             .unwrap()
@@ -1704,20 +1673,19 @@ impl HarborRound {
             let (attacker, later) = combatants.split_first_mut().unwrap();
             for rival in earlier.iter_mut().chain(later) {
                 let target_height = rival.height(self.max_height);
-                if rival.health_fraction == 0.0
-                    || rival.grabbed
-                    || !strike.method.allows_target_height(strike.height, target_height)
-                {
+                if rival.health_fraction == 0.0 || rival.grabbed {
                     continue;
                 }
                 let point = rival.body.get_global_position();
                 let tolerance = (0.04 * strike.height).clamp(0.003, 0.25);
+                let center = strike.area.center();
+                let vertical_reach = if strike.method == DefeatMethod::Step { 0.0 } else { strike.height };
                 if strike.area.reaches(point, self.actor_radius(rival))
                     && overlaps_height(
                         point.y,
                         target_height,
-                        strike.area.center.y - tolerance,
-                        strike.height + tolerance,
+                        center.y - tolerance,
+                        vertical_reach + tolerance * 2.0,
                     )
                 {
                     self.damage_rival(attacker, rival, strike.damage, strike.method);
@@ -1886,67 +1854,35 @@ impl HarborRound {
         }
     }
 
-    pub(super) fn apply_giant_contact_stomps(
+    pub(super) fn apply_human_bumps(
         &mut self,
         giants: &mut [Giant],
         frames: &[PairFrame],
-        dt: f32,
     ) {
         let Some(rules) = self.growth_rules else {
             return;
         };
-        let max_travel = (GIANT_WALK + AI_WALK) * self.settings.giant_speed * dt;
         for index in 0..giants.len() {
             let (giant, others) = giants[index..].split_first_mut().unwrap();
             for (offset, other) in others.iter_mut().enumerate() {
                 let other_index = index + 1 + offset;
                 let pair = (index, other_index);
-                let tracked = self.trample_contacts.contains(&pair);
-                let mut method = DefeatMethod::ContactStomp;
-                let eligible = giant.health_fraction > 0.0
-                    && other.health_fraction > 0.0
-                    && giant.scale != other.scale
-                    && !giant.grabbed
-                    && !other.grabbed
-                    && match (giant.human, other.human) {
-                        (true, true) => {
-                            let tall = giant
-                                .height(self.max_height)
-                                .max(other.height(self.max_height));
-                            let short = giant
-                                .height(self.max_height)
-                                .min(other.height(self.max_height));
-                            method = DefeatMethod::Bump;
-                            // Only a human at least twice as tall bumps the smaller one.
-                            tall + 0.0001 >= short * 2.0
-                        }
-                        (false, false) => {
-                            ignores_rival(giant.scale, other.scale, self.settings.rival_ignore_ratio)
-                        }
-                        // A giant's attacks on a human are stomps and grabs, not body checks.
-                        _ => false,
-                    };
-                if !eligible {
-                    self.trample_contacts.remove(&pair);
-                    continue;
-                }
+                let tracked = self.bump_contacts.contains(&pair);
                 let a = frames[index];
                 let b = frames[other_index];
-                let passing = self.giant_collision_passes.contains(&pair);
-                // Most pairs cannot touch during this frame. Reject them with cached data
-                // before issuing any Godot calls or reading slide collisions.
-                if !tracked {
-                    let reach = a.radius + b.radius + a.safe_margin + b.safe_margin;
-                    let close = if passing {
-                        let motion = a.travel + b.travel;
-                        horizontal(a.start - b.start).length() <= reach + motion
-                            || horizontal(a.end - b.end).length() <= reach + motion
-                    } else {
-                        horizontal(a.end - b.end).length() <= reach + max_travel
-                    };
-                    if !close {
-                        continue;
-                    }
+                let eligible = giant.human && other.human
+                    && giant.health_fraction > 0.0 && other.health_fraction > 0.0
+                    && !giant.grabbed && !other.grabbed
+                    && a.height.max(b.height) + 0.0001 >= a.height.min(b.height) * 2.0;
+                if !eligible {
+                    self.bump_contacts.remove(&pair);
+                    continue;
+                }
+                let max_travel = a.travel + b.travel;
+                if !tracked && horizontal(a.end - b.end).length()
+                    > a.radius + b.radius + a.safe_margin + b.safe_margin + max_travel
+                {
+                    continue;
                 }
                 let offset = a.end - b.end;
                 let a_radius = a.radius;
@@ -1957,34 +1893,24 @@ impl HarborRound {
                 let axis_max = b.height - a_radius - b_radius;
                 let gap = offset.y - offset.y.clamp(axis_min, axis_max);
                 let distance_sq = horizontal(offset).length_squared() + gap.powi(2);
-                let collided = if passing {
-                    swept_capsules_touch(
-                        a.start - b.start,
-                        offset,
-                        axis_min,
-                        axis_max,
-                        clearance,
-                    )
-                } else {
-                    // A slide can still report the old collider position during the respawn frame.
-                    distance_sq <= (clearance + max_travel).powi(2)
-                        && (slid_into(&mut giant.body, other.body.instance_id())
-                            || slid_into(&mut other.body, giant.body.instance_id()))
-                };
+                // A slide can still report the old collider position during the respawn frame.
+                let collided = distance_sq <= (clearance + max_travel).powi(2)
+                    && (slid_into(&mut giant.body, other.body.instance_id())
+                        || slid_into(&mut other.body, giant.body.instance_id()));
                 if tracked {
                     // Sliding may omit touching bodies on a frame with no movement into them.
                     if !collided && distance_sq > clearance.powi(2) {
-                        self.trample_contacts.remove(&pair);
+                        self.bump_contacts.remove(&pair);
                     }
                 } else if collided {
-                    self.trample_contacts.insert(pair);
+                    self.bump_contacts.insert(pair);
                     let (larger, smaller) = if giant.scale > other.scale {
                         (&mut *giant, other)
                     } else {
                         (other, &mut *giant)
                     };
                     let damage = self.growth_stat(larger, rules.base_attack);
-                    self.damage_rival(larger, smaller, damage, method);
+                    self.damage_rival(larger, smaller, damage, DefeatMethod::Bump);
                 }
             }
         }
@@ -1998,7 +1924,7 @@ impl HarborRound {
         let personality = actor.personality;
         let mut threats = Vec::new();
         // Other humans only hurt this actor when they are at least twice as tall; any giant is
-        // dangerous because it can stomp or pick the human up.
+        // dangerous because it can step on or pick the human up.
         threats.extend(self.rivals.iter().filter(|rival| rival.index != actor.index).filter_map(
             |rival| {
                 let rival_height = rival.scale * GIANT_START_HEIGHT;
@@ -2008,20 +1934,20 @@ impl HarborRound {
                     }
                     HUMAN_RADIUS * rival_height / HUMAN_HEIGHT
                 } else {
-                    stomp_center_range(rival.scale) + FOOT_RADII.y * rival.scale
+                    footfall_reach(rival.scale)
                 };
                 Some((rival.position, rival.velocity, reach, 0.6))
             },
         ));
-        // Telegraphed stomps and sit-crush drop zones are threats even before the
+        // Projected landings and sit-crush drop zones are threats even before the
         // striking giant's body reach arrives; memory danger zones linger for
         // 12–15 s after the fight moved on.
         for rival in &self.rivals {
             if rival.index == actor.index {
                 continue;
             }
-            if let Some((center, radii)) = rival.windup {
-                threats.push((center, Vector3::ZERO, radii.x.max(radii.y) + radius + 1.0, 1.2));
+            if let Some(step) = &rival.footfall {
+                threats.push((step.sole.center, Vector3::ZERO, step.sole.bounds() + radius, 1.2));
             }
             if let Some((center, sit_radius)) = rival.sit_drop {
                 threats.push((center, Vector3::ZERO, sit_radius + radius + 1.0, 1.0));
@@ -2302,16 +2228,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn swept_capsules_hit_during_a_crossing_and_respect_height() {
-        let from = Vector3::new(-10.0, 0.0, 0.0);
-        let to = Vector3::new(10.0, 0.0, 0.0);
-        let touches = |from, to| swept_capsules_touch(from, to, -6.0, 3.0, 2.0);
-        assert!(touches(from, to));
-        assert!(!touches(from + Vector3::UP * 6.0, to + Vector3::UP * 6.0));
-        assert!(touches(from + Vector3::UP * 8.0, to - Vector3::UP * 8.0));
-    }
-
-    #[test]
     fn spread_spawn_maximizes_distance_to_the_nearest_giant() {
         let occupied = [Vector3::ZERO, Vector3::new(100.0, 0.0, 0.0)];
         let close_to_second = Vector3::new(95.0, 0.0, 0.0);
@@ -2448,7 +2364,7 @@ mod tests {
     fn coins_grade_by_giant_feet_activity_zones_and_hotspots() {
         let threats = [CoinThreat {
             at: Vector3::ZERO,
-            stomp_reach: 25.0,
+            footfall_reach: 25.0,
             zone: 120.0,
         }];
         // At the giant's feet: Extreme.

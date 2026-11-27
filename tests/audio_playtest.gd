@@ -1,4 +1,6 @@
 extends SceneTree
+
+const FootfallFixture = preload("res://tests/footfall_fixture.gd")
 ## Verifies the HarborAudio bus layout, loaded sound assets, persistent volume/mute
 ## settings, mobile font glyphs, and live playback triggers across Harbor modes and Bedroom.
 
@@ -216,64 +218,38 @@ func _check_giant_and_destruction_sfx(game: Node, audio: Node) -> void:
 	_check(int(audio.call("count_played", &"view_toggle")) >= 1, "toggling camera view plays view_toggle")
 	current.call("toggle_view")
 
-	# Walk triggers giant_step and camera_shake
-	Input.action_press("move_forward")
-	await _ticks(75)
-	Input.action_release("move_forward")
-	await _ticks(35)
-	_check(int(audio.call("count_played", &"giant_step")) >= 1, "giant walking triggers spatial giant_step")
-	_check(int(audio.call("count_played", &"camera_shake")) >= 1,
-			"giant walking with shake enabled triggers deep seismic camera_shake")
-
-	# Stomp near a building triggers stomp_warn, giant_stomp, camera_shake, building_crack, and building_collapse
-	var target: Node3D = current.get_node("District/Targets/DockPress1")
-	giant.position = target.position + Vector3.BACK * (target.footprint.z * 0.5 + 7.05)
-	giant.rotation = Vector3.ZERO
+	giant.position = Vector3(0.0, 0.02, 86.0)
 	await _ticks(4)
+	var clean_step := await FootfallFixture.land(current)
+	var clean_audio := int(audio.call("count_played", &"giant_footfall"))
+	_check(not clean_step.is_empty() and clean_audio == 1, "A landed giant foot plays one spatial low-frequency footfall")
+	_check(int(audio.call("count_played", &"camera_shake")) >= 1,
+			"A landed foot triggers deep seismic camera shake")
+
+	var target: Node3D = current.get_node("District/Targets/DockPress1")
 	audio.call("reset_telemetry")
 	for strike in 2:
-		current.call("tap_stomp")
-		for _f in 120:
-			await physics_frame
-			if current.snapshot().stomp == "ready":
-				break
-		await _ticks(4)
-	_check(int(audio.call("count_played", &"stomp_warn")) >= 1
-			and int(audio.call("count_played", &"giant_stomp")) >= 2,
-			"stomping plays stomp_warn telegraph and giant_stomp impacts")
-	_check(int(audio.call("count_played", &"camera_shake")) >= 2,
-			"stomping triggers seismic camera_shake synced to screen tremor")
+		await FootfallFixture.strike_building(current, target)
+	_check(int(audio.call("count_played", &"giant_footfall")) >= 2
+			and int(audio.call("count_played", &"camera_shake")) >= 2,
+			"Building strikes use the same footfall and shake audio as open ground")
 	_check(int(audio.call("count_played", &"building_crack")) >= 1
 			and int(audio.call("count_played", &"building_collapse")) >= 1,
 			"damaging and demolishing a building plays building_crack and building_collapse")
 
-	# Setting shake_strength = 0 disables camera_shake audio cleanly
-	opts.merge({"shake_strength": 0.0}, true)
-	game.call("save_settings", game.call("get_settings", false), opts)
-	await _ticks(4)
-	audio.call("reset_telemetry")
-	current.call("tap_stomp")
-	for _f in 120:
-		await physics_frame
-		if current.snapshot().stomp == "ready":
-			break
-	await _ticks(4)
-	_check(int(audio.call("count_played", &"camera_shake")) == 0,
-			"setting shake_strength to 0 silences camera_shake")
-
-	# Disabling own_camera_shake prevents self-stomps from firing camera_shake
-	opts.merge({"shake_strength": 1.0, "own_camera_shake": false}, true)
-	game.call("save_settings", game.call("get_settings", false), opts)
-	await _ticks(4)
-	audio.call("reset_telemetry")
-	current.call("tap_stomp")
-	for _f in 120:
-		await physics_frame
-		if current.snapshot().stomp == "ready":
-			break
-	await _ticks(4)
-	_check(int(audio.call("count_played", &"camera_shake")) == 0,
-			"disabling own_camera_shake silences self-caused camera_shake")
+	# The settings affect screen shake audio without muting the physical footfall.
+	for shake in [{"shake_strength": 0.0, "own_camera_shake": true},
+			{"shake_strength": 1.0, "own_camera_shake": false}]:
+		opts.merge(shake, true)
+		game.call("save_settings", game.call("get_settings", false), opts)
+		giant.position = Vector3(0.0, 0.02, 86.0)
+		FootfallFixture.face(current, giant, 0.0)
+		await _ticks(6)
+		audio.call("reset_telemetry")
+		var landed := await FootfallFixture.land(current)
+		_check(not landed.is_empty() and int(audio.call("count_played", &"giant_footfall")) == 1
+				and int(audio.call("count_played", &"camera_shake")) == 0,
+				"Disabled screen shake leaves the low-frequency footfall audible")
 	opts.merge({"own_camera_shake": true}, true)
 	game.call("save_settings", game.call("get_settings", false), opts)
 

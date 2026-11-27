@@ -87,7 +87,7 @@ func _check_touch_navigation() -> void:
 	_finger(controls, 0, ranking.get_center(), true)
 	_finger(controls, 0, ranking.get_center(), false)
 	var leaderboard := interface.find_child("TouchRanking", true, false) as Control
-	_expect(menu.get_screen() == "playing" and controls.can_stomp and leaderboard.visible,
+	_expect(menu.get_screen() == "playing" and controls.get("_allow_giant") and not controls.get("_allow_sprint") and leaderboard.visible,
 			"A touch opens Brawl with giant actions and the mobile leaderboard")
 	menu.notification(Node.NOTIFICATION_WM_GO_BACK_REQUEST)
 	_expect(not leaderboard.visible and controls.visible, "Android Back closes the Brawl leaderboard")

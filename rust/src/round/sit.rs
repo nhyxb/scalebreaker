@@ -53,17 +53,6 @@ pub(super) struct SitAction {
     pub(super) timed: bool,
 }
 
-/// Whether the AI may fall into a crowd sit-crush while its stomp is in this phase.
-///
-/// The group check runs before `pursue()`, so a qualifying crowd always outranks a
-/// single-target stomp/grab. Only an already-telegraphed stomp keeps the body: the windup
-/// is on screen and the recovery owns the planted foot. The cooldown is just a number, and
-/// since it takes ~0.72 s of every ~1.7 s cycle, treating it as busy hid the crowd from the
-/// AI for most of a normal chase.
-pub(super) fn stomp_allows_sit(stomp: Stomp) -> bool {
-    !matches!(stomp, Stomp::Windup { .. } | Stomp::Recover { .. })
-}
-
 /// Seated seconds for a body of `scale` (1.0 = the 25.2 m reference giant).
 /// Bigger bodies sit longer; the configured base is also the floor.
 pub(super) fn crush_hold_seconds(base: f32, per_scale: f32, scale: f32) -> f32 {
@@ -175,7 +164,7 @@ impl HarborRound {
 
         // The player only has to be a giant: press X and sit, crowd or not.
         if player {
-            if requested && matches!(actor.stomp, Stomp::Ready) {
+            if requested {
                 let hold =
                     crush_hold_seconds(settings.hold_base, settings.hold_per_scale, actor.scale);
                 let (count, centroid) = self.seat_targets(actor, None);
@@ -188,10 +177,9 @@ impl HarborRound {
         if actor.sit_in > 0.0 {
             return false;
         }
-        // The group trigger runs BEFORE the per-frame pursue() stomp/grab decisions, so a
-        // qualifying crowd wins over a single-target attack. Only animation-locked stomp
-        // phases (windup/recovery) block it; a counting-down cooldown does not.
-        if !stomp_allows_sit(actor.stomp) || !actor.body.is_on_floor() {
+        // A swing already in motion finishes before the next AI crowd decision.
+        // At the first planted frame the crowd check runs before pursuit.
+        if actor.footfall.is_some() || !actor.body.is_on_floor() {
             return false;
         }
 
@@ -242,19 +230,13 @@ impl HarborRound {
             hold: hold.max(MIN_HOLD),
             timed,
         });
-        actor.stomp = Stomp::Ready;
-        actor.pending_stomp_aim = None;
+        actor.footfall = None;
         actor.pending_hand = None;
-        actor.ai_holding_stomp = false;
         actor.standing_pivot_active = false;
         actor.was_walking = false;
         actor.yaw_velocity = 0.0;
         actor.roam_goal = None;
         actor.clear_path();
-        self.effects
-            .as_mut()
-            .unwrap()
-            .call("cancel_warning", &[actor.index.to_variant()]);
     }
 
     /// Advances one sit frame and drives the procedural visual. Returns false once the
@@ -371,12 +353,12 @@ impl HarborRound {
     }
 
     fn sit_impact(&mut self, actor: &mut Giant) {
-        let area = StompArea {
+        let area = ImpactArea {
             center: actor.sit_center(),
             yaw: actor.body.get_rotation().y,
             radii: Vector2::splat(actor.sit_radius()),
         };
-        // Reuses the stomp pipeline: sound, shake, building damage, civilians, evacuating
+        // Shares ground-strike damage for buildings, civilians, the evacuating
         // player and the `GiantStrike` hand-off that applies rival damage.
         self.impact(actor, area, DefeatMethod::SitCrush);
     }
@@ -387,7 +369,6 @@ impl HarborRound {
         !actor.human
             && actor.sit.is_none()
             && actor.hand_attack.is_none()
-            && matches!(actor.stomp, Stomp::Ready)
     }
 
     /// Living bodies inside the front trigger zone plus their centroid. `max_height == None`
@@ -520,36 +501,6 @@ mod tests {
 
     fn action(phase: SitPhase) -> SitAction {
         SitAction { phase, idle: false, struck: false, hold: 1.2, timed: true }
-    }
-
-    #[test]
-    fn a_crowd_sit_pre_empts_the_stomp_cooldown_but_never_a_telegraphed_stomp() {
-        let area = StompArea {
-            center: Vector3::ZERO,
-            yaw: 0.0,
-            radii: Vector2::splat(1.0),
-        };
-        assert!(stomp_allows_sit(Stomp::Ready));
-        // The cooldown is 0.72 s of every ~1.7 s cycle. Blocking it hid a qualifying
-        // crowd from a chasing AI for most of the fight.
-        assert!(
-            stomp_allows_sit(Stomp::Cooldown(COOLDOWN)),
-            "a counting-down stomp cooldown must not hide a crowd"
-        );
-        assert!(
-            !stomp_allows_sit(Stomp::Windup {
-                area,
-                elapsed: 0.0
-            }),
-            "a stomp already warned on screen keeps the body"
-        );
-        assert!(
-            !stomp_allows_sit(Stomp::Recover {
-                area,
-                left: RECOVERY
-            }),
-            "the planted foot keeps the body until recovery ends"
-        );
     }
 
     #[test]
