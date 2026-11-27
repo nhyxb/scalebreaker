@@ -77,11 +77,11 @@ const STAND_STEP_BASE_DUR := 0.42       # Base duration per standing pivot step 
 const STAND_TRANSFER_FRAC := 0.22       # Double-support weight transfer before lifting swing foot
 const HEEL_ROLL_SECONDS := 0.13         # Heel-strike to flat sole roll duration
 const HEEL_STRIKE_PITCH := -0.25        # Clear anatomical heel-first dorsiflexion (~-14.3 deg)
-const WALK_SHARP_ENTER := 0.40          # Metric above which walking curve transitions into sharp turn
-const WALK_SHARP_FULL := 1.50           # Metric at which sharp turn reaches full stride adaptation
+const WALK_SHARP_ENTER := 0.30          # Metric above which walking curve transitions into sharp turn
+const WALK_SHARP_FULL := 0.88           # Metric at which sharp car-like turn reaches full stride adaptation
 const SWING_TARGET_LOCK := 0.46
 const STANCE_PELVIS_TWIST_MAX := 0.52   # ~30 deg anatomical pelvis twist limit over planted support foot
-const PIVOT_STEP_MAX_YAW := 1.25        # ~72 deg max swing redirect per full pivot step
+const PIVOT_STEP_MAX_YAW := 0.72        # ~41 deg max curved-arc turn per step (car-like steering limit)
 
 # Bounds and silhouettes measured from the lower shoe vertices of each imported skin.
 # Offsets and half extents are in the unscaled driver model's units; X is world right
@@ -363,6 +363,7 @@ var _stand_step_dur := STAND_STEP_BASE_DUR
 var _stand_step_count := 0
 var _stand_step_pelvis_start := 0.0
 var _stand_step_pelvis_goal := 0.0
+var _allow_sit_turn_in_place := false
 var _stand_support_yaw_start := 0.0
 var _stand_support_yaw_goal := 0.0
 var _stand_land_dip := 0.0
@@ -1070,8 +1071,10 @@ func finish_sit_crush(immediate := false) -> void:
 
 
 func step_turn_in_place(target_yaw: float, delta: float) -> Dictionary:
-	# Reuses the live standing ship-like pivot animation verbatim via show_motion().
+	# Reuses the sit-crush pre-turn pivot animation solely when turning back-to-crowd before sitting.
+	_allow_sit_turn_in_place = true
 	show_motion(0.0, -1.0, delta, target_yaw, true)
+	_allow_sit_turn_in_place = false
 	var yaw_err := absf(angle_difference(global_rotation.y, target_yaw))
 	var feet_mean := _mean_angle(_foot_l.world_yaw, _foot_r.world_yaw)
 	var feet_err := absf(angle_difference(feet_mean, target_yaw))
@@ -1446,6 +1449,34 @@ func _begin_stop_settle(with_carry: bool) -> void:
 		_stop_trail_target_world = _stop_trail_start_world
 		_stop_trail_target_yaw = _stop_trail_start_yaw
 
+	var S := _model.scale.z
+	var lead_ft := _foot_l if _stop_lead_is_left else _foot_r
+	var trail_ft := _foot_r if _stop_lead_is_left else _foot_l
+	lead_ft.planted = true
+	lead_ft.pivot_mode = PIVOT_HEEL
+	lead_ft.world_yaw = _stop_lead_yaw
+	lead_ft.foot_pitch = 0.0
+	lead_ft.toe_bend = 0.0
+	lead_ft.heel_settle_t = 1.0
+	lead_ft.pivot_world = _stop_lead_world - Vector3.UP * (ANKLE_GROUND_Y * S) + _yaw_forward(_stop_lead_yaw) * (HEEL_Z_FROM_ANKLE * S)
+	lead_ft.pivot_world.y = global_position.y
+	if _stop_trail_is_stepping():
+		trail_ft.planted = false
+		trail_ft.swing_t = 0.0
+		trail_ft.swing_start_world = _stop_trail_start_world
+		trail_ft.swing_target_world = _stop_trail_target_world
+		trail_ft.swing_start_yaw = _stop_trail_start_yaw
+		trail_ft.swing_target_yaw = _stop_trail_target_yaw
+	else:
+		trail_ft.planted = true
+		trail_ft.pivot_mode = PIVOT_HEEL
+		trail_ft.world_yaw = _stop_trail_start_yaw
+		trail_ft.foot_pitch = 0.0
+		trail_ft.toe_bend = 0.0
+		trail_ft.heel_settle_t = 1.0
+		trail_ft.pivot_world = _stop_trail_start_world - Vector3.UP * (ANKLE_GROUND_Y * S) + _yaw_forward(_stop_trail_start_yaw) * (HEEL_Z_FROM_ANKLE * S)
+		trail_ft.pivot_world.y = global_position.y
+
 	var time_scale := _stop_time_scale()
 	var base_dur := STANCE_SETTLE_SECONDS * time_scale
 	var step_mult := BACKWARD_STEP_RATIO if _walk_backward else 1.0
@@ -1514,7 +1545,6 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		_walk_backward = false
 
 	var speed_size_mult := 1.0 if fixed_walk_tempo else _size_speed_factor(scale_ratio)
-	var ref_walk_speed := WALK_REF_SPEED * pace * speed_size_mult
 	var pre_turn_err := absf(angle_difference(model_world_yaw, turn_target)) if not is_nan(turn_target) else 0.0
 	var actual_axial_spd := (axial_disp / dt) if dt > 0.0 else speed
 	if not fixed_walk_tempo and scale_ratio < 0.12 and speed > 0.0 and speed < 0.15 and pre_turn_err < 0.35 and not obstructed:
@@ -1523,14 +1553,14 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		_axial_travel_speed = lerpf(_axial_travel_speed, actual_axial_spd, minf(dt * 16.0, 1.0))
 	else:
 		_axial_travel_speed = actual_axial_spd
-	var pre_turn_metric := maxf(absf(raw_body_yaw_vel), pre_turn_err * 0.90)
-	var pre_turn_sharp := smoothstep(WALK_SHARP_ENTER, WALK_SHARP_FULL, pre_turn_metric)
-	var low_speed_turn := not fixed_walk_tempo and not _walk_backward and not _walk_was_moving \
-			and (pre_turn_sharp > 0.30 or pre_turn_err > 0.45) \
-			and minf(speed, _axial_travel_speed * 1.15) < ref_walk_speed * 0.38 \
-			and _walk_travel_accum < 0.12 * _model.scale.z
 
-	if speed > 0.12 * minf(body_ratio, 1.0) and _blocked_weight < 0.65 and not low_speed_turn:
+	# Strictly bind the walking gait cycle to actual horizontal ground displacement.
+	# Zero stationary stepping / in-place foot shuffling when translation is zero or wall-blocked.
+	var min_walk_spd := 0.25 * minf(body_ratio, 1.0)
+	var real_horiz_spd := speed if (fixed_walk_tempo or (scale_ratio < 0.12 and not obstructed)) else maxf(actual_horiz_spd, _horiz_travel_speed * 0.65)
+	var has_real_travel := speed > min_walk_spd and real_horiz_spd > min_walk_spd * 0.70 and _blocked_weight < 0.55
+
+	if has_real_travel:
 		_walk_travel_accum += axial_disp
 		var was_standing_turn := _stand_turning or _stand_step_active
 		if _stop_phase != STOP_NONE:
@@ -1572,8 +1602,8 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		else:
 			_turn_mode = "walk_straight"
 
-		var target_stride_mult := lerpf(1.0, 0.58, _turn_sharpness)
-		var target_cadence_mult := lerpf(1.0, 1.38, _turn_sharpness)
+		var target_stride_mult := lerpf(1.0, 0.64, _turn_sharpness)
+		var target_cadence_mult := lerpf(1.0, 1.32, _turn_sharpness)
 		_turn_stride_mult = lerpf(_turn_stride_mult, target_stride_mult, minf(dt * 7.0, 1.0)) if dt > 0.0 else target_stride_mult
 		_turn_cadence_mult = lerpf(_turn_cadence_mult, target_cadence_mult, minf(dt * 7.0, 1.0)) if dt > 0.0 else target_cadence_mult
 
@@ -1586,17 +1616,17 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 			_step_scale = target_step_scale
 
 		var back_speed_mult := 0.74 if _walk_backward else 1.0
-		# Keep step tempo faithful to ground speed when aligned, enforce normal heavy-step tempo
-		# during unobstructed off-heading pivot turns (no stall, no rapid small-step overdrive),
-		# and throttle cadence from actual axial travel if wall-blocked.
-		var turning_pivot_step := not fixed_walk_tempo and not _walk_backward and not obstructed and active_input and pre_turn_err > 0.40
-		var unobstructed_axial := speed if (_blocked_weight < 0.15 and not obstructed and pre_turn_err <= 0.40) else minf(speed, actual_axial_spd)
-		var axial_cycle_spd := clampf(maxf(actual_axial_spd, ref_walk_speed * 0.85), 0.0, ref_walk_speed) if turning_pivot_step else unobstructed_axial
-		var cycle_speed := WALK_REF_SPEED * pace if fixed_walk_tempo else axial_cycle_spd
+		var cycle_speed: float
+		if fixed_walk_tempo:
+			cycle_speed = WALK_REF_SPEED * pace
+		elif scale_ratio < 0.12 and not obstructed:
+			cycle_speed = speed
+		else:
+			cycle_speed = minf(speed, real_horiz_spd)
 		var reference_speed := cycle_speed if fixed_walk_tempo else WALK_REF_SPEED * 0.80 * back_speed_mult * clampf(pace, 0.1, 1.0)
 		if (size_scaled_walk or fixed_walk_tempo) and not fixed_walk_tempo:
 			reference_speed *= speed_size_mult
-		var target := clampf(speed / maxf(reference_speed, 0.0001), 0.0, 1.0)
+		var target := clampf(cycle_speed / maxf(reference_speed, 0.0001), 0.0, 1.0)
 		_stride = move_toward(_stride, target, dt * (5.2 if target > _stride else 4.2))
 		_foot_stride = move_toward(_foot_stride, target, dt * 5.2)
 		_move_drive = move_toward(_move_drive, target, dt * 5.5)
@@ -1604,12 +1634,12 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		var stride_scale := _model_base_scale if fixed_walk_tempo else _step_scale * _model.scale.z
 		var step_len_mult := BACKWARD_STEP_RATIO if _walk_backward else 1.0
 		var base_stride_length := maxf(2.0 * HALF_STEP * step_len_mult * stride_scale / CONTACT_FRACTION, 0.0001)
-		var eff_stride_length := base_stride_length * maxf(_turn_stride_mult, 0.90)
-		var base_walk_rate := ref_walk_speed / base_stride_length
+		var eff_stride_length := base_stride_length * maxf(_turn_stride_mult, 0.86)
+		var base_walk_rate := cycle_speed / maxf(eff_stride_length, 0.0001)
 		var straight_rate := cycle_speed / base_stride_length
-		# Keep step frequency bounded to normal heavy-step tempo with zero small-step overdrive.
-		var cycle_rate := (cycle_speed / maxf(eff_stride_length, 0.0001)) * clampf(1.0 - _blocked_weight * 0.90, 0.0, 1.0)
-		var turn_ceil_rate := maxf(base_walk_rate, straight_rate)
+		# Keep step frequency bounded directly by real horizontal speed with zero in-place spin overdrive.
+		var cycle_rate := base_walk_rate * clampf(1.0 - _blocked_weight * 0.90, 0.0, 1.0)
+		var turn_ceil_rate := straight_rate * 1.18
 		cycle_rate = clampf(cycle_rate, 0.0, turn_ceil_rate)
 
 		# Extrapolate actual translation (signed along travel direction) so backward walking
@@ -1669,11 +1699,12 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 	_walk_init_step = false
 	_actual_world_vel = Vector3.ZERO
 	_walk_travel_accum = 0.0
-	if _stop_phase == STOP_NONE and _foot_stride > 0.15 and on_floor and _blocked_weight < 0.55 and not low_speed_turn:
+	if _stop_phase == STOP_NONE and (_foot_stride > 0.15 or has_step_in_flight()) and on_floor:
+		var allow_carry := _stop_carry_enabled and _blocked_weight < 0.35
 		if has_step_in_flight():
-			_begin_stop_swing(_stop_carry_enabled)
+			_begin_stop_swing(allow_carry)
 		else:
-			_begin_stop_settle(_stop_carry_enabled)
+			_begin_stop_settle(allow_carry)
 	_walk_was_moving = false
 
 	if _stop_phase == STOP_SWING:
@@ -1708,6 +1739,16 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 				_stop_just_landed = "L"
 			swg_leg.last_pitch = swg_leg.ground_pitch
 			swg_leg.last_yaw = angle_difference(global_rotation.y, _stop_swing_target_yaw)
+			var swg_ft := _foot_r if _stop_support_is_left else _foot_l
+			var swg_S := _model.scale.z
+			swg_ft.planted = true
+			swg_ft.pivot_mode = PIVOT_HEEL
+			swg_ft.world_yaw = _stop_swing_target_yaw
+			swg_ft.foot_pitch = 0.0
+			swg_ft.toe_bend = 0.0
+			swg_ft.heel_settle_t = 1.0
+			swg_ft.pivot_world = _stop_swing_target_world - Vector3.UP * (ANKLE_GROUND_Y * swg_S) + _yaw_forward(_stop_swing_target_yaw) * (HEEL_Z_FROM_ANKLE * swg_S)
+			swg_ft.pivot_world.y = global_position.y
 			_cycle = fposmod(_stop_swing_landing, 1.0)
 			_begin_stop_settle(_stop_carry_enabled)
 		return
@@ -1728,15 +1769,31 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		_foot_stride = lerpf(_foot_stride, 0.0, smoothstep(0.0, 1.0, u))
 		_update_yaw_cascade(dt, tempo_scale)
 		_update_body_dynamics(dt, tempo_scale, false, 0.0)
+		var lead_ft := _foot_l if _stop_lead_is_left else _foot_r
+		var trail_ft := _foot_r if _stop_lead_is_left else _foot_l
+		lead_ft.pivot_world.y = global_position.y
+		if _stop_trail_is_stepping() and u < 0.92:
+			trail_ft.planted = false
+			trail_ft.swing_t = clampf(inverse_lerp(0.08, 0.92, u), 0.0, 1.0)
+			trail_ft.world_yaw = lerp_angle(_stop_trail_start_yaw, _stop_trail_target_yaw, smoothstep(0.08, 0.92, u))
 		if previous_u < 0.92 and u >= 0.92 and _stop_trail_is_stepping():
+			var tr_S := _model.scale.z
+			trail_ft.planted = true
+			trail_ft.pivot_mode = PIVOT_HEEL
+			trail_ft.world_yaw = _stop_trail_target_yaw
+			trail_ft.foot_pitch = 0.0
+			trail_ft.toe_bend = 0.0
+			trail_ft.heel_settle_t = 1.0
+			trail_ft.pivot_world = _stop_trail_target_world - Vector3.UP * (ANKLE_GROUND_Y * tr_S) + _yaw_forward(_stop_trail_target_yaw) * (HEEL_Z_FROM_ANKLE * tr_S)
+			trail_ft.pivot_world.y = global_position.y
 			_stop_just_landed = "R" if _stop_lead_is_left else "L"
 		if u >= 1.0:
+			trail_ft.planted = true
 			_foot_stride = 0.0
 			_stride = 0.0
 			_move_drive = 0.0
 			_cycle = 0.0
 			_clear_stop_state()
-			_sync_feet_to_current_ankles()
 		return
 
 	# Standing still: decay residual walk scalars cleanly.
@@ -1750,7 +1807,9 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		_foot_stride = 0.0
 		_cycle = 0.0
 
-	if allow_standing_turn and on_floor and not is_nan(turn_target) and _foot_stride <= 0.15:
+	# Strict locomotion rule: never play an alternating stationary stepping loop when horizontal
+	# travel is zero; only explicit sit-crush pre-turn (`step_turn_in_place`) uses in-place pivot steps.
+	if _allow_sit_turn_in_place and allow_standing_turn and on_floor and not is_nan(turn_target) and _foot_stride <= 0.15:
 		_turn_target_yaw = turn_target
 		_step_standing_turn_live(dt, tempo_scale)
 		if _stand_turning or _stand_step_active:
@@ -1770,20 +1829,6 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 			if Vector2(cur_l.x - rest_l.x, cur_l.z - rest_l.z).length() > drift_limit \
 					or Vector2(cur_r.x - rest_r.x, cur_r.z - rest_r.z).length() > drift_limit:
 				_sync_feet_to_rest()
-	elif on_floor and _stand_step_active and _foot_stride <= 0.15:
-		# Player released directional input mid-pivot: finish placing the airborne small step
-		# cleanly heel-first with zero slip, then settle without starting another step.
-		_turn_target_yaw = _stand_step_pelvis_goal
-		_step_standing_turn_live(dt, tempo_scale)
-		global_rotation = Vector3(0.0, _pelvis_world_yaw, 0.0)
-		_prev_body_yaw = _pelvis_world_yaw
-		_visual_yaw_offset = 0.0
-		_model.rotation.y = _model_base_yaw
-		if not _stand_step_active:
-			_stand_turning = false
-			_stand_dir = 0.0
-			_stand_anticipation = 0.0
-			_turn_mode = "idle"
 	else:
 		_cancel_standing_turn()
 		_pelvis_world_yaw = model_world_yaw
@@ -1798,19 +1843,20 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		var rest_r := _rest_ankle_world(_right, global_position, model_world_yaw, 0.0, 0.0)
 		var cur_l := _foot_ankle_world(_foot_l, _left)
 		var cur_r := _foot_ankle_world(_foot_r, _right)
-		var drift_limit := 0.38 * _model.scale.z
+		var drift_limit := 0.45 * _model.scale.z
+		var yaw_err_limit := 0.58
 		var l_yaw_err := absf(angle_difference(model_world_yaw + IDLE_FOOT_YAW, _foot_l.world_yaw))
 		var r_yaw_err := absf(angle_difference(model_world_yaw - IDLE_FOOT_YAW, _foot_r.world_yaw))
 		if not _foot_l.planted or not _foot_r.planted or not on_floor \
 				or Vector2(cur_l.x - rest_l.x, cur_l.z - rest_l.z).length() > drift_limit \
 				or Vector2(cur_r.x - rest_r.x, cur_r.z - rest_r.z).length() > drift_limit \
-				or l_yaw_err > 0.38 or r_yaw_err > 0.38:
+				or l_yaw_err > yaw_err_limit or r_yaw_err > yaw_err_limit:
 			_sync_feet_to_rest()
 
 	_update_yaw_cascade(dt, tempo_scale)
 	_update_body_dynamics(dt, tempo_scale, false, 0.0)
-	var head_ang_vel := _head_yaw_vel if absf(_head_yaw_vel) > absf(_pelvis_yaw_vel) else _pelvis_yaw_vel
 	if dt > 0.0 and (_stand_turning or _stand_step_active):
+		var head_ang_vel := _head_yaw_vel if absf(_head_yaw_vel) > absf(_pelvis_yaw_vel) else _pelvis_yaw_vel
 		_turn_rate = lerpf(_turn_rate, clampf(head_ang_vel, -4.5, 4.5), minf(dt * 8.0, 1.0))
 
 
@@ -2831,9 +2877,9 @@ func _update_body_dynamics(dt: float, tempo_scale: float, moving: bool, walk_spe
 	var clear_w := 1.0 - clampf(_blocked_weight * 1.10, 0.0, 1.0)
 	var target_lean := 0.0
 	if moving and not _walk_backward:
-		var rate_term := _effective_turn_rate * (0.044 + 0.026 * speed_norm)
-		var lead_term := clampf(yaw_err, -1.2, 1.2) * (0.022 + 0.012 * speed_norm)
-		target_lean = clampf(rate_term + lead_term, -0.15, 0.15) * clear_w
+		var rate_term := _effective_turn_rate * (0.056 + 0.032 * speed_norm)
+		var lead_term := clampf(yaw_err, -1.2, 1.2) * (0.032 + 0.014 * speed_norm)
+		target_lean = clampf(rate_term + lead_term, -0.16, 0.16) * clear_w
 	elif moving and _walk_backward:
 		target_lean = clampf(yaw_err * 0.015, -0.03, 0.03) * clear_w
 	elif _stand_turning or _stand_step_active:

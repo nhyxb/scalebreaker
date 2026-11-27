@@ -89,11 +89,6 @@ const PATH_PLANS_PER_FRAME: usize = 4;
 const ANIMATION_FULL_DISTANCE: f32 = 120.0;
 const ANIMATION_HALF_DISTANCE: f32 = 240.0;
 const PATH_TIME_BUDGET: f32 = 0.0025;
-
-/// From standstill, a requested move direction wider than this pivots in place with
-/// small steps first, then flows smoothly into walking once aligned within the exit angle.
-const STAND_PIVOT_ENTER_ANGLE: f32 = 0.96;
-const STAND_PIVOT_EXIT_ANGLE: f32 = 0.56;
 /// How far a giant looks for rivals and people. The 150 m baseline suits small giants; a
 /// giant hundreds of metres tall has to look about its own height away to spot a peer.
 fn sight_range(scale: f32) -> f32 {
@@ -1278,10 +1273,12 @@ impl INode3D for HarborRound {
         });
         let camera_forward = Vector3::FORWARD.rotated(Vector3::UP, self.yaw);
         let direction = Vector3::new(axes.x, 0.0, axes.y).rotated(Vector3::UP, self.yaw);
+        // Pure backpedal (S / rear stick cone) keeps facing forward; diagonal S+A/S+D
+        // turns forward along a curved arc like any other off-heading directional input.
         let backward_input = self.player == PlayerRole::Giant
             && direction.length_squared() > 0.0001
-            && axes.y > 0.20
-            && direction.normalized_or_zero().dot(camera_forward) < -0.20;
+            && axes.y > 0.25
+            && direction.normalized_or_zero().dot(camera_forward) < -0.84;
         if self.state.outcome == Outcome::Active {
             if self.player == PlayerRole::Spectator {
                 self.move_spectator(axes, dt);
@@ -1376,6 +1373,7 @@ impl INode3D for HarborRound {
                     dt,
                     actor.scale,
                     self.settings.giant_speed,
+                    actor.human,
                 );
                 if self.growth_rules.is_some() {
                     self.check_growth_contacts(actor, start, dt);
@@ -1552,6 +1550,7 @@ impl HarborRound {
                 dt,
                 actor.scale,
                 1.0,
+                actor.human,
             );
             return;
         }
@@ -1569,6 +1568,7 @@ impl HarborRound {
                 dt,
                 actor.scale,
                 1.0,
+                actor.human,
             );
             actor.animate(0.0, dt, 1, f32::NAN, false, false, false);
             actor.footfall = None;
@@ -1712,49 +1712,19 @@ impl HarborRound {
         if ai_hold_for_scenery.is_some() {
             giant_direction = Vector3::ZERO;
         }
+        let steer_idle_dir = steer_yaw.map(|yaw| Vector3::FORWARD.rotated(Vector3::UP, yaw));
         let turn_intent = if backpedal {
             camera_fwd
         } else {
-            ai_hold_for_scenery.or(steer_dir).unwrap_or(giant_direction)
+            ai_hold_for_scenery
+                .or(steer_dir)
+                .or(steer_idle_dir)
+                .unwrap_or(giant_direction)
         };
-        let mut standing_pivot_target: Option<f32> = None;
-        if actor.human || backpedal {
-            actor.standing_pivot_active = false;
-        } else if turn_intent.length_squared() > 0.0001 {
-            let target_yaw = (-turn_intent.x).atan2(-turn_intent.z);
-            let yaw_diff =
-                godot::global::angle_difference(giant.get_rotation().y as f64, target_yaw as f64)
-                    .abs() as f32;
-            if !giant.is_on_floor() && actor.was_walking {
-                actor.standing_pivot_active = false;
-            } else if !actor.standing_pivot_active {
-                if !actor.was_walking && yaw_diff > STAND_PIVOT_ENTER_ANGLE {
-                    actor.standing_pivot_active = true;
-                }
-            } else if yaw_diff <= STAND_PIVOT_EXIT_ANGLE
-                && !giant.call("has_standing_step_in_flight", &[]).to::<bool>()
-            {
-                actor.standing_pivot_active = false;
-            }
-            // Evasion outranks the in-place pivot: a giant caught inside a
-            // warning circle must spend its escape window running (the walk
-            // turn already steers the body along an arc), not pivoting.
-            if !player && actor.intent == Intent::Evade {
-                actor.standing_pivot_active = false;
-            }
-            if actor.standing_pivot_active && actor.pending_hand.is_none() {
-                standing_pivot_target = Some(target_yaw);
-            }
-        } else if actor.pending_hand.is_none() && direction.length_squared() <= 0.0001 {
-            actor.standing_pivot_active = false;
-        }
-        let (move_dir, turn_dir) = if standing_pivot_target.is_none() {
-            (giant_direction, turn_intent)
-        } else {
-            (Vector3::ZERO, Vector3::ZERO)
-        };
+        actor.standing_pivot_active = false;
+        let move_dir = giant_direction;
+        let turn_dir = turn_intent;
         let drive_turn_dir = if !actor.human
-            && standing_pivot_target.is_none()
             && turn_dir.length_squared() > 0.0001
         {
             let raw_yaw = (-turn_dir.x).atan2(-turn_dir.z);
@@ -1786,13 +1756,13 @@ impl HarborRound {
                     let turn_speed_mult = 0.55 + 0.45 * align;
                     back_dir * (giant_speed * GIANT_BACKWARD_MULT * turn_speed_mult)
                 } else {
-                    // Walk along actual body forward so turning giants follow a real curved arc
-                    // instead of crab-sliding sideways off their planted support foot.
+                    // Always launch immediately along body forward so off-heading inputs curve
+                    // smoothly along a car-like arc instead of freezing to spin in place.
                     let align = body_forward.dot(move_dir.normalized_or_zero()).clamp(-1.0, 1.0);
                     let turn_speed_mult = if align >= 0.0 {
-                        0.48 + 0.52 * align
+                        0.62 + 0.38 * align
                     } else {
-                        0.42 + 0.06 * (1.0 + align)
+                        0.48 + 0.14 * (1.0 + align)
                     };
                     body_forward * (giant_speed * turn_speed_mult)
                 }
@@ -1840,6 +1810,7 @@ impl HarborRound {
             dt,
             actor.scale,
             turn_pace,
+            actor.human,
         );
         if micro_steps && vel_xz != Vector3::ZERO {
             // Recover rounding loss from the physics move without accumulating blocked travel.
@@ -1932,12 +1903,10 @@ impl HarborRound {
             && carry_vel.length_squared() <= 0.0001
             && actor.pending_hand.is_none()
         {
-            if let Some(pivot_yaw) = standing_pivot_target {
-                (pivot_yaw, true)
-            } else if let Some(aim) = ai_hold_for_scenery {
-                ((-aim.x).atan2(-aim.z), true)
+            if let Some(aim) = ai_hold_for_scenery {
+                ((-aim.x).atan2(-aim.z), false)
             } else if let Some(view_yaw) = steer_yaw {
-                (view_yaw, true)
+                (view_yaw, false)
             } else {
                 (f32::NAN, false)
             }
@@ -4789,6 +4758,7 @@ fn drive_giant(
     dt: f32,
     scale: f32,
     pace: f32,
+    human: bool,
 ) {
     let mut velocity = vel_xz;
     velocity.y = if body.is_on_floor() {
@@ -4802,7 +4772,7 @@ fn drive_giant(
         // Sublinear pace scaling keeps 1x turning identical while preventing 4x Growth/Brawl
         // giants from whipping around at 780 deg/s like spinning tops.
         let turn_pace = pace.max(0.1).sqrt().min(1.65);
-        turn_giant_smooth(body, yaw_vel, direction, dt * turn_pace, scale);
+        turn_giant_smooth(body, yaw_vel, direction, dt * turn_pace, scale, human);
     } else {
         *yaw_vel *= (1.0 - dt * 10.0).max(0.0);
         if yaw_vel.abs() < 0.01 {
@@ -4812,23 +4782,27 @@ fn drive_giant(
     body.move_and_slide();
 }
 
-/// Critically damped second-order yaw controller so a 25m+ giant accelerates into
-/// and settles out of turns smoothly rather than snapping on frame 1.
+/// Critically damped second-order yaw controller. Giants use a bounded car-like steering
+/// limit (~30-45 deg/step, calmer at larger sizes) for smooth curved arcs without foot cross.
 fn turn_giant_smooth(
     body: &mut Gd<CharacterBody3D>,
     yaw_vel: &mut f32,
     direction: Vector3,
     dt: f32,
     scale: f32,
+    human: bool,
 ) {
     let current_yaw = body.get_rotation().y;
     let target_yaw = (-direction.x).atan2(-direction.z);
     let diff = godot::global::angle_difference(current_yaw as f64, target_yaw as f64) as f32;
 
-    let size_factor = scale.powf(-0.15).clamp(0.75, 1.0);
-    let max_speed = 3.50 * size_factor;
-    let stiffness = 26.0 * size_factor;
-    let damping = 9.2 * size_factor.sqrt();
+    let (max_speed, stiffness, damping) = if human {
+        let size_factor = scale.powf(-0.15).clamp(0.75, 1.0);
+        (3.50 * size_factor, 26.0 * size_factor, 9.2 * size_factor.sqrt())
+    } else {
+        let size_factor = scale.powf(-0.28).clamp(0.45, 1.05);
+        (0.90 * size_factor, 18.0 * size_factor, 7.6 * size_factor.sqrt())
+    };
 
     let accel = diff * stiffness - *yaw_vel * damping;
     *yaw_vel = (*yaw_vel + accel * dt).clamp(-max_speed, max_speed);

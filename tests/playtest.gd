@@ -979,7 +979,7 @@ func _giant_smooth_turn() -> void:
 	var first_step := 0.0
 	var max_step := 0.0
 	Input.action_press("move_right")
-	for frame in 40:
+	for frame in 90:
 		await physics_frame
 		var step := absf(angle_difference(prev_yaw, giant.rotation.y))
 		if frame == 0:
@@ -987,7 +987,7 @@ func _giant_smooth_turn() -> void:
 		max_step = maxf(max_step, step)
 		prev_yaw = giant.rotation.y
 	Input.action_release("move_right")
-	_check(first_step < 0.025 and max_step < 0.065 and absf(angle_difference(start_yaw, giant.rotation.y)) > 1.1,
+	_check(first_step < 0.025 and max_step < 0.025 and absf(angle_difference(start_yaw, giant.rotation.y)) > 1.1,
 			"giant walking turns accelerate smoothly without snapping on frame one")
 
 	_check(not InputMap.has_action("stomp") and not current.has_method("tap_stomp"),
@@ -1053,42 +1053,58 @@ func _giant_layered_turn() -> void:
 	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
 	await _ticks(8)
 
-	# 3. Standing 90-degree directional press (move_left) pivots in place with top-down cascade
-	#    (Eye -> Head -> Chest -> Pelvis -> Feet) and zero-slip alternating small steps BEFORE walking.
+	# 3. Standing 90-degree directional press (move_left) immediately launches forward into a natural
+	#    car-like curved arc (no zero-velocity tank-turn lock or stationary stepping), keeping the
+	#    top-down gaze cascade, zero support slip, and bounded ~30-45 deg turn per step.
 	var start_yaw := giant.rotation.y
 	var pivot_origin := giant.position
 	var before_destroyed: int = current.snapshot().destroyed
+	var fc_arc0 := int(FootfallFixture.actor(current).footfall_count)
 	Input.action_press("move_left")
 
 	var t_eye := -1.0
 	var t_head := -1.0
 	var t_chest := -1.0
 	var t_pelvis := -1.0
-	var t_foot := -1.0
 	var best_ratio := 0.0
 	var max_s_curve := 0.0
 	var min_sh_counter := 0.0
-	var max_in_weight := 0.0
 	var max_slip := 0.0
-	var max_steps := 0
-	var heel_strikes := 0
-	var max_pivot_disp := 0.0
-	var transitioned_to_walk := false
+	var max_yaw_rate := 0.0
+	var max_step_dyaw := 0.0
+	var disp_early := 0.0
+	var saw_stationary_turn := false
+	var saw_walk_curve := false
+	var prev_yaw := start_yaw
+	var step_start_yaw := start_yaw
+	var prev_fc := fc_arc0
 	var prev_l_planted := true
 	var prev_r_planted := true
 	var prev_l_mode := -1
 	var prev_r_mode := -1
 	var prev_l_piv := Vector3.ZERO
 	var prev_r_piv := Vector3.ZERO
-	var saw_step_sides: Array[String] = []
-	var prev_step_side := ""
 
 	for frame in 150:
 		await physics_frame
 		var t_sec := float(frame + 1) / 60.0
 		var tel: Dictionary = giant.get_turn_telemetry()
 		var mode_s: String = tel["mode"]
-		var in_pivot := bool(tel["standing_turning"]) or bool(tel["standing_step_active"])
+		var dyaw_rate := absf(angle_difference(prev_yaw, giant.rotation.y)) * 60.0
+		max_yaw_rate = maxf(max_yaw_rate, dyaw_rate)
+		prev_yaw = giant.rotation.y
+
+		if bool(tel["standing_turning"]) or bool(tel["standing_step_active"]):
+			saw_stationary_turn = true
+		if mode_s == "walk_sharp_turn" or mode_s == "walk_gentle_turn":
+			saw_walk_curve = true
+
+		var fc_now := int(FootfallFixture.actor(current).footfall_count)
+		if fc_now > prev_fc:
+			max_step_dyaw = maxf(max_step_dyaw, absf(angle_difference(step_start_yaw, giant.rotation.y)))
+			step_start_yaw = giant.rotation.y
+			prev_fc = fc_now
+
 		var eye_d := absf(angle_difference(start_yaw, float(tel["eye_world_yaw"])))
 		var head_d := absf(angle_difference(start_yaw, float(tel["head_world_yaw"])))
 		var chest_d := absf(angle_difference(start_yaw, float(tel["chest_world_yaw"])))
@@ -1108,39 +1124,21 @@ func _giant_layered_turn() -> void:
 			t_chest = t_sec
 		if t_pelvis < 0.0 and pelvis_d >= 0.06:
 			t_pelvis = t_sec
-		if t_foot < 0.0 and (not l_pl or not r_pl):
-			t_foot = t_sec
+		if frame == 11:
+			disp_early = Vector2(giant.position.x - pivot_origin.x, giant.position.z - pivot_origin.z).length()
 
 		var head_rel := float(tel["head_rel_pelvis"])
-		if in_pivot and absf(head_rel) > 0.25:
+		if absf(head_rel) > 0.25:
 			var r := float(tel["chest_to_head_ratio"])
 			if best_ratio == 0.0 or absf(r - 0.5) < absf(best_ratio - 0.5):
 				best_ratio = r
-		if in_pivot:
-			max_s_curve = maxf(max_s_curve, float(tel["spine_s_curve"]))
-			min_sh_counter = minf(min_sh_counter, float(tel["shoulder_counter_z"]))
-			max_in_weight = maxf(max_in_weight, float(tel["pelvis_shift_x"]))
-			max_steps = maxi(max_steps, int(tel["standing_step_count"]))
-			max_pivot_disp = maxf(max_pivot_disp, Vector2(giant.position.x - pivot_origin.x, giant.position.z - pivot_origin.z).length())
+		max_s_curve = maxf(max_s_curve, float(tel["spine_s_curve"]))
+		min_sh_counter = minf(min_sh_counter, float(tel["shoulder_counter_z"]))
 
-			var step_side: String = tel["standing_step_side"]
-			if bool(tel["standing_step_active"]) and step_side != prev_step_side:
-				saw_step_sides.append(step_side)
-				prev_step_side = step_side
-			elif not bool(tel["standing_step_active"]):
-				prev_step_side = ""
-
-			if l_pl and prev_l_planted and l_mode == prev_l_mode and frame > 0:
-				max_slip = maxf(max_slip, Vector2(l_piv.x - prev_l_piv.x, l_piv.z - prev_l_piv.z).length())
-			if r_pl and prev_r_planted and r_mode == prev_r_mode and frame > 0:
-				max_slip = maxf(max_slip, Vector2(r_piv.x - prev_r_piv.x, r_piv.z - prev_r_piv.z).length())
-		elif mode_s.begins_with("walk_") and giant.position.x < pivot_origin.x - 1.5:
-			transitioned_to_walk = true
-
-		if l_pl and not prev_l_planted and float(tel["left_last_landing_pitch"]) <= -0.18:
-			heel_strikes += 1
-		if r_pl and not prev_r_planted and float(tel["right_last_landing_pitch"]) <= -0.18:
-			heel_strikes += 1
+		if l_pl and prev_l_planted and l_mode == prev_l_mode and frame > 0:
+			max_slip = maxf(max_slip, Vector2(l_piv.x - prev_l_piv.x, l_piv.z - prev_l_piv.z).length())
+		if r_pl and prev_r_planted and r_mode == prev_r_mode and frame > 0:
+			max_slip = maxf(max_slip, Vector2(r_piv.x - prev_r_piv.x, r_piv.z - prev_r_piv.z).length())
 
 		prev_l_planted = l_pl
 		prev_r_planted = r_pl
@@ -1150,17 +1148,35 @@ func _giant_layered_turn() -> void:
 		prev_r_piv = r_piv
 	Input.action_release("move_left")
 
-	var alternating := saw_step_sides.size() >= 2
-	for idx in range(1, saw_step_sides.size()):
-		if saw_step_sides[idx] == saw_step_sides[idx - 1]:
-			alternating = false
-	_check(t_eye > 0.0 and t_eye <= t_head and t_head < t_chest and t_chest < t_pelvis and t_pelvis < t_foot,
-			"standing turn cascades strictly top-down from eyes and head through chest and pelvis to feet")
-	_check(best_ratio >= 0.35 and best_ratio <= 0.68 and max_s_curve > 0.08 and min_sh_counter < -0.02,
-			"standing turn rotates chest to roughly half of head with spine S-curve and shoulder counter-twist")
-	_check(max_in_weight > 0.03 and alternating and max_steps >= 2 and heel_strikes >= 2 and max_slip < 0.02
-			and max_pivot_disp < 0.15 and transitioned_to_walk and current.snapshot().destroyed == before_destroyed,
-			"standing 90-degree directional input pivots in place with zero-slip alternating small steps before walking")
+	var arc_err90 := absf(angle_difference(giant.rotation.y, PI * 0.5))
+	_check(t_eye > 0.0 and t_eye <= t_head and t_head < t_chest and t_chest <= t_pelvis,
+			"standing curve turn cascades top-down from eyes and head through chest to pelvis")
+	_check(best_ratio >= 0.35 and best_ratio <= 0.68 and max_s_curve > 0.05 and min_sh_counter < -0.02,
+			"standing curve turn rotates chest cleanly relative to head with natural spine S-curve")
+	_check(not saw_stationary_turn and saw_walk_curve and disp_early > 0.50 and arc_err90 < 0.08
+			and max_yaw_rate <= 1.05 and rad_to_deg(max_step_dyaw) <= 46.0 and max_slip < 0.02
+			and current.snapshot().destroyed == before_destroyed,
+			"standing 90-degree directional press enters a zero-slip curved arc immediately without stationary tank spinning")
+
+	# Diagonal backward input (S+D) turns smoothly around along a curved arc instead of backpedaling.
+	giant.position = Vector3(0.0, 0.03, 36.0)
+	giant.rotation = Vector3.ZERO
+	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
+	await _ticks(12)
+	Input.action_press("move_back")
+	Input.action_press("move_right")
+	var diag_saw_backpedal := false
+	var diag_disp_12 := 0.0
+	for frame in 50:
+		await physics_frame
+		if bool(giant.get_turn_telemetry().get("walk_backward", false)):
+			diag_saw_backpedal = true
+		if frame == 11:
+			diag_disp_12 = Vector2(giant.position.x, giant.position.z - 36.0).length()
+	Input.action_release("move_back")
+	Input.action_release("move_right")
+	_check(not diag_saw_backpedal and diag_disp_12 > 0.40 and giant.rotation.y < -0.25,
+			"Diagonal backward input curves into a turnaround arc immediately instead of backpedaling or spinning in place")
 
 	# 4. Pressing Back (S) keeps the body facing the camera direction and plays a natural
 	#    backward walk without spinning 180 degrees or twisting the pelvis/legs.
@@ -1192,7 +1208,8 @@ func _giant_layered_turn() -> void:
 			and back_max_roll < 0.14 and back_legs_clean,
 			"Pressing Back walks backward smoothly without a 180-degree turnaround or torso twist")
 
-	# Early release mid-pivot finishes placing the airborne small step cleanly with zero slip.
+	# Early release mid-curve finishes placing the airborne step cleanly with zero slip
+	# and stops emitting steps once grounded travel reaches zero.
 	giant.position = Vector3(0.0, 0.03, 36.0)
 	giant.rotation = Vector3.ZERO
 	await _ticks(12)
@@ -1201,11 +1218,13 @@ func _giant_layered_turn() -> void:
 	Input.action_release("move_left")
 	var release_slip := 0.0
 	var settled_cleanly := false
+	var fc_after_settle := -1
+	var extra_fc_at_rest := 0
 	prev_l_planted = true
 	prev_r_planted = true
 	prev_l_mode = -1
 	prev_r_mode = -1
-	for frame in 45:
+	for frame in 90:
 		await physics_frame
 		var tel: Dictionary = giant.get_turn_telemetry()
 		var l_pl: bool = tel["left_planted"]
@@ -1218,16 +1237,20 @@ func _giant_layered_turn() -> void:
 			release_slip = maxf(release_slip, Vector2(l_piv.x - prev_l_piv.x, l_piv.z - prev_l_piv.z).length())
 		if r_pl and prev_r_planted and r_mode == prev_r_mode and frame > 0:
 			release_slip = maxf(release_slip, Vector2(r_piv.x - prev_r_piv.x, r_piv.z - prev_r_piv.z).length())
-		if frame >= 30 and l_pl and r_pl and not bool(tel["standing_step_active"]):
+		if frame >= 50 and l_pl and r_pl and not bool(tel["standing_step_active"]) and tel["mode"] == "idle":
+			if fc_after_settle < 0:
+				fc_after_settle = int(FootfallFixture.actor(current).footfall_count)
 			settled_cleanly = true
+		if fc_after_settle >= 0 and int(FootfallFixture.actor(current).footfall_count) > fc_after_settle:
+			extra_fc_at_rest += 1
 		prev_l_planted = l_pl
 		prev_r_planted = r_pl
 		prev_l_mode = l_mode
 		prev_r_mode = r_mode
 		prev_l_piv = l_piv
 		prev_r_piv = r_piv
-	_check(settled_cleanly and release_slip < 0.02 and giant.rotation.y > 0.25 and giant.rotation.y < 1.2,
-			"releasing directional input mid-pivot finishes placing the step cleanly without slipping")
+	_check(settled_cleanly and release_slip < 0.02 and extra_fc_at_rest == 0 and giant.rotation.y > 0.18 and giant.rotation.y < 1.10,
+			"releasing directional input mid-arc settles cleanly with zero slip and zero stationary steps")
 
 	# 5. Walking gentle curve vs sharp left/right turns on open central intersection.
 	giant.position = Vector3(0.0, 0.03, 0.0)
@@ -1318,20 +1341,22 @@ func _blocked_walk_pivot() -> void:
 			"Steering into a blocked wall does not repeatedly strike it while stationary")
 	_mouse(Vector2(-angle_difference(orbit.rotation.y, PI) / 0.0028, 0.0))
 	var start_z := giant.global_position.z
-	var standing_pivot := false
+	var blocked_stationary_step := false
 	var turned := false
 	var left := false
 	for frame in 1500:
 		await physics_frame
-		standing_pivot = standing_pivot or bool(giant.get_turn_telemetry()["standing_turning"])
+		var blk_tel: Dictionary = giant.get_turn_telemetry()
+		if bool(blk_tel["standing_turning"]) or bool(blk_tel["standing_step_active"]):
+			blocked_stationary_step = true
 		if absf(angle_difference(giant.rotation.y, PI)) < 0.5:
 			turned = true
 		if giant.global_position.z - start_z > 15.0:
 			left = true
 			break
 	Input.action_release("move_forward")
-	_check(standing_pivot and turned and left,
-			"A blocked giant holding forward pivots in place and leaves the wall")
+	_check(not blocked_stationary_step and turned and left,
+			"A blocked giant holding forward away from a wall turns smoothly without stationary stepping and leaves the wall")
 
 	# Diagonal/straight push into wall keeps pelvis upright and legs separated without IK twist.
 	giant.position = Vector3(0.0, 0.03, -current.get_node("District").play_edge + 3.1)
@@ -1364,13 +1389,19 @@ func _blocked_walk_pivot() -> void:
 	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
 	await _ticks(8)
 	var fc_pre_spin := int(FootfallFixture.actor(current).footfall_count)
+	var spin_saw_st := false
 	for cycle_idx in 4:
 		var key := "move_left" if cycle_idx % 2 == 0 else "move_right"
 		Input.action_press(key)
-		await _ticks(14)
+		for _sub in 14:
+			await physics_frame
+			var st_tel: Dictionary = giant.get_turn_telemetry()
+			if bool(st_tel["standing_turning"]) or bool(st_tel["standing_step_active"]):
+				spin_saw_st = true
 		Input.action_release(key)
-	_check(int(FootfallFixture.actor(current).footfall_count) == fc_pre_spin,
-			"Sharp low-speed turning transitions smoothly without spamming heavy stomp footprints")
+	var weave_fc := int(FootfallFixture.actor(current).footfall_count) - fc_pre_spin
+	_check(not spin_saw_st and weave_fc <= 1,
+			"Sharp alternating turning transitions smoothly along an arc without spamming heavy stomp footprints")
 
 	# Holding a directional key far from current facing turns briskly without off-axis small-step spam.
 	giant.position = Vector3(0.0, 0.03, 0.0)
@@ -1384,16 +1415,40 @@ func _blocked_walk_pivot() -> void:
 	Input.action_release("move_left")
 	var fc_pre_offaxis := int(FootfallFixture.actor(current).footfall_count)
 	Input.action_press("move_right")
-	for _off_f in 150:
+	var offaxis_saw_st := false
+	for _off_f in 210:
 		await physics_frame
+		var otel: Dictionary = giant.get_turn_telemetry()
+		if bool(otel["standing_turning"]) or bool(otel["standing_step_active"]):
+			offaxis_saw_st = true
 	Input.action_release("move_right")
 	var offaxis_err := absf(angle_difference(giant.rotation.y, -PI * 0.5))
 	var offaxis_fc := int(FootfallFixture.actor(current).footfall_count) - fc_pre_offaxis
-	_check(offaxis_err < 0.35 and offaxis_fc <= 2,
-			"Holding an off-heading directional key turns smoothly in full pivot steps without small-step spam")
+	_check(not offaxis_saw_st and offaxis_err < 0.25 and offaxis_fc >= 2 and offaxis_fc <= 5,
+			"Holding an off-heading directional key turns along a curved arc in full strides without small-step spam")
 
-	# Spinning the camera rapidly while walking forward keeps planted support feet pinned
-	# without slip and never pulls either leg across the sagittal midline.
+	# Pure stationary micro-turning with zero horizontal movement never emits footsteps.
+	giant.position = Vector3(0.0, 0.03, 0.0)
+	giant.rotation = Vector3.ZERO
+	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
+	await _ticks(60)
+	current.set_camera_view(2)
+	await _ticks(6)
+	var fp_idle_fc := int(FootfallFixture.actor(current).footfall_count)
+	var fp_idle_st := false
+	_set_key_state(KEY_LEFT, true)
+	for _fp_f in 60:
+		await physics_frame
+		var ftel: Dictionary = giant.get_turn_telemetry()
+		if bool(ftel["standing_turning"]) or bool(ftel["standing_step_active"]):
+			fp_idle_st = true
+	_set_key_state(KEY_LEFT, false)
+	current.set_camera_view(0)
+	_check(not fp_idle_st and int(FootfallFixture.actor(current).footfall_count) == fp_idle_fc,
+			"Turning the body without horizontal displacement never plays stationary stepping")
+
+	# Spinning the camera rapidly while walking forward obeys car-like turn limits,
+	# keeps planted support feet pinned without slip, and prevents leg crossing.
 	giant.position = Vector3(0.0, 0.03, 0.0)
 	giant.rotation = Vector3.ZERO
 	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
@@ -1401,6 +1456,8 @@ func _blocked_walk_pivot() -> void:
 	Input.action_press("move_forward")
 	var spin_legs_clean := true
 	var spin_support_slip := 0.0
+	var spin_max_rate := 0.0
+	var sp_prev_yaw := giant.rotation.y
 	var sp_prev_l_pl := false
 	var sp_prev_r_pl := false
 	var sp_prev_l_mode := -1
@@ -1410,6 +1467,8 @@ func _blocked_walk_pivot() -> void:
 	for s_frame in 95:
 		_mouse(Vector2(-10.0 if s_frame >= 20 else -5.0, 0.0))
 		await physics_frame
+		spin_max_rate = maxf(spin_max_rate, absf(angle_difference(sp_prev_yaw, giant.rotation.y)) * 60.0)
+		sp_prev_yaw = giant.rotation.y
 		var tel: Dictionary = giant.get_turn_telemetry()
 		var lx := float(tel.get("left_ankle_local_x", 0.0))
 		var rx := float(tel.get("right_ankle_local_x", 0.0))
@@ -1433,8 +1492,9 @@ func _blocked_walk_pivot() -> void:
 		sp_prev_l_piv = l_piv
 		sp_prev_r_piv = r_piv
 	Input.action_release("move_forward")
-	_check(spin_legs_clean and spin_support_slip < 0.015 and absf(angle_difference(0.0, giant.rotation.y)) > 1.2,
-			"Rapid camera turning while walking keeps support feet slip-free and prevents leg crossing")
+	_check(spin_legs_clean and spin_support_slip < 0.015 and spin_max_rate <= 1.05
+			and absf(angle_difference(0.0, giant.rotation.y)) > 0.90,
+			"Rapid camera turning while walking follows a bounded car-like arc with zero slip and no leg crossing")
 	_game.show_menu()
 
 
@@ -2371,27 +2431,24 @@ func _ai_smooth_turning() -> void:
 	giant.rotation = Vector3(0.0, PI, 0.0)
 	await _ticks(1)
 	var prev_yaw := giant.rotation.y
-	var early_swing := false
+	var early_rear_strike := false
 	var saw_standing_pivot := false
 	var max_yaw_step := 0.0
-	var swing_frame := -1
+	var start_health: float = float(current.snapshot().health)
 	for i in range(180):
 		await _ticks(1)
 		var step := absf(angle_difference(prev_yaw, giant.rotation.y))
 		prev_yaw = giant.rotation.y
-		if FootfallFixture.actor(current).footfall_pending:
-			swing_frame = i
-			if i < 12:
-				early_swing = true
-			break
 		max_yaw_step = maxf(max_yaw_step, step)
+		if i < 20 and float(current.snapshot().health) < start_health:
+			early_rear_strike = true
 		var diag: Dictionary = giant.get_turn_telemetry()
 		if diag.get("mode", "") == "standing_turn":
 			saw_standing_pivot = true
-	_check(not early_swing,
-			"an AI giant facing away does not instantly swing a shoe at a target behind her")
-	_check(saw_standing_pivot and swing_frame >= 12,
-			"an AI giant pivots with standing small steps before starting a heavy swing (frame=%d)" % swing_frame)
+	_check(not early_rear_strike,
+			"an AI giant facing away does not strike a human behind her while arcing around")
+	_check(not saw_standing_pivot and absf(angle_difference(PI, giant.rotation.y)) > 0.6,
+			"an AI giant arcs forward cleanly toward a target behind her without stationary tank turning")
 	_check(max_yaw_step < 0.14,
 			"4x speed AI turning stays bounded per frame without whip-snapping (max=%.3f)" % max_yaw_step)
 	_game.show_menu()

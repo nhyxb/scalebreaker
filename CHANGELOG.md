@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-11-27 — 自然弧线起步、赛车式限角转弯与严禁原地空踏步
+
+基于提交 `c79692e`（回滚可用 `git revert <本次提交>`）。
+
+- **取消站立原地坦克式转向，改为自然弧线起步**（`rust/src/round.rs`）：
+  - 移除 `update_giant()` 中站立按异向方向键（`A`/`D`/斜向）触发的 `standing_pivot_active` 原地锁速自转分支；当玩家或 AI 按非正后退方向输入时，直接以当前朝向前向速度（`turn_speed_mult`: 同向至正交 `0.62..1.00`，背向 `0.48..0.62`）产生真实水平位移并顺势沿弧线转正；
+  - 纯正后退（`S` 键 / 后向推杆锥角，点积 `< -0.84`）继续保持正面朝前做真实倒退步；`S+A`/`S+D` 等斜后方向输入改为立即切入弧线转身前进；第一人称静止转向 `steer_yaw` 与阻挡转向保留平滑朝向过渡而不再触发原地小碎步。
+- **行走限角转弯（赛车式平滑弧线）与严格禁止原地空踏步**（`rust/src/round.rs`、`scenes/giant_visual.gd`）：
+  - `turn_giant_smooth()` 为巨人引入独立限角参数（上限 `0.90 * size_factor` rad/s，`size_factor = scale^-0.28` 钳制于 `[0.45, 1.05]`），配合 `scenes/giant_visual.gd` 将 `PIVOT_STEP_MAX_YAW` 收紧至 `0.72 rad`（约 `41°/步`），使每一步平稳转约 `30–45°` 并随体型增大更沉稳，同时同步调整 `WALK_SHARP_ENTER`/`WALK_SHARP_FULL`（`0.30 / 0.88`）与弯道内倾缩放，保持双腿顺弧迈步、撑地脚零打滑。
+  - `_advance_walk()` 删除无水平位移时的 `85%` 步频保底，并将步态循环严格绑定至实际水平地面位移（`has_real_travel` / `cycle_speed = min(speed, real_horiz_spd)`）；`show_motion()` 常态移动完全禁止进入原地踏步循环，仅保留坐压准备阶段由 `step_turn_in_place()` 显式调用转身对齐人群；同步修正 `STOP_SETTLE` 阶段过渡步的 `planted` 状态追踪，消除收步瞬间脚锚点跳变（`release_slip < 0.02`）。
+
+### 回归（最新代码运行结果）
+
+- 零 Yumeka 资产：`git ls-files assets/characters/yumeka/` 为空（`YUMEKA=0`）。
+- Rust：`cargo build --locked` 通过；`cargo test --locked` **55/55** 通过；`godot --headless --path . --quit-after 5` 退出码 `0`。
+- 全部 8 套 Godot `--headless` 回归总计 **722/722** 通过（均退出码 `0`）：`audio_playtest` 35/35、`brawl_playtest` 48/48、`growth_playtest` 203/203、`mode_menu_playtest` 45/45、`playtest` 247/247（更新验证了站立 90°/斜后键立即弧线起步、纯 `S` 倒退、收步零滑步且静止后零额外落脚、`first-person` 静止转视角零脚步、贴墙静止转身不空踏以及高速甩鼠弧线零跨中线）、`sit_crush_gameplay_playtest` 44/44、`sit_crush_playtest` 58/58、`touch_playtest` 42/42（退出仍附带既有的空材质与资源释放提示日志）。
+- 说明：本条为纯规则/手感收敛提交，未重复触发 `Xvfb` 实机截图（上轮 2 轮视觉核验记录见下条）。
+
+---
+
 ## 2026-11-27 — 巨人重步贴墙/转向修正、轴心换步、后退行走与如履平地规则重构
 
 备份位置：`backups/20261127_191625_heavy_step_fixes/`（`BASE_COMMIT` 记录基准提交 `7d9d44044d4858095c1469683e00e53c9e9890a6`，含 `rust_src`、`scenes`、`scripts`、`tests`、`CHANGELOG.md`、`MEMORY.md` 等完整快照）。提交后可用 `git revert <本次提交>` 回滚整组改动，或从备份目录手动恢复。
