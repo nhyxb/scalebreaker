@@ -4,6 +4,49 @@
 
 ---
 
+## 2026-11-27 — 阶段 3B-1 精准修复：消除双右手/空袖筒穿帮 + 前景完整右臂真实 1:6,667 对准 Yumeka 右肩
+
+备份：`backups/20261127_122400_phase3b1_arm_seam_fix/{rust_src,scenes,scripts,tests,CHANGELOG.md,MEMORY.md}`（`assets/characters/yumeka/Yumeka_hand_relay.glb` 位于 gitignored 目录）。
+回滚：
+
+```sh
+cp -a backups/20261127_122400_phase3b1_arm_seam_fix/rust_src/. rust/src/
+cp -a backups/20261127_122400_phase3b1_arm_seam_fix/scenes/. scenes/
+cp -a backups/20261127_122400_phase3b1_arm_seam_fix/scripts/. scripts/
+cp -a backups/20261127_122400_phase3b1_arm_seam_fix/tests/. tests/
+cp backups/20261127_122400_phase3b1_arm_seam_fix/{CHANGELOG.md,MEMORY.md} .
+cargo build --locked --manifest-path rust/Cargo.toml --target-dir rust/target
+# 如需回退旧版 GLB，重跑回滚后的 scripts/export_yumeka_hand_relay.py 并执行 godot --headless --path . --editor --import --quit
+```
+
+### 一、彻底消除“双右手”与空心棕色袖筒（`scenes/yumeka_ultra_giant.gd`）
+
+- 当 `set_hazard_relay(active = true)` 触发前景右臂接力时，**当帧立即**将背景 Yumeka 的 `UpperArm_R` 骨骼缩放压至 `0.0001`（自动级联折叠 `UpperArm_twist_R`、`LowerArm_R`、`LowerArm_twist_R`、`Hand_R` 及全部 15 根指骨至右肩关节内），只保留自然贴身的肩头，杜绝画面同时出现两只右手或残留空心棕色袖筒。
+- 事件结束且前景右臂隐藏后，`_drive_hazard_arm()` 在 ~0.22 s 内将 `UpperArm_R` 平滑恢复至 `1.0` 缩放并归位 `59c8440` 趴桌休息姿态。
+
+### 二、前景完整右臂真实 1:6,667 导出与动态对准右肩（`scripts/export_yumeka_hand_relay.py`、`scenes/yumeka_ultra_giant.gd`、`scenes/desk_hazards.gd`、`rust/src/round.rs`）
+
+- **实时右肩世界坐标**：`yumeka_ultra_giant.gd` 新增 `get_right_shoulder_main_world_pos()`，实时将 `UpperArm_R` 相对 `SandboxAnchor` 的卧室 1:1 坐标乘以 `6666.67` 换算到主世界（约 `(636, 829, 2927) m`，位于城市南侧 `+Z` 上空并随呼吸联动）。
+- **真实比例完整右臂导出**：`scripts/export_yumeka_hand_relay.py` 改为导出自肩部 `UpperArm_R.head` 至食指指腹的完整右臂 3 网格（3,555 多边形 / 3,450 顶点，4.48 MB 静态 GLB），严格使用与 `Yumeka_seated.glb` 一致的真实 `1:6,667` 缩放（`BODY_SCALE = 1.05 × 6666.67 = 7000.0`，不再拉伸；上臂肩部 100% 原样保留、仅轻整手腕处过长萌袖）；采用自然微弓肘（`LowerArm_R -20°`）与手腕微屈（`Hand_R -16°`）并内收卷握四指与拇指，规范对齐 Godot 局部轴（原点 = 食指指腹、`+Z` = 指向肩部根 `(0, 0, +2946.5 m)`、`+Y` = 手背朝天、`+X` = 小指外侧），城心触地时卷指与拇指最低离地净空 `+81.9 m`。
+- **动态肩部枢轴轨迹与朝向**：`scenes/desk_hazards.gd` 删除写死的垂直 `APPROACH_DIR`，改为每帧沿 `dir = (shoulder_main_pos - fingertip_pos).normalized()` 对齐前景右臂局部 `+Z` 并以真实右肩为圆心做 `13.5° → 0° → 16.5°` 俯冲/收回弧线（占位回退手同步使用同一规范轴）；同步将 `rust/src/round.rs` 相机 `regular_far` 下限抬至 `max(world_limit × 6.5 + height × 3, 4600)`，防止城北远视时裁切到 3.7 km 处的上臂肩接缝。
+
+### 三、同口径验证与 1 轮隔离 Xvfb 目视确认
+
+| 指标 | 口径 | 数据源 | 基准值（`b97bea9`） | 当前值 |
+|---|---|---|---|---|
+| 前景右臂几何 | 静态烘焙多边形 / 顶点（3 网格，无骨架） | `export_yumeka_hand_relay.py` | 3,154 polys / 3,046 verts（截断前臂，9227×） | **3,555 polys / 3,450 verts（完整右臂至肩，7000× 真实 1:6,667）** |
+| 肩部接缝误差 | 前景臂根 `arm_root_pos` 与背景 `UpperArm_R` 主世界坐标间距 | `capture_arm_seam_verify.gd` / `playtest.gd` | 写死垂直来向（未对齐） | **< 0.01 m**（`(636.08, 828.59, 2926.88)`） |
+| Rust 单元测试 | `cargo test --locked` | `cargo test` | 54/54 | **54/54** |
+| Godot 回归断言 | 8 套 `--headless` playtest（更新右臂折叠/恢复与肩部对齐断言） | `tests/*_playtest.gd` | 715/715 | **715/715** |
+| 实机 GPU 帧率 | 未测（隔离 `Xvfb` 为纯 `llvmpipe`，仅截 2 帧验视觉，未跑 FPS 基准） | — | 未测 | 未测 |
+
+- **8 套 Godot `--headless` 回归全绿**：`playtest` 248 / `growth` 200 / `mode_menu` 45 / `touch` 42 / `sit_crush_gameplay` 44 / `sit_crush` 57 / `brawl` 43 / `audio` 36；启动校验 `--quit-after 5` 通过；`git ls-files assets/characters/yumeka/` 为空。
+- **视觉核验（严格 1 轮、隔离 `Xvfb :98`，`1280×720`，renderer=`llvmpipe (LLVM 23.1.5)`，零占用真实桌面）**：
+  1. `build/tmp/seam_1_mid_far_oblique.png`（中远景斜拍）：画面仅见唯一一只右手（背景左手自然搭于桌右侧、背景右臂自 `UpperArm_R` 完全收隐无空袖筒），前景完整右臂从 Yumeka 真实右肩自然斜向伸入城心 110 m 琥珀色脉冲预警圈上方，肤色与棕色开衫袖材质同背景统一不过曝——**通过**；
+  2. `build/tmp/seam_2_impact_close.png`（触地瞬间近中景）：前景食指斜刺入 `(0, -2.4, -48)`，前排树木、工业塔与商业高楼产生正确深度遮挡，半径 110 m 内 43 栋建筑触发倒塌与废墟堆，卷曲四指与拇指悬空无穿楼，右肩接缝处无双右手穿帮——**通过**。
+
+---
+
 ## 2026-11-27 — 阶段 3B-1：双层手臂接力天灾「单指点戳（`finger_poke`）」与可复用天灾底座
 
 备份：`backups/20261127_100230_phase3b1_finger_poke/{rust_src,scenes,scripts,tests,CHANGELOG.md,MEMORY.md}`（本轮新增 `scenes/desk_hazards.gd` 与 `scripts/export_yumeka_hand_relay.py` 无备份副本；`assets/characters/yumeka/Yumeka_hand_relay.glb` 留在 gitignored 目录）。

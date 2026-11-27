@@ -32,12 +32,17 @@ const POKE_RADIUS := 110.0
 const POKE_DAMAGE_FRACTION := 0.85
 const POKE_KNOCKBACK_SPEED := 68.0
 
-## Direction from ground landing spot UP toward Yumeka's right shoulder in the
-## south-east bedroom sky (+X east, +Y up, +Z south). Matches export_yumeka_hand_relay.py.
-const APPROACH_DIR := Vector3(0.24, 0.94, 0.24)
-const WINDUP_START_DIST := 920.0
-const RETRACT_END_DIST := 1150.0
-const HOLD_PRESS_DEPTH := 3.5
+## True 1:6,667 exported full right-arm chord length (fingertip origin (0,0,0) ->
+## UpperArm_R shoulder cap at local (0, 0, +ARM_CHORD_LENGTH_M)). Matches
+## `scripts/export_yumeka_hand_relay.py` (`BODY_SCALE = 1.05 * 6666.67 = 7000.0`).
+const ARM_CHORD_LENGTH_M := 2946.5
+## Fallback main-world right shoulder when licensed Yumeka_seated.glb is absent.
+const FALLBACK_SHOULDER_POS := Vector3(636.0, 823.0, 2926.0)
+## Shoulder-pivoted elevation arc angles (degrees) for windup & retract so the
+## foreground arm stays pinned to Yumeka's real right shoulder throughout every phase.
+const WINDUP_START_ELEV_DEG := 13.5
+const RETRACT_END_ELEV_DEG := 16.5
+const HOLD_PRESS_DEPTH := 3.0
 
 ## Unified matte anime shading constants matching Yumeka_seated.glb + AGX anti-blowout.
 const MATTE_ROUGHNESS := 0.89
@@ -49,12 +54,12 @@ enum HazardKind { NONE, FINGER_POKE }
 enum Phase { IDLE, WINDUP, HOLD, RETRACT }
 
 var _rng := RandomNumberGenerator.new()
-var _approach_unit := APPROACH_DIR.normalized()
 var _hazard: HazardKind = HazardKind.NONE
 var _phase: Phase = Phase.IDLE
 var _phase_time := 0.0
 var _next_auto_in := 60.0
 var _target := Vector3.ZERO
+var _last_shoulder_pos := FALLBACK_SHOULDER_POS
 var _whoosh_played := false
 var _trigger_count := 0
 var _last_impact_summary: Dictionary = {}
@@ -74,7 +79,6 @@ var _vfx_root: Node3D
 
 func _ready() -> void:
 	_rng.randomize()
-	_approach_unit = APPROACH_DIR.normalized()
 	_next_auto_in = _rng.randf_range(AUTO_MIN_DELAY, AUTO_MAX_DELAY)
 	_vfx_root = Node3D.new()
 	_vfx_root.name = "HazardVfx"
@@ -147,8 +151,12 @@ func trigger_finger_poke(target_override := Vector3.INF) -> bool:
 	_ensure_hand_visual()
 	_ensure_warning_visuals()
 
+	# Collapse background Yumeka's right arm FIRST so there is never a duplicate hand frame.
+	_sync_background_yumeka(true, _target, 1.0)
+	var shoulder_pos := _right_shoulder_main_pos()
+	var start_tip := _arc_fingertip_pos(shoulder_pos, _target, WINDUP_START_ELEV_DEG)
 	_hand_root.visible = true
-	_hand_root.global_position = _target + _approach_unit * WINDUP_START_DIST
+	_orient_arm_to_shoulder(start_tip, shoulder_pos)
 	_warning_root.visible = true
 	_warning_root.global_position = _target
 	_shadow_quad.visible = true
@@ -156,7 +164,6 @@ func trigger_finger_poke(target_override := Vector3.INF) -> bool:
 	_update_warning_visuals(0.0, 1.0, true)
 
 	_register_rust_warning(_target, POKE_RADIUS)
-	_sync_background_yumeka(true, _target, 0.25)
 
 	var audio := get_node_or_null("/root/HarborAudio")
 	if audio != null and audio.has_method(&"play_desk_hazard_warn"):
@@ -170,22 +177,23 @@ func trigger_finger_poke(target_override := Vector3.INF) -> bool:
 
 func _step_finger_poke(dt: float) -> void:
 	_phase_time += dt
+	var shoulder_pos := _right_shoulder_main_pos()
 	match _phase:
 		Phase.WINDUP:
 			var p := clampf(_phase_time / POKE_WINDUP_SECONDS, 0.0, 1.0)
-			# Two-stage descent: looming steady press over the skyline (0..0.72),
+			# Two-stage shoulder-pivoted descent: looming steady lower (0..0.72),
 			# then weighty acceleration into the city block (0.72..1.0).
-			var dist_frac: float
+			var elev_frac: float
 			if p < 0.72:
 				var u := p / 0.72
-				dist_frac = lerpf(1.0, 0.28, smoothstep(0.0, 1.0, u))
+				elev_frac = lerpf(1.0, 0.30, smoothstep(0.0, 1.0, u))
 			else:
 				var u := (p - 0.72) / 0.28
-				dist_frac = lerpf(0.28, 0.0, u * u)
-			_hand_root.global_position = _target + _approach_unit * (WINDUP_START_DIST * dist_frac)
+				elev_frac = lerpf(0.30, 0.0, u * u)
+			var tip_pos := _arc_fingertip_pos(shoulder_pos, _target, WINDUP_START_ELEV_DEG * elev_frac)
+			_orient_arm_to_shoulder(tip_pos, shoulder_pos)
 
-			var arm_lift := smoothstep(0.0, 0.45, p)
-			_sync_background_yumeka(true, _target, arm_lift)
+			_sync_background_yumeka(true, _target, 1.0)
 			_update_warning_visuals(p, 1.0, true)
 
 			if not _whoosh_played and p >= 0.68:
@@ -201,7 +209,8 @@ func _step_finger_poke(dt: float) -> void:
 			var p := clampf(_phase_time / POKE_HOLD_SECONDS, 0.0, 1.0)
 			# Fingertip presses slightly into the shattered rubble with a tiny damped settle.
 			var settle := sin(p * PI * 2.5) * exp(-p * 5.0) * 1.4
-			_hand_root.global_position = _target + Vector3(0.0, -HOLD_PRESS_DEPTH + settle, 0.0)
+			var tip_pos := _target + Vector3(0.0, -HOLD_PRESS_DEPTH + settle, 0.0)
+			_orient_arm_to_shoulder(tip_pos, shoulder_pos)
 			_sync_background_yumeka(true, _target, 1.0)
 			_update_warning_visuals(1.0, 1.0, false)
 			if _phase_time >= POKE_HOLD_SECONDS:
@@ -211,13 +220,15 @@ func _step_finger_poke(dt: float) -> void:
 		Phase.RETRACT:
 			var p := clampf(_phase_time / POKE_RETRACT_SECONDS, 0.0, 1.0)
 			var lift_curve := p * p * (3.0 - 2.0 * p)
-			var dist := lerpf(0.0, RETRACT_END_DIST, lift_curve * (0.45 + 0.55 * p))
+			var elev := lerpf(0.0, RETRACT_END_ELEV_DEG, lift_curve * (0.45 + 0.55 * p))
 			var y_offset := lerpf(-HOLD_PRESS_DEPTH, 0.0, clampf(p * 3.5, 0.0, 1.0))
-			_hand_root.global_position = _target + Vector3(0.0, y_offset, 0.0) + _approach_unit * dist
+			var tip_pos := _arc_fingertip_pos(shoulder_pos, _target, elev, y_offset)
+			_orient_arm_to_shoulder(tip_pos, shoulder_pos)
 			var shadow_fade := 1.0 - smoothstep(0.0, 0.72, p)
 			_update_warning_visuals(1.0 - p * 0.6, shadow_fade, false)
-			var arm_lift := 1.0 - smoothstep(0.0, 0.85, p)
-			_sync_background_yumeka(arm_lift > 0.01, _target, arm_lift)
+			# Keep background right arm collapsed while foreground arm is visible;
+			# `_finish_hazard()` hides foreground arm and restores background arm seamlessly.
+			_sync_background_yumeka(true, _target, 1.0 - smoothstep(0.0, 0.85, p))
 			if _phase_time >= POKE_RETRACT_SECONDS:
 				_finish_hazard()
 
@@ -225,7 +236,8 @@ func _step_finger_poke(dt: float) -> void:
 func _enter_poke_impact() -> void:
 	_phase = Phase.HOLD
 	_phase_time = 0.0
-	_hand_root.global_position = _target + Vector3(0.0, -HOLD_PRESS_DEPTH, 0.0)
+	var shoulder_pos := _right_shoulder_main_pos()
+	_orient_arm_to_shoulder(_target + Vector3(0.0, -HOLD_PRESS_DEPTH, 0.0), shoulder_pos)
 	_warn_quad.visible = false
 	_update_warning_visuals(1.0, 1.0, false)
 	_clear_rust_warning()
@@ -324,6 +336,59 @@ func _sync_background_yumeka(active: bool, main_world_target: Vector3, arm_lift:
 		yumeka.call(&"set_hazard_relay", active, main_world_target, arm_lift)
 
 
+func _right_shoulder_main_pos() -> Vector3:
+	var game := _harbor_game()
+	if game != null:
+		var sky := game.get_node_or_null("Skybox")
+		if sky != null and sky.has_method(&"get_yumeka"):
+			var yumeka: Node = sky.call(&"get_yumeka")
+			if yumeka != null and yumeka.has_method(&"get_right_shoulder_main_world_pos"):
+				_last_shoulder_pos = yumeka.call(&"get_right_shoulder_main_world_pos")
+				return _last_shoulder_pos
+	_last_shoulder_pos = FALLBACK_SHOULDER_POS
+	return _last_shoulder_pos
+
+
+## Computes a fingertip position pivoted upward around Yumeka's live right shoulder
+## by `elev_deg` degrees, keeping the arm length constant and shoulder-locked.
+func _arc_fingertip_pos(shoulder_pos: Vector3, target: Vector3, elev_deg: float, y_bias := 0.0) -> Vector3:
+	var to_target := target - shoulder_pos
+	var dist := to_target.length()
+	if dist < 1.0:
+		return target + Vector3(0.0, y_bias, 0.0)
+	var d_end := to_target / dist
+	var pitch_axis := d_end.cross(Vector3.UP)
+	if pitch_axis.length_squared() < 1e-6:
+		pitch_axis = Vector3.RIGHT
+	else:
+		pitch_axis = pitch_axis.normalized()
+	var d_cur := d_end.rotated(pitch_axis, deg_to_rad(elev_deg))
+	return shoulder_pos + d_cur * dist + Vector3(0.0, y_bias, 0.0)
+
+
+## Dynamically aligns the foreground arm (+Z axis from fingertip origin -> UpperArm_R)
+## strictly onto Yumeka's live main-world right shoulder position.
+func _orient_arm_to_shoulder(fingertip_pos: Vector3, shoulder_pos: Vector3) -> void:
+	if _hand_root == null:
+		return
+	var to_sh := shoulder_pos - fingertip_pos
+	var dist := to_sh.length()
+	var z_axis := to_sh / maxf(dist, 1.0)
+	var up_ref := Vector3.UP if absf(z_axis.y) < 0.98 else Vector3.BACK
+	var x_axis := up_ref.cross(z_axis).normalized()
+	var y_axis := z_axis.cross(x_axis).normalized()
+	_hand_root.global_position = fingertip_pos
+	_hand_root.global_basis = Basis(x_axis, y_axis, z_axis)
+	# Preserve pure 1:6,667 cross-section (1.0 in X/Y) while fitting chord Z cleanly
+	# to the exact live shoulder joint so the upper sleeve never detaches or overshoots.
+	var axial := clampf(dist / ARM_CHORD_LENGTH_M, 0.72, 1.32)
+	_hand_root.scale = Vector3(1.0, 1.0, axial)
+	if _shadow_mat != null:
+		var arm_xz := Vector2(z_axis.x, z_axis.z)
+		if arm_xz.length_squared() > 1e-5:
+			_shadow_mat.set_shader_parameter(&"u_arm_dir", arm_xz.normalized())
+
+
 # --------------------------------------------------------------------------- #
 # Foreground Hand Visual (GLB with graceful stylized placeholder fallback)
 # --------------------------------------------------------------------------- #
@@ -403,8 +468,9 @@ func _apply_hand_materials(root_node: Node) -> void:
 
 
 func _build_placeholder_hand() -> Node3D:
-	# Clean stylized procedural right hand (origin at index fingertip pad, width ~96 m,
-	# forearm rising along APPROACH_DIR) for public clones without the licensed Yumeka GLB.
+	# Clean stylized procedural right arm matching the canonical GLB local frame:
+	# origin (0,0,0) at index fingertip pad, arm extending along +Z to ARM_CHORD_LENGTH_M,
+	# +Y dorsal / up, +X outer-right / little-finger side.
 	var root_node := Node3D.new()
 	root_node.name = "PlaceholderHandRelay"
 
@@ -435,50 +501,43 @@ func _build_placeholder_hand() -> Node3D:
 	var sleeve_mat := StandardMaterial3D.new()
 	sleeve_mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
 	sleeve_mat.diffuse_mode = BaseMaterial3D.DIFFUSE_BURLEY
-	sleeve_mat.albedo_color = Color(0.24, 0.28, 0.38)
+	sleeve_mat.albedo_color = Color(0.30, 0.18, 0.15)
 	sleeve_mat.roughness = 0.92
 	sleeve_mat.metallic = 0.0
 	sleeve_mat.metallic_specular = 0.14
 
-	# Build oriented arm container so its local +Y points along `_approach_unit`,
-	# local -X points west (thumb side), and local -Z points north (back of hand).
+	# Build parts in an arm container whose local +Y runs along root +Z (fingertip -> shoulder),
+	# so CapsuleMesh / CylinderMesh align cleanly along the arm length.
 	var arm := Node3D.new()
 	arm.name = "ArmFrame"
-	var y_axis := _approach_unit
-	var thumb_hint := Vector3(-1.0, 0.0, 0.25).normalized()
-	var z_axis := thumb_hint.cross(y_axis).normalized()
-	var x_axis := y_axis.cross(z_axis).normalized()
-	arm.basis = Basis(x_axis, y_axis, z_axis)
+	arm.rotation_degrees.x = 90.0
 	root_node.add_child(arm)
 
-	# Extended index finger: radius 48 m (diameter 96 m), length 420 m, tip pad at y = 0.
+	# Extended index finger (~74 m diameter at true 1:6,667 scale), tip pad at (0,0,0).
 	var index_mesh := CapsuleMesh.new()
-	index_mesh.radius = 48.0
-	index_mesh.height = 460.0
+	index_mesh.radius = 37.0
+	index_mesh.height = 420.0
 	index_mesh.radial_segments = 20
 	index_mesh.rings = 8
-	_add_placeholder_part(arm, "IndexFinger", index_mesh, Vector3(0.0, 230.0, 0.0), Vector3.ZERO, skin)
+	_add_placeholder_part(arm, "IndexFinger", index_mesh, Vector3(0.0, 210.0, -55.0), Vector3(-0.28, 0.0, 0.0), skin)
 
-	# Subtle fingernail plate on dorsal (-Z) side of fingertip.
 	var nail_mesh := SphereMesh.new()
-	nail_mesh.radius = 34.0
-	nail_mesh.height = 68.0
+	nail_mesh.radius = 27.0
+	nail_mesh.height = 54.0
 	nail_mesh.radial_segments = 14
 	nail_mesh.rings = 6
-	var nail := _add_placeholder_part(arm, "IndexNail", nail_mesh, Vector3(0.0, 62.0, -34.0), Vector3.ZERO, nail_mat)
+	var nail := _add_placeholder_part(arm, "IndexNail", nail_mesh, Vector3(0.0, 56.0, -40.0), Vector3(-0.28, 0.0, 0.0), nail_mat)
 	nail.scale = Vector3(0.85, 1.15, 0.28)
 
-	# Palm block above index knuckle.
 	var palm_mesh := BoxMesh.new()
-	palm_mesh.size = Vector3(340.0, 320.0, 145.0)
-	_add_placeholder_part(arm, "Palm", palm_mesh, Vector3(110.0, 560.0, 22.0), Vector3.ZERO, skin)
+	palm_mesh.size = Vector3(260.0, 290.0, 115.0)
+	_add_placeholder_part(arm, "Palm", palm_mesh, Vector3(70.0, 520.0, -175.0), Vector3(-0.18, 0.0, 0.0), skin)
 
-	# Curled middle, ring, and little fingers tucked on the palm (+Z) side well above ground.
 	var curled_specs := [
-		["MiddleCurled", Vector3(98.0, 360.0, 92.0), 46.0, 220.0, Vector3(1.15, 0.0, 0.0)],
-		["RingCurled", Vector3(186.0, 385.0, 95.0), 43.0, 200.0, Vector3(1.22, 0.0, 0.0)],
-		["LittleCurled", Vector3(264.0, 420.0, 92.0), 37.0, 175.0, Vector3(1.28, 0.0, 0.0)],
-		["ThumbTucked", Vector3(-65.0, 410.0, 88.0), 46.0, 210.0, Vector3(0.75, 0.0, -0.55)],
+		["MiddleCurled", Vector3(68.0, 390.0, -110.0), 34.0, 175.0, Vector3(1.10, 0.0, 0.0)],
+		["RingCurled", Vector3(135.0, 415.0, -115.0), 31.0, 160.0, Vector3(1.18, 0.0, 0.0)],
+		["LittleCurled", Vector3(195.0, 445.0, -120.0), 27.0, 140.0, Vector3(1.24, 0.0, 0.0)],
+		["ThumbTucked", Vector3(-35.0, 425.0, -115.0), 34.0, 165.0, Vector3(0.70, 0.0, -0.60)],
 	]
 	for spec in curled_specs:
 		var cap := CapsuleMesh.new()
@@ -488,27 +547,26 @@ func _build_placeholder_hand() -> Node3D:
 		cap.rings = 6
 		_add_placeholder_part(arm, String(spec[0]), cap, spec[1] as Vector3, spec[4] as Vector3, skin)
 
-	# Wrist, white shirt cuff, and navy jacket sleeve reaching up into the sky.
 	var wrist_mesh := CylinderMesh.new()
-	wrist_mesh.top_radius = 128.0
-	wrist_mesh.bottom_radius = 115.0
-	wrist_mesh.height = 240.0
+	wrist_mesh.top_radius = 110.0
+	wrist_mesh.bottom_radius = 96.0
+	wrist_mesh.height = 220.0
 	wrist_mesh.radial_segments = 18
-	_add_placeholder_part(arm, "Wrist", wrist_mesh, Vector3(110.0, 810.0, 24.0), Vector3.ZERO, skin)
+	_add_placeholder_part(arm, "Wrist", wrist_mesh, Vector3(50.0, 740.0, -210.0), Vector3.ZERO, skin)
 
 	var cuff_mesh := CylinderMesh.new()
-	cuff_mesh.top_radius = 165.0
-	cuff_mesh.bottom_radius = 145.0
+	cuff_mesh.top_radius = 150.0
+	cuff_mesh.bottom_radius = 132.0
 	cuff_mesh.height = 170.0
 	cuff_mesh.radial_segments = 20
-	_add_placeholder_part(arm, "ShirtCuff", cuff_mesh, Vector3(110.0, 950.0, 24.0), Vector3.ZERO, cuff_mat)
+	_add_placeholder_part(arm, "ShirtCuff", cuff_mesh, Vector3(50.0, 880.0, -215.0), Vector3.ZERO, cuff_mat)
 
 	var sleeve_mesh := CylinderMesh.new()
-	sleeve_mesh.top_radius = 250.0
-	sleeve_mesh.bottom_radius = 180.0
-	sleeve_mesh.height = 1450.0
+	sleeve_mesh.top_radius = 225.0
+	sleeve_mesh.bottom_radius = 170.0
+	sleeve_mesh.height = 2060.0
 	sleeve_mesh.radial_segments = 20
-	_add_placeholder_part(arm, "JacketSleeve", sleeve_mesh, Vector3(110.0, 1730.0, 24.0), Vector3.ZERO, sleeve_mat)
+	_add_placeholder_part(arm, "JacketSleeve", sleeve_mesh, Vector3(25.0, 1920.0, -110.0), Vector3(0.10, 0.0, 0.0), sleeve_mat)
 
 	return root_node
 
@@ -579,8 +637,10 @@ void fragment() {
 }
 """
 	_shadow_mat.shader = shadow_shader
-	var arm_xz := Vector2(_approach_unit.x, _approach_unit.z).normalized()
-	_shadow_mat.set_shader_parameter(&"u_arm_dir", arm_xz)
+	var arm_xz := Vector2(_last_shoulder_pos.x - _target.x, _last_shoulder_pos.z - _target.z)
+	if arm_xz.length_squared() < 1e-5:
+		arm_xz = Vector2(0.22, 0.97)
+	_shadow_mat.set_shader_parameter(&"u_arm_dir", arm_xz.normalized())
 
 	_shadow_quad = MeshInstance3D.new()
 	_shadow_quad.name = "FingerShadow"
@@ -758,6 +818,9 @@ func debug_state() -> Dictionary:
 		HazardKind.NONE: "none",
 		HazardKind.FINGER_POKE: "finger_poke",
 	}
+	var shoulder_root_world := Vector3.ZERO
+	if _hand_root != null:
+		shoulder_root_world = _hand_root.to_global(Vector3(0.0, 0.0, ARM_CHORD_LENGTH_M))
 	return {
 		"enabled": _is_enabled(),
 		"active": _phase != Phase.IDLE,
@@ -766,6 +829,8 @@ func debug_state() -> Dictionary:
 		"hazard": kind_names.get(_hazard, "none"),
 		"target": _target,
 		"fingertip_pos": _hand_root.global_position if _hand_root != null else Vector3.ZERO,
+		"shoulder_pos": _last_shoulder_pos,
+		"arm_root_pos": shoulder_root_world,
 		"hand_visible": _hand_root != null and _hand_root.visible,
 		"warning_visible": _warn_quad != null and _warn_quad.visible,
 		"shadow_visible": _shadow_quad != null and _shadow_quad.visible and _warning_root != null and _warning_root.visible,

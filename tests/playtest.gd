@@ -2559,12 +2559,22 @@ func _desk_hazards_finger_poke() -> void:
 			break
 	_check(ai_evaded, "Phase 4 AI inside the desk hazard warning circle immediately switches to evade")
 
-	# Verify background Yumeka arm lift & gaze relay when licensed asset is mounted.
+	# Verify background Yumeka hides her right arm from UpperArm_R (zero double-hand/hollow-cuff)
+	# and foreground arm root aligns cleanly onto her real main-world right shoulder.
 	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
-		await _ticks(24)
+		await _ticks(6)
 		var relay: Dictionary = yumeka.call("debug_hazard_relay_state")
-		_check(bool(relay.active) and float(relay.arm_lift) > 0.15,
-				"background Yumeka locks gaze and raises her right arm during finger_poke windup")
+		var sh_main: Vector3 = yumeka.call("get_right_shoulder_main_world_pos")
+		var ua_room: Vector3 = yumeka.call("debug_bone_pos", "UpperArm_R")
+		var hand_room: Vector3 = yumeka.call("debug_bone_pos", "Hand_R")
+		var st_now: Dictionary = hazards.debug_state()
+		var arm_root: Vector3 = st_now.arm_root_pos
+		_check(bool(relay.active) and bool(relay.arm_hidden)
+				and float(relay.right_arm_scale) < 0.01
+				and hand_room.distance_to(ua_room) < 0.01
+				and sh_main.z > 2000.0 and sh_main.y > 500.0
+				and arm_root.distance_to(sh_main) < 25.0,
+				"background Yumeka collapses her right arm into UpperArm_R and foreground arm aligns to real right shoulder")
 
 	# Advance to touchdown (windup = 2.4 s = 144 ticks at 60 fps) and verify impact resolution.
 	# Right before touchdown, place the rival back near the center to also verify crush damage.
@@ -2603,8 +2613,12 @@ func _desk_hazards_finger_poke() -> void:
 	if yumeka != null and bool(yumeka.call("debug_is_mounted")):
 		await _ticks(60)
 		var relay_done: Dictionary = yumeka.call("debug_hazard_relay_state")
-		_check(not bool(relay_done.active) and float(relay_done.arm_lift) < 0.05,
-				"background Yumeka right arm smoothly returns to seated desk rest after poke")
+		var ua_rest: Vector3 = yumeka.call("debug_bone_pos", "UpperArm_R")
+		var hand_rest: Vector3 = yumeka.call("debug_bone_pos", "Hand_R")
+		_check(not bool(relay_done.active) and not bool(relay_done.arm_hidden)
+				and float(relay_done.right_arm_scale) > 0.98
+				and hand_rest.distance_to(ua_rest) > 0.15,
+				"background Yumeka right arm smoothly restores to full scale and seated desk rest after poke")
 
 	# 5. Missing Yumeka GLB graceful placeholder fallback (zero errors, valid mesh, zero colliders).
 	hazards.debug_force_placeholder(true)

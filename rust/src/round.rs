@@ -2506,7 +2506,9 @@ impl HarborRound {
             } else {
                 eye_height
             };
-            let regular_far = (self.world_limit * 4.4 + height * 3.0).max(2500.0);
+            // The far plane covers the whole island, the tallest body, and foreground
+            // desk-hazard arms reaching all the way back to Yumeka's right shoulder (~3.7 km).
+            let regular_far = (self.world_limit * 6.5 + height * 3.0).max(4600.0);
             if regular_far != self.regular_camera_far {
                 self.regular_camera_far = regular_far;
                 camera.set_far(regular_far);

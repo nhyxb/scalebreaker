@@ -74,11 +74,15 @@ var _eye_pitch := 0.0              # positive = lower irises toward diorama
 var _gaze_swing := Vector2.ZERO    # neutral (diorama) gaze angle (degrees), subtracted
 var _gaze_override: Vector3        # world-space debug/test target (0,0,0 = off)
 ## Dual-layer desk-hazard relay state (driven by scenes/desk_hazards.gd).
+const FALLBACK_SHOULDER_MAIN_WORLD := Vector3(636.0, 823.0, 2926.0)
+const ARM_COLLAPSED_SCALE := 0.0001
+
 var _hazard_active := false
 var _hazard_target_room := Vector3.ZERO
-var _hazard_arm_target := 0.0      # desired right-arm lift [0..1]
-var _hazard_arm_lift := 0.0        # smoothed right-arm lift [0..1]
+var _hazard_arm_target := 0.0      # desired relay intensity [0..1]
+var _hazard_arm_lift := 0.0        # smoothed relay intensity [0..1]
 var _hazard_arm_aim_x := 0.0       # normalized horizontal target offset [-1..+1]
+var _hazard_arm_scale := 1.0       # 0.0001 while foreground arm owns right side; 1.0 at rest
 var _hazard_arm_applied := false   # true while arm bone overrides are active
 var _mobile := false
 
@@ -485,13 +489,25 @@ func _twist_bone_from_base(bone_idx: int, base: Transform3D, axis_a: Vector3, an
 
 
 # --------------------------------------------------------------------------- #
-# Dual-layer desk-hazard relay (background right-arm lift + target gaze lock)
+# Dual-layer desk-hazard relay (background right-arm handoff + shoulder anchor)
 # --------------------------------------------------------------------------- #
 
+## Returns Yumeka's live right shoulder joint (`UpperArm_R` origin) converted from
+## the 1:1 bedroom skybox into main-world harbour coordinates (metres, relative to
+## SandboxAnchor = (0, SANDBOX_ANCHOR_Y, 0), multiplied by 1 / SKY_SCALE = 6666.67).
+func get_right_shoulder_main_world_pos() -> Vector3:
+	if _skeleton == null or _upper_arm_r_idx < 0:
+		return FALLBACK_SHOULDER_MAIN_WORLD
+	var ua_base := _composed_base(_upper_arm_r_idx, _shoulder_r_idx)
+	var shoulder_room := _skeleton.global_transform * ua_base.origin
+	return (shoulder_room - DIORAMA_CENTRE) / SKY_SCALE
+
+
 ## Called by scenes/desk_hazards.gd during foreground hand events: locks Yumeka's
-## gaze onto the city target block and lifts her right arm slightly off the desk
-## into a reaching pose, then smoothly restores her 59c8440 desk rest afterward.
-func set_hazard_relay(active: bool, main_world_target: Vector3, arm_lift: float) -> void:
+## gaze onto the city target block and collapses her background right arm from
+## `UpperArm_R` (including LowerArm_R, Hand_R and all finger children) cleanly into
+## the shoulder socket so there are NEVER two right hands or a hollow cardigan sleeve.
+func set_hazard_relay(active: bool, main_world_target: Vector3, arm_lift := 1.0) -> void:
 	_hazard_active = active
 	_hazard_arm_target = clampf(arm_lift, 0.0, 1.0) if active else 0.0
 	if active:
@@ -501,6 +517,11 @@ func set_hazard_relay(active: bool, main_world_target: Vector3, arm_lift: float)
 			main_world_target.z * SKY_SCALE,
 		)
 		_hazard_arm_aim_x = clampf(main_world_target.x / 700.0, -1.0, 1.0)
+		# Collapse immediately on activation so the very first foreground frame never
+		# shows a duplicate background right arm or hollow cuff.
+		_hazard_arm_scale = ARM_COLLAPSED_SCALE
+		_hazard_arm_lift = maxf(_hazard_arm_lift, _hazard_arm_target)
+		_apply_right_arm_pose()
 	if _sky != null:
 		_sky.mark_dirty()
 
@@ -508,48 +529,50 @@ func set_hazard_relay(active: bool, main_world_target: Vector3, arm_lift: float)
 func _drive_hazard_arm(dt: float) -> void:
 	if _skeleton == null or _upper_arm_r_idx < 0:
 		return
-	var rate := 6.5 if _hazard_arm_target > _hazard_arm_lift else 5.2
-	_hazard_arm_lift = lerpf(_hazard_arm_lift, _hazard_arm_target, 1.0 - exp(-dt * rate))
-	if _hazard_arm_lift < 0.002 and _hazard_arm_target <= 0.0:
-		_hazard_arm_lift = 0.0
-		if _hazard_arm_applied:
-			# Restore the exact SeatedPose right-arm rest relative to current Chest.
-			for pair in [
-				[_shoulder_r_idx, _chest_idx],
-				[_upper_arm_r_idx, _shoulder_r_idx],
-				[_lower_arm_r_idx, _upper_arm_r_idx],
-				[_hand_r_idx, _lower_arm_r_idx],
-			]:
-				var child_i: int = pair[0]
-				var parent_i: int = pair[1]
-				if child_i >= 0:
-					_skeleton.set_bone_global_pose(child_i, _composed_base(child_i, parent_i))
-			_hazard_arm_applied = false
+	if _hazard_active:
+		_hazard_arm_scale = ARM_COLLAPSED_SCALE
+		_hazard_arm_lift = lerpf(_hazard_arm_lift, _hazard_arm_target, 1.0 - exp(-dt * 8.0))
+		_apply_right_arm_pose()
 		return
 
+	if not _hazard_arm_applied:
+		return
+	# Smoothly restore background right arm back to SeatedPose desk rest after handoff ends.
+	_hazard_arm_lift = lerpf(_hazard_arm_lift, 0.0, 1.0 - exp(-dt * 12.0))
+	_hazard_arm_scale = lerpf(_hazard_arm_scale, 1.0, 1.0 - exp(-dt * 14.0))
+	if _hazard_arm_scale > 0.995 and _hazard_arm_lift < 0.005:
+		_hazard_arm_scale = 1.0
+		_hazard_arm_lift = 0.0
+		for pair in [
+			[_shoulder_r_idx, _chest_idx],
+			[_upper_arm_r_idx, _shoulder_r_idx],
+			[_lower_arm_r_idx, _upper_arm_r_idx],
+			[_hand_r_idx, _lower_arm_r_idx],
+		]:
+			var child_i: int = pair[0]
+			var parent_i: int = pair[1]
+			if child_i >= 0:
+				_skeleton.set_bone_global_pose(child_i, _composed_base(child_i, parent_i))
+		_hazard_arm_applied = false
+		return
+	_apply_right_arm_pose()
+
+
+func _apply_right_arm_pose() -> void:
+	if _skeleton == null or _upper_arm_r_idx < 0:
+		return
 	_hazard_arm_applied = true
-	var lift := _hazard_arm_lift
-	var aim_yaw := _hazard_arm_aim_x * deg_to_rad(9.0) * lift
-	# Skeleton space: +Z faces the sandbox, +Y is up, -X is her right side.
-	# Negative rotation about +X raises forward-pointing limbs upward off the desk.
 	if _shoulder_r_idx >= 0:
 		var sh_base := _composed_base(_shoulder_r_idx, _chest_idx)
+		var sh_yaw := _hazard_arm_aim_x * deg_to_rad(4.0) * _hazard_arm_lift
 		_twist_bone_from_base(_shoulder_r_idx, sh_base,
-				Vector3.RIGHT, deg_to_rad(-6.0) * lift,
-				Vector3.UP, aim_yaw * 0.35)
-	if _upper_arm_r_idx >= 0:
-		var ua_base := _composed_base(_upper_arm_r_idx, _shoulder_r_idx)
-		_twist_bone_from_base(_upper_arm_r_idx, ua_base,
-				Vector3.RIGHT, deg_to_rad(-22.0) * lift,
-				Vector3.UP, aim_yaw * 0.65)
-	if _lower_arm_r_idx >= 0:
-		var la_base := _composed_base(_lower_arm_r_idx, _upper_arm_r_idx)
-		_twist_bone_from_base(_lower_arm_r_idx, la_base,
-				Vector3.RIGHT, deg_to_rad(-14.0) * lift)
-	if _hand_r_idx >= 0:
-		var h_base := _composed_base(_hand_r_idx, _lower_arm_r_idx)
-		_twist_bone_from_base(_hand_r_idx, h_base,
-				Vector3.RIGHT, deg_to_rad(12.0) * lift)
+				Vector3.RIGHT, deg_to_rad(-3.0) * _hazard_arm_lift,
+				Vector3.UP, sh_yaw)
+	var ua_base := _composed_base(_upper_arm_r_idx, _shoulder_r_idx)
+	var s := clampf(_hazard_arm_scale, ARM_COLLAPSED_SCALE, 1.0)
+	_skeleton.set_bone_global_pose(
+			_upper_arm_r_idx,
+			Transform3D(ua_base.basis.scaled(Vector3.ONE * s), ua_base.origin))
 
 
 func debug_hazard_relay_state() -> Dictionary:
@@ -557,6 +580,9 @@ func debug_hazard_relay_state() -> Dictionary:
 		"active": _hazard_active,
 		"arm_target": _hazard_arm_target,
 		"arm_lift": _hazard_arm_lift,
+		"arm_hidden": _hazard_active and _hazard_arm_scale <= ARM_COLLAPSED_SCALE * 2.0,
+		"right_arm_scale": _hazard_arm_scale,
+		"right_shoulder_main": get_right_shoulder_main_world_pos(),
 		"target_room": _hazard_target_room,
 	}
 

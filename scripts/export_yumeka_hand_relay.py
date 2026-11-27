@@ -1,28 +1,30 @@
 #!/usr/bin/env blender --background
-"""Yumeka foreground relay right-hand GLB exporter for Scalebreaker (Phase 3B-1).
+"""Yumeka foreground relay FULL right-arm GLB exporter for Scalebreaker (Phase 3B-1).
 
 Pipeline (run from the repo root):
-    blender --background --python scripts/export_yumeka_hand_relay.py -- --preview
     blender --background --python scripts/export_yumeka_hand_relay.py --
 
 1. Locate YUMEKA_v1.0.4.zip (default ~/Downloads/) and extract YUMEKA_v1.0.4/Blend/Yumeka.blend
    to a temp directory outside the repository (zero licensed assets ever committed).
-2. Rebuild the body & clothes materials with the exact same soft matte anime Principled BSDF
-   used by `scripts/export_yumeka_seated.py` (2048px packed textures, zero emission).
-3. Pose Yumeka's right arm and right hand into a natural single-finger poke gesture:
-   - Index finger extended with a gentle organic curve (not stiff 0 deg),
-   - Middle, ring, little fingers progressively curled into the palm about their verified
-     anatomical flexion axis `local (1, 0, 0)` (negative degrees curl toward palm),
-   - Thumb gently tucked beside the curled middle finger with zero palm self-clipping,
-   - Slight wrist extension so the fingertip leads cleanly downward.
-4. Bake the posed deformation onto the three right-arm meshes (`Yumeka_Body`,
-   `Yumeka_Cos_Jacket`, `Yumeka_Cos_Vest_Shirt`), discard all non-arm geometry & torso/shoulder
-   spill, keep the full forearm + sleeve cuff + lower upper-arm sleeve seamlessly.
-5. Orient the baked right hand in 1:6,667 main-world scale (index finger width ~96-100 m)
-   approaching diagonally downward from Yumeka's right shoulder in the southeast sky
-   (`APPROACH_DIR_GODOT = (0.32, 0.90, 0.30)`), and shift the origin `(0, 0, 0)` directly
-   onto the lowest contact point of the index fingertip pad so Godot placement at
-   `(target.x, height, target.z)` is sub-metre exact.
+2. Rebuild `Yumeka_Body` & `Yumeka_Clothes` with the exact same soft matte anime
+   Principled BSDF used by `scripts/export_yumeka_seated.py` (2048px packed textures).
+3. Pose Yumeka's complete right arm into a natural reaching single-finger poke:
+   - Subtle elbow arch (`LowerArm_R -14 deg`) and wrist flexion (`Hand_R -18 deg`) so the
+     arm reaches cleanly from her real right shoulder over the southern harbour while the
+     extended index fingertip descends steeply onto the city block,
+   - Index finger extended with a gentle curve (`-4/-9/-7 deg`),
+   - Middle, ring, little fingers tightly curled into the palm about `local (1, 0, 0)`,
+   - Thumb adducted inward (`local Z -34 deg`) and tucked cleanly across the palm.
+4. Keep the COMPLETE right arm (`Yumeka_Body`, `Yumeka_Cos_Jacket`, `Yumeka_Cos_Vest_Shirt`)
+   all the way up to the shoulder joint (`UpperArm_R.head`) at the EXACT true 1:6,667 scale
+   matching `Yumeka_seated.glb` (`BODY_SCALE = 1.05 * 6666.67 = 7000.0`, no stretch!).
+   Keep the upper arm & shoulder seam 100% unmodified so it joins background Yumeka's right
+   shoulder seamlessly; only gently tidy the loose lower cuff right around the wrist.
+5. Align to canonical Godot local axes for zero-effort runtime shoulder alignment:
+   - Origin `(0, 0, 0)`       == index fingertip pad contact point
+   - Local `+Z`               == fingertip -> `UpperArm_R.head` (`(0, 0, +ARM_CHORD_LENGTH)`)
+   - Local `+Y`               == dorsal / skyward (back of hand & elbow arch)
+   - Local `+X`               == outer-right / little-finger side (`-X` == thumb / chest side)
 6. Export static `assets/characters/yumeka/Yumeka_hand_relay.glb` (gitignored).
 """
 
@@ -47,17 +49,13 @@ DEFAULT_OUT = os.path.join(
 )
 
 TEXTURE_SIZE = 2048
-# Calibrated at 1:6,667 so Yumeka's petite anime index finger reads ~96-100 m wide
-# across the intermediate/distal fingertip zone (destruction radius ~110 m).
-TARGET_INDEX_WIDTH_M = 96.0
 
-# Approach vector in Godot main-world space (pointing FROM landing spot UP toward
-# Yumeka's right shoulder in the south-east sky: +X east, +Y up, +Z south).
-# Steep ~20 deg slant keeps the sleeve cuff high above the hand and gives a crisp
-# vertical pointing silhouette from downtown street angles.
-APPROACH_DIR_GODOT = Vector((0.24, 0.94, 0.24)).normalized()
+# Exact 1:6,667 world scale matching `export_yumeka_seated.py::BODY_SCALE = 1.05`
+# and `skybox_bedroom.gd::SKY_SCALE = 1.0 / 6666.67` (zero distortion vs background body).
+BODY_SCALE = 1.05
+SKY_INV_SCALE = 6666.67
+WORLD_SCALE = BODY_SCALE * SKY_INV_SCALE  # 7000.0035
 
-# Only the three meshes carrying right forearm skin, jacket sleeve, and shirt cuff.
 RIGHT_ARM_MESHES = (
     "Yumeka_Body",
     "Yumeka_Cos_Jacket",
@@ -87,45 +85,45 @@ RIGHT_ARM_BONES = {
     "LittleDistal_R",
 }
 
-TORSO_EXCLUDE_BONES = {"Shoulder_R", "Chest", "Spine", "Hips", "Neck"}
+# Rest-space X cutoff right over the shoulder joint (`UpperArm_R.head` is at -0.0928):
+# captures the complete upper-arm brown cardigan sleeve seamlessly with zero chest bleed.
+ARM_CUTOFF_X = -0.075
 
-# Rest-space X cutoff along the right arm (-X extends toward hand; elbow is at -0.248,
-# wrist at -0.416, fingertip at -0.531). Cutting at -0.19 keeps the full hand, wrist,
-# shirt cuff, jacket sleeve, elbow, and lower upper-arm seamlessly with zero shoulder bleed.
-ARM_CUTOFF_X = -0.19
-
-# Material map (same matte PBR recipe as export_yumeka_seated.py).
 MATERIAL_MAP = {
     "Yumeka_Body": ("Yumeka_body", False),
     "Yumeka_Clothes": ("Yumeka_clothes", False),
 }
 
-# Local-axis finger & wrist twists for a natural single-finger poke gesture.
-# Verified anatomical flexion axis for all fingers is local (1, 0, 0) with negative
-# angles curling smoothly downward toward the palm.
+# Local-axis arm, wrist & finger twists for a graceful reaching single-finger poke.
+# Verified anatomical flexion axis for elbow/wrist/fingers is local (1, 0, 0) where
+# negative angles flex downward toward the palm (creating a natural upward elbow arch
+# relative to the fingertip-to-shoulder chord and pitching the fingertip steeply down).
 POKE_LOCAL_TWISTS = [
-    # Subtle natural wrist angle so the pointing index finger leads cleanly out of the cuff.
-    ("Hand_R", (1, 0, 0), 6.0),
+    # Graceful natural elbow arch & downward wrist tilt so the forearm & curled hand
+    # stay cleanly above downtown skyscrapers while the fingertip lands steeply first.
+    ("LowerArm_R", (1, 0, 0), -20.0),
+    ("Hand_R", (1, 0, 0), -16.0),
     ("Hand_R", (0, 0, 1), -3.0),
-    # Index finger: extended cleanly with a soft, natural curve (never a rigid rod).
+    # Index finger: extended cleanly with a soft organic curve.
     ("IndexProximal_R", (1, 0, 0), -4.0),
-    ("IndexIntermediate_R", (1, 0, 0), -9.0),
-    ("IndexDistal_R", (1, 0, 0), -7.0),
-    # Middle, ring, little fingers: cleanly curled into the palm so the index finger dominates.
-    ("MiddleProximal_R", (1, 0, 0), -74.0),
-    ("MiddleIntermediate_R", (1, 0, 0), -86.0),
-    ("MiddleDistal_R", (1, 0, 0), -44.0),
-    ("RingProximal_R", (1, 0, 0), -80.0),
-    ("RingIntermediate_R", (1, 0, 0), -90.0),
-    ("RingDistal_R", (1, 0, 0), -48.0),
-    ("LittleProximal_R", (1, 0, 0), -84.0),
-    ("LittleIntermediate_R", (1, 0, 0), -92.0),
-    ("LittleDistal_R", (1, 0, 0), -50.0),
-    # Thumb: adducted inward (-Z) and curled across the palm beside the curled middle finger.
-    ("ThumbProximal_R", (0, 0, 1), -34.0),
-    ("ThumbProximal_R", (1, 0, 0), -40.0),
-    ("ThumbIntermediate_R", (1, 0, 0), -44.0),
-    ("ThumbDistal_R", (1, 0, 0), -30.0),
+    ("IndexIntermediate_R", (1, 0, 0), -8.0),
+    ("IndexDistal_R", (1, 0, 0), -6.0),
+    # Middle, ring, little fingers: tightly curled into the palm.
+    ("MiddleProximal_R", (1, 0, 0), -78.0),
+    ("MiddleIntermediate_R", (1, 0, 0), -90.0),
+    ("MiddleDistal_R", (1, 0, 0), -46.0),
+    ("RingProximal_R", (1, 0, 0), -84.0),
+    ("RingIntermediate_R", (1, 0, 0), -94.0),
+    ("RingDistal_R", (1, 0, 0), -50.0),
+    ("LittleProximal_R", (1, 0, 0), -88.0),
+    ("LittleIntermediate_R", (1, 0, 0), -96.0),
+    ("LittleDistal_R", (1, 0, 0), -52.0),
+    # Thumb: adducted across the palm (-Z) and gently elevated so it rests cleanly
+    # against the curled middle finger well clear of city rooftops.
+    ("ThumbProximal_R", (0, 0, 1), -28.0),
+    ("ThumbProximal_R", (1, 0, 0), 16.0),
+    ("ThumbIntermediate_R", (0, 0, 1), -26.0),
+    ("ThumbDistal_R", (0, 0, 1), -20.0),
 ]
 
 
@@ -135,6 +133,11 @@ POKE_LOCAL_TWISTS = [
 
 def _log(msg: str) -> None:
     print(f"[yumeka-hand-relay] {msg}", flush=True)
+
+
+def _smoothstep(edge0: float, edge1: float, x: float) -> float:
+    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
 
 
 def locate_blend(override: str) -> str:
@@ -188,7 +191,6 @@ def rebuild_materials() -> None:
         tree.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
         if use_alpha:
             tree.links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
-        # Unified soft matte anime look matching Yumeka_seated.glb.
         bsdf.inputs["Roughness"].default_value = 0.88
         bsdf.inputs["Metallic"].default_value = 0.0
         bsdf.inputs["Specular IOR Level"].default_value = 0.35
@@ -235,7 +237,7 @@ def pose_finger_poke(arm_obj: bpy.types.Object) -> None:
         bend_local(arm_obj, bone_name, local_axis, deg)
     bpy.ops.object.mode_set(mode="OBJECT")
     bpy.context.view_layer.update()
-    _log(f"posed single-finger poke on {len(POKE_LOCAL_TWISTS)} local twists")
+    _log(f"posed reaching single-finger poke on {len(POKE_LOCAL_TWISTS)} local twists")
 
 
 def drop_unused_objects(arm_obj: bpy.types.Object) -> list[bpy.types.Object]:
@@ -253,10 +255,11 @@ def drop_unused_objects(arm_obj: bpy.types.Object) -> list[bpy.types.Object]:
     return kept
 
 
-def bake_and_extract_right_arm(
+def bake_and_extract_full_right_arm(
     arm_obj: bpy.types.Object, meshes: list[bpy.types.Object]
-) -> tuple[list[bpy.types.Object], Vector, float, dict]:
-    """Evaluate posed right arm, prune non-arm faces, measure finger width, and bake static meshes."""
+) -> tuple[list[bpy.types.Object], dict]:
+    """Bake full right arm from UpperArm_R shoulder cap to index fingertip at true 1:6,667 scale,
+    oriented into canonical Godot axes (+Z toward shoulder, +Y dorsal/up, +X outer-right)."""
     deps = bpy.context.evaluated_depsgraph_get()
     baked_objs: list[bpy.types.Object] = []
     index_distal_pts: list[Vector] = []
@@ -269,11 +272,24 @@ def bake_and_extract_right_arm(
         "ThumbIntermediate_R", "ThumbDistal_R",
     }
 
+    # Posed bone landmarks in Blender world space (before rebasing).
+    pb_ua = arm_obj.pose.bones["UpperArm_R"]
+    pb_la = arm_obj.pose.bones["LowerArm_R"]
+    pb_hand = arm_obj.pose.bones["Hand_R"]
+    pb_idx_prox = arm_obj.pose.bones["IndexProximal_R"]
+    pb_idx_dist = arm_obj.pose.bones["IndexDistal_R"]
+    shoulder_raw = arm_obj.matrix_world @ pb_ua.head
+    elbow_raw = arm_obj.matrix_world @ pb_la.head
+    wrist_raw = arm_obj.matrix_world @ pb_hand.head
+    forearm_dir = (wrist_raw - elbow_raw).normalized()
+
     for src in meshes:
-        # Capture rest-space eligibility mask BEFORE baking deformation.
         arm_gids = {vg.index for vg in src.vertex_groups if vg.name in RIGHT_ARM_BONES}
-        torso_gids = {vg.index for vg in src.vertex_groups if vg.name in TORSO_EXCLUDE_BONES}
-        idx_dist_gid = src.vertex_groups.get("IndexDistal_R").index if src.vertex_groups.get("IndexDistal_R") else -1
+        idx_dist_gid = (
+            src.vertex_groups.get("IndexDistal_R").index
+            if src.vertex_groups.get("IndexDistal_R")
+            else -1
+        )
         idx_mid_gids = {
             vg.index for vg in src.vertex_groups
             if vg.name in {"IndexIntermediate_R", "IndexDistal_R"}
@@ -281,29 +297,29 @@ def bake_and_extract_right_arm(
         curled_gids = {vg.index for vg in src.vertex_groups if vg.name in curled_groups}
 
         keep_vert = [False] * len(src.data.vertices)
+        rest_x = [v.co.x for v in src.data.vertices]
         is_idx_dist = [False] * len(src.data.vertices)
         is_idx_mid = [False] * len(src.data.vertices)
         is_curled = [False] * len(src.data.vertices)
 
         for i, v in enumerate(src.data.vertices):
             wa = sum(g.weight for g in v.groups if g.group in arm_gids)
-            wt = sum(g.weight for g in v.groups if g.group in torso_gids)
-            if wa >= 0.45 and wt < 0.25 and v.co.x <= ARM_CUTOFF_X:
+            if wa >= 0.25 and v.co.x <= ARM_CUTOFF_X:
                 keep_vert[i] = True
             if src.name == "Yumeka_Body":
-                if idx_dist_gid >= 0 and any(g.group == idx_dist_gid and g.weight > 0.5 for g in v.groups):
+                if idx_dist_gid >= 0 and any(
+                    g.group == idx_dist_gid and g.weight > 0.5 for g in v.groups
+                ):
                     is_idx_dist[i] = True
                 if sum(g.weight for g in v.groups if g.group in idx_mid_gids) > 0.5:
                     is_idx_mid[i] = True
                 if sum(g.weight for g in v.groups if g.group in curled_gids) > 0.5:
                     is_curled[i] = True
 
-        # Evaluate deformed mesh (Armature + Smooth-by-Angle applied cleanly).
         ev = src.evaluated_get(deps)
         eval_mesh = bpy.data.meshes.new_from_object(
             ev, preserve_all_data_layers=True, depsgraph=deps
         )
-        # Apply object world transform directly into vertices so everything shares world space.
         eval_mesh.transform(ev.matrix_world)
 
         if len(eval_mesh.vertices) != len(keep_vert):
@@ -320,42 +336,44 @@ def bake_and_extract_right_arm(
                 if is_curled[i]:
                     curled_pts.append(v.co.copy())
 
-        # Remove every non-right-arm face cleanly with bmesh.
+        # Gently tidy ONLY the oversized lower wrist cuff overhang (rest_x < -0.34),
+        # leaving the upper arm & shoulder seam (rest_x >= -0.26) 100% untouched so it
+        # connects seamlessly onto background Yumeka's cardigan shoulder.
+        if src.name in ("Yumeka_Cos_Jacket", "Yumeka_Cos_Vest_Shirt"):
+            is_jacket = src.name == "Yumeka_Cos_Jacket"
+            pull_max = 0.036 if is_jacket else 0.028
+            base_r = 0.042 if is_jacket else 0.030
+            flare_keep = 0.24 if is_jacket else 0.22
+            for i, v in enumerate(eval_mesh.vertices):
+                if not keep_vert[i]:
+                    continue
+                t = _smoothstep(-0.32, -0.43, rest_x[i])
+                if t <= 0.0:
+                    continue
+                # Pull cuff smoothly back along posed forearm axis toward elbow.
+                v.co -= forearm_dir * (pull_max * t)
+                # Cinch extreme bell flare around the posed forearm centerline.
+                rel = v.co - elbow_raw
+                along = rel.dot(forearm_dir)
+                radial = rel - forearm_dir * along
+                r = radial.length
+                if r > base_r and r > 1e-6:
+                    r_target = base_r + (r - base_r) * flare_keep
+                    r_new = r + (r_target - r) * t
+                    v.co = elbow_raw + forearm_dir * along + radial * (r_new / r)
+
         bm = bmesh.new()
         bm.from_mesh(eval_mesh)
         bm.verts.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
         drop_faces = [f for f in bm.faces if not all(keep_vert[v.index] for v in f.verts)]
         bmesh.ops.delete(bm, geom=drop_faces, context="FACES")
-        # Remove loose verts / edges left behind.
         loose_verts = [v for v in bm.verts if not v.link_faces]
         if loose_verts:
             bmesh.ops.delete(bm, geom=loose_verts, context="VERTS")
-
-        # Pull Yumeka's oversized cardigan/shirt moe-sleeves naturally back to the wrist
-        # (as gravity does when reaching downward) and cinch the 11 cm bell flare so the
-        # cuff frames her bare wrist cleanly without ringing the hand like a hollow pipe.
-        if src.name in ("Yumeka_Cos_Jacket", "Yumeka_Cos_Vest_Shirt"):
-            is_jacket = src.name == "Yumeka_Cos_Jacket"
-            pull_back = 0.056 if is_jacket else 0.044
-            base_r = 0.036 if is_jacket else 0.027
-            flare_keep = 0.20 if is_jacket else 0.18
-            arm_cy, arm_cz = 0.034, 1.058
-            for v in bm.verts:
-                v.co.x += pull_back
-                dy = v.co.y - arm_cy
-                dz = v.co.z - arm_cz
-                r = (dy * dy + dz * dz) ** 0.5
-                if r > base_r and r > 1e-6:
-                    r_new = base_r + (r - base_r) * flare_keep
-                    ratio = r_new / r
-                    v.co.y = arm_cy + dy * ratio
-                    v.co.z = arm_cz + dz * ratio
-
         bm.to_mesh(eval_mesh)
         bm.free()
 
-        # Drop shape keys and vertex groups on the static relay mesh.
         baked = bpy.data.objects.new(src.name + "_Relay", eval_mesh)
         bpy.context.scene.collection.objects.link(baked)
         baked_objs.append(baked)
@@ -364,98 +382,82 @@ def bake_and_extract_right_arm(
             f"{len(eval_mesh.polygons)} polys"
         )
 
-    # Read forearm-to-knuckle axis so the forearm plunges steeply down along APPROACH_DIR
-    # while the gently curved index finger extends naturally downward out of the palm.
-    pb_arm = arm_obj.pose.bones["LowerArm_R"]
-    pb_prox = arm_obj.pose.bones["IndexProximal_R"]
-    pb_dist = arm_obj.pose.bones["IndexDistal_R"]
-    arm_start = arm_obj.matrix_world @ pb_arm.head
-    arm_end = arm_obj.matrix_world @ pb_prox.head
-    arm_dir_raw = (arm_end - arm_start).normalized()
-    finger_start = arm_obj.matrix_world @ pb_prox.head
-    finger_end = arm_obj.matrix_world @ pb_dist.tail
-    finger_dir_raw = (finger_end - finger_start).normalized()
-
-    # Measure perpendicular width of the index finger across Intermediate+Distal in raw metres.
-    # Back-of-hand normal in posed space is roughly +Z; width axis is cross(finger_dir, +Z).
+    # Measure true index finger width at 1:6,667 scale.
+    finger_dir_raw = (
+        (arm_obj.matrix_world @ pb_idx_dist.tail) - (arm_obj.matrix_world @ pb_idx_prox.head)
+    ).normalized()
     width_axis = finger_dir_raw.cross(Vector((0.0, 0.0, 1.0))).normalized()
     w_proj = [p.dot(width_axis) for p in index_mid_pts]
     raw_finger_width = max(w_proj) - min(w_proj)
-    scale = TARGET_INDEX_WIDTH_M / raw_finger_width
 
-    # Remove original rigged meshes and armature now that baked static copies exist.
+    # Compute fingertip pad contact point: most-distal tip of IndexDistal_R along
+    # the vector away from the shoulder (and slightly toward the ventral pad -Z).
+    approx_dir = (
+        sum(index_distal_pts, Vector()) / len(index_distal_pts) - shoulder_raw
+    ).normalized()
+    pad_score = [p.dot(approx_dir) - 0.25 * p.z for p in index_distal_pts]
+    best_score = max(pad_score)
+    pad_pts = [p for p, sc in zip(index_distal_pts, pad_score) if sc >= best_score - 0.0025]
+    tip_raw = sum(pad_pts, Vector()) / len(pad_pts)
+
+    # Remove original rigged meshes & armature now that static copies are baked.
     for src in meshes:
         bpy.data.objects.remove(src, do_unlink=True)
     bpy.data.objects.remove(arm_obj, do_unlink=True)
 
-    # Compute rotation aligning the posed right forearm & hand to the steep southeast poke.
-    # glTF exports Blender (bx, by, bz) -> Godot (bx, bz, -by), so Godot (gx, gy, gz) maps to
-    # Blender (gx, -gz, gy).
-    def godot_to_blender(v: Vector) -> Vector:
-        return Vector((v.x, -v.z, v.y))
+    # Canonical Godot local frame:
+    #   +Z (Godot) -> (0, -1, 0) in Blender : fingertip (0,0,0) -> shoulder UpperArm_R.head
+    #   +Y (Godot) -> (0,  0, 1) in Blender : dorsal / back of hand / elbow arch
+    #   +X (Godot) -> (1,  0, 0) in Blender : outer-right / little-finger side
+    src_z = (shoulder_raw - tip_raw).normalized()
+    src_x = Vector((0.0, 0.0, 1.0)).cross(src_z).normalized()  # +Y in Blender == little finger
+    src_y = src_z.cross(src_x).normalized()                    # +Z in Blender == dorsal/up
 
-    # Desired forearm/pointing axis in Godot: steeply DOWN along -APPROACH_DIR_GODOT.
-    d_finger = godot_to_blender(-APPROACH_DIR_GODOT).normalized()
-    # Desired thumb side in Godot: WEST / inward toward Yumeka's chest (-X, slightly +Z).
-    d_thumb_hint = godot_to_blender(Vector((-1.0, 0.0, 0.25))).normalized()
-    d_back = d_finger.cross(d_thumb_hint).normalized()
-    d_thumb = d_back.cross(d_finger).normalized()
+    dst_x = Vector((1.0, 0.0, 0.0))
+    dst_y = Vector((0.0, 0.0, 1.0))
+    dst_z = Vector((0.0, -1.0, 0.0))
 
-    # Source basis in posed Blender space anchored on the forearm axis:
-    s_finger = arm_dir_raw
-    s_back = s_finger.cross(Vector((0.0, -1.0, 0.0))).normalized()
-    s_thumb = s_back.cross(s_finger).normalized()
+    src_basis = Matrix((src_x, src_y, src_z)).transposed()
+    dst_basis = Matrix((dst_x, dst_y, dst_z)).transposed()
+    rot_4x4 = (dst_basis @ src_basis.transposed()).to_4x4()
 
-    src_basis = Matrix((s_finger, s_thumb, s_back)).transposed()  # columns = source axes
-    dst_basis = Matrix((d_finger, d_thumb, d_back)).transposed()  # columns = target axes
-    rot_3x3 = dst_basis @ src_basis.transposed()
-    rot_4x4 = rot_3x3.to_4x4()
-
-    # Transform all baked meshes by (scale * rot), then rebase origin to exact fingertip contact!
-    scale_rot = Matrix.Scale(scale, 4) @ rot_4x4
-    xformed_tip = [scale_rot @ p for p in index_distal_pts]
-    # Lowest Z in Blender == lowest Y (ground contact) in Godot!
-    lowest_tip = min(xformed_tip, key=lambda p: p.z)
-    # Center X/Y of fingertip pad around the lowest 20% of distal vertices for dead-center contact.
-    pad_z_cut = lowest_tip.z + 14.0
-    pad_pts = [p for p in xformed_tip if p.z <= pad_z_cut]
-    pad_cx = sum(p.x for p in pad_pts) / len(pad_pts)
-    pad_cy = sum(p.y for p in pad_pts) / len(pad_pts)
-    tip_origin = Vector((pad_cx, pad_cy, lowest_tip.z))
-
-    final_xf = Matrix.Translation(-tip_origin) @ scale_rot
+    # Rebase origin to exact fingertip contact `tip_raw` and apply true 1:6,667 scale!
+    final_xf = Matrix.Scale(WORLD_SCALE, 4) @ rot_4x4 @ Matrix.Translation(-tip_raw)
     for ob in baked_objs:
         ob.data.transform(final_xf)
         ob.data.update()
 
-    # QA stats in Godot coordinates: (x, y_up=z_bl, z_south=-y_bl)
-    all_pts = []
-    for ob in baked_objs:
-        for v in ob.data.vertices:
-            all_pts.append(Vector((v.co.x, v.co.z, -v.co.y)))
-    tip_godot = [Vector((p.x, p.z, -p.y)) for p in [final_xf @ q for q in index_distal_pts]]
-    curled_godot = [Vector((p.x, p.z, -p.y)) for p in [final_xf @ q for q in curled_pts]]
+    # Convert QA landmarks to Godot coordinates: (x, y_up=z_bl, z_back=-y_bl).
+    def to_godot(p: Vector) -> Vector:
+        q = final_xf @ p
+        return Vector((q.x, q.z, -q.y))
+
+    tip_g = to_godot(tip_raw)
+    shoulder_g = to_godot(shoulder_raw)
+    elbow_g = to_godot(elbow_raw)
+    wrist_g = to_godot(wrist_raw)
+    all_g = [Vector((v.co.x, v.co.z, -v.co.y)) for ob in baked_objs for v in ob.data.vertices]
+    curled_g = [to_godot(p) for p in curled_pts]
+    # Check approximate world clearance of curled palm/thumb when aimed at downtown (~15.1 deg elevation).
+    curled_world_y = [p.z * 0.261 + p.y * 0.965 for p in curled_g]
 
     stats = {
+        "world_scale": round(WORLD_SCALE, 2),
         "raw_index_width_m": round(raw_finger_width, 5),
-        "world_scale": round(scale, 1),
-        "final_index_width_m": round(raw_finger_width * scale, 1),
-        "tip_min_y_m": round(min(p.y for p in tip_godot), 3),
-        "tip_center_xz_m": (
-            round(sum(p.x for p in tip_godot) / len(tip_godot), 1),
-            round(sum(p.z for p in tip_godot) / len(tip_godot), 1),
-        ),
-        "curled_fingers_min_y_m": round(min(p.y for p in curled_godot), 1),
-        "bounds_godot_min": tuple(
-            round(min(p[i] for p in all_pts), 1) for i in range(3)
-        ),
-        "bounds_godot_max": tuple(
-            round(max(p[i] for p in all_pts), 1) for i in range(3)
-        ),
+        "true_index_width_m": round(raw_finger_width * WORLD_SCALE, 1),
+        "arm_chord_length_m": round(shoulder_g.z, 1),
+        "tip_godot": tuple(round(c, 2) for c in tip_g),
+        "wrist_godot": tuple(round(c, 1) for c in wrist_g),
+        "elbow_godot": tuple(round(c, 1) for c in elbow_g),
+        "shoulder_godot": tuple(round(c, 1) for c in shoulder_g),
+        "curled_min_z_m": round(min(p.z for p in curled_g), 1),
+        "curled_min_world_y_downtown_m": round(min(curled_world_y), 1),
+        "bounds_godot_min": tuple(round(min(p[i] for p in all_g), 1) for i in range(3)),
+        "bounds_godot_max": tuple(round(max(p[i] for p in all_g), 1) for i in range(3)),
         "total_polys": sum(len(o.data.polygons) for o in baked_objs),
         "total_verts": sum(len(o.data.vertices) for o in baked_objs),
     }
-    return baked_objs, tip_origin, scale, stats
+    return baked_objs, stats
 
 
 def export_glb(path: str, objs: list[bpy.types.Object]) -> None:
@@ -480,59 +482,6 @@ def export_glb(path: str, objs: list[bpy.types.Object]) -> None:
     _log(f"exported {path} ({size_mb:.2f} MB)")
 
 
-def render_preview(out_dir: str, objs: list[bpy.types.Object]) -> None:
-    """Quick Blender EEVEE silhouette preview of the posed hand relative to a 110 m circle."""
-    scene = bpy.context.scene
-    bpy.ops.mesh.primitive_cylinder_add(radius=110.0, depth=2.0, location=(0.0, 0.0, -1.0))
-    disc = bpy.context.active_object
-    disc.name = "PreviewZone"
-    mat = bpy.data.materials.new("zone")
-    mat.use_nodes = False
-    mat.diffuse_color = (0.95, 0.55, 0.15, 1.0)
-    disc.data.materials.append(mat)
-
-    sun_data = bpy.data.lights.new("prev_sun", "SUN")
-    sun_data.energy = 2.8
-    sun = bpy.data.objects.new("prev_sun", sun_data)
-    scene.collection.objects.link(sun)
-    sun.rotation_euler = (radians(48), radians(15), radians(35))
-
-    fill_data = bpy.data.lights.new("prev_fill", "SUN")
-    fill_data.energy = 1.2
-    fill = bpy.data.objects.new("prev_fill", fill_data)
-    scene.collection.objects.link(fill)
-    fill.rotation_euler = (radians(115), radians(-25), radians(160))
-
-    if scene.world is None:
-        scene.world = bpy.data.worlds.new("world")
-    scene.world.use_nodes = False
-    scene.world.color = (0.32, 0.36, 0.44)
-
-    cam_data = bpy.data.cameras.new("prev_cam")
-    cam_data.lens = 35
-    cam_data.clip_start = 1.0
-    cam_data.clip_end = 10000.0
-    cam = bpy.data.objects.new("prev_cam", cam_data)
-    scene.collection.objects.link(cam)
-    scene.camera = cam
-    scene.render.engine = "BLENDER_EEVEE"
-    scene.render.resolution_x = 800
-    scene.render.resolution_y = 800
-
-    # Blender coords: X east, Y north (-Z Godot), Z up (+Y Godot).
-    shots = {
-        "hand_front_north": (Vector((-120.0, 820.0, 260.0)), Vector((80.0, -60.0, 340.0))),
-        "hand_side_west": (Vector((-860.0, 40.0, 240.0)), Vector((80.0, -80.0, 340.0))),
-    }
-    os.makedirs(out_dir, exist_ok=True)
-    for name, (pos, aim) in shots.items():
-        cam.location = pos
-        cam.rotation_euler = (pos - aim).to_track_quat("Z", "Y").to_euler()
-        scene.render.filepath = os.path.join(out_dir, f"{name}.png")
-        bpy.ops.render.render(write_still=True)
-        _log(f"preview saved: {scene.render.filepath}")
-
-
 # --------------------------------------------------------------------------- #
 # Entry point
 # --------------------------------------------------------------------------- #
@@ -541,15 +490,12 @@ def main() -> None:
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     zip_override = ""
     out_path = DEFAULT_OUT
-    preview_only = False
     it = iter(argv)
     for arg in it:
         if arg == "--zip":
             zip_override = next(it, "")
         elif arg == "--out":
             out_path = next(it, DEFAULT_OUT)
-        elif arg == "--preview":
-            preview_only = True
 
     blend_path = locate_blend(zip_override)
     _log(f"opening {blend_path}")
@@ -559,20 +505,14 @@ def main() -> None:
     meshes = drop_unused_objects(arm)
     rebuild_materials()
     pose_finger_poke(arm)
-    baked, _, _, stats = bake_and_extract_right_arm(arm, meshes)
+    baked, stats = bake_and_extract_full_right_arm(arm, meshes)
     for k, v in stats.items():
         _log(f"{k} = {v}")
 
-    if stats["curled_fingers_min_y_m"] < 80.0:
-        raise SystemExit(
-            f"curled fingers too close to ground ({stats['curled_fingers_min_y_m']} m)"
-        )
-    if abs(stats["tip_min_y_m"]) > 0.1:
-        raise SystemExit(f"fingertip origin misaligned: tip_min_y_m={stats['tip_min_y_m']}")
-
-    if preview_only:
-        render_preview(os.path.join(REPO_ROOT, "build", "tmp", "yumeka_hand_preview"), baked)
-        return
+    if abs(stats["shoulder_godot"][0]) > 1.0 or abs(stats["shoulder_godot"][1]) > 1.0:
+        raise SystemExit(f"shoulder not aligned to +Z axis: {stats['shoulder_godot']}")
+    if stats["arm_chord_length_m"] < 2400.0 or stats["arm_chord_length_m"] > 3400.0:
+        raise SystemExit(f"unexpected 1:6,667 arm chord length: {stats['arm_chord_length_m']} m")
 
     export_glb(out_path, baked)
     print("[yumeka-hand-relay] DONE")
