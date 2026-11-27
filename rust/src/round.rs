@@ -110,6 +110,10 @@ fn rival_engage_range(reach: f32, speed: f32, scale: f32) -> f32 {
     (reach + speed * 2.5).clamp(10.0, 75.0_f32.max(2.0 * GIANT_RADIUS * scale + reach))
 }
 
+fn close_combat_range(height: f32, target_radius: f32) -> f32 {
+    height * 0.34 + target_radius
+}
+
 #[derive(Clone, Copy)]
 struct ImpactArea {
     center: Vector3,
@@ -481,6 +485,7 @@ struct Giant {
     growth_in: f32,
     rubble_passes: Vec<(Footprint, Gd<StaticBody3D>)>,
     chase_target: Option<InstanceId>,
+    ai_punched: bool,
     chase_hidden_for: f32,
     roam_goal: Option<Vector3>,
     path: Vec<Vector3>,
@@ -581,6 +586,7 @@ impl Giant {
             growth_in: 0.0,
             rubble_passes: Vec::new(),
             chase_target: None,
+            ai_punched: false,
             chase_hidden_for: 0.0,
             roam_goal: None,
             path: Vec::new(),
@@ -629,9 +635,11 @@ impl Giant {
         body.set_collision_mask(31);
         body.call("show_respawn", &[]);
         let kills = self.match_kills;
+        let was_human = self.human;
         // The personality survives death: the same character keeps its traits.
         let personality = self.personality;
         *self = Self::new_life(body, self.index, self.model_scale);
+        self.human = was_human;
         self.match_kills = kills;
         self.personality = personality;
         self.resize(starting_scale, max_height);
@@ -695,8 +703,7 @@ impl Giant {
         self.body.set_floor_snap_length(0.4 * height.min(1.0));
     }
 
-    /// Switch between the small human stage and the giant stage. A giant never shrinks back into
-    /// the human stage during a round; only a respawn or a height-band limit can do that.
+    /// Switch body and animation rigs for a new life or a transformation.
     fn set_stage(&mut self, human: bool, max_height: f32) {
         if self.human == human {
             return;
@@ -1092,7 +1099,7 @@ impl INode3D for HarborRound {
             scale,
             self.growth_rules.is_some(),
         ));
-        self.sync_actor_stage(0);
+        self.sync_spawn_stage(0);
         if let Some(scene) = self.giant_scene.clone() {
             let mut others = self.base().get_node_as::<Node3D>("OtherGiants");
             for index in 1..self.settings.giant_count {
@@ -1118,10 +1125,11 @@ impl INode3D for HarborRound {
                     scale,
                     self.growth_rules.is_some(),
                 ));
-                self.sync_actor_stage(index);
+                self.sync_spawn_stage(index);
             }
         }
         self.path_requests.resize(self.giants.len(), None);
+        let scale = self.giants[0].scale;
         if self.player == PlayerRole::Giant {
             self.yaw = 0.0;
             self.pitch = self.starting_giant_camera_pitch(scale);
@@ -1290,7 +1298,7 @@ impl INode3D for HarborRound {
                 self.update_building_respawns(delta);
             }
             if self.mode == Mode::Growth {
-                self.update_coin_wave(dt);
+                self.update_map_coins(dt);
             }
             self.advance_giant_growth(dt);
             for giant in &mut self.giants {
@@ -1514,26 +1522,7 @@ impl HarborRound {
         actor.sit_in = (actor.sit_in - dt).max(0.0);
         let can_demolish = self.can_demolish(actor);
         let can_crush = self.can_crush_buildings(actor);
-        {
-            let current_mask = giant.get_collision_mask();
-            // Once touch-crush is unlocked, ignore building colliders completely so footsteps
-            // pass straight through instead of snagging on facades.
-            let mut new_mask = if can_crush {
-                current_mask & !BUILDING_LAYER
-            } else {
-                current_mask | BUILDING_LAYER
-            };
-            if self.growth_rules.is_some() {
-                new_mask = if can_crush {
-                    new_mask & !RUBBLE_LAYER
-                } else {
-                    new_mask | RUBBLE_LAYER
-                };
-            }
-            if new_mask != current_mask {
-                giant.set_collision_mask(new_mask);
-            }
-        }
+        self.sync_building_mask(&mut giant, can_crush);
 
         // Sitting (or being sat on) owns the whole body: no input, no AI, no other attack.
         if actor.sit.is_some() || self.maybe_start_sit(actor, player, stand_pressed, dt) {
@@ -1581,9 +1570,13 @@ impl HarborRound {
             actor.fixed_walk_tempo = fixed_walk_tempo;
             giant.set("fixed_walk_tempo", &fixed_walk_tempo.to_variant());
         }
-        let mut ai_hold_for_scenery: Option<Vector3> = None;
+        let mut ai_hold_heading = None;
         if !player {
-            giant_direction = self.pursue(actor, giant_speed, dt);
+            giant_direction = self.pursue(actor, giant_speed, dt, &mut ai_hold_heading);
+            if actor.sitting() {
+                self.drive_sit(actor, dt, false);
+                return;
+            }
             if self.ai_attacks_scenery(actor)
                 && !can_crush
                 && actor.intent != Intent::Evade
@@ -1619,7 +1612,7 @@ impl HarborRound {
                     let forward = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
                     let aligned_for_hand = forward.dot(to_surface) >= 0.78;
                     if !aligned_for_hand && hand_range > 0.0 && dist <= hand_range && Self::ready_for_hand_move(actor) {
-                        ai_hold_for_scenery = Some(to_surface);
+                        ai_hold_heading = Some(to_surface);
                     } else if actor.sit_in <= 0.0
                         && dist <= sit_range
                         && self.maybe_start_ai_building_sit(actor, surface)
@@ -1636,7 +1629,7 @@ impl HarborRound {
                     {
                         // Stand ready facing the facade while a swing finishes or before punching,
                         // rather than grinding pelvis/legs into an indestructible wall.
-                        ai_hold_for_scenery = Some(to_surface);
+                        ai_hold_heading = Some(to_surface);
                     }
                 }
             }
@@ -1708,15 +1701,15 @@ impl HarborRound {
             && !actor.human
             && backward_input
             && actor.pending_hand.is_none()
-            && ai_hold_for_scenery.is_none();
-        if ai_hold_for_scenery.is_some() {
+            && ai_hold_heading.is_none();
+        if ai_hold_heading.is_some() {
             giant_direction = Vector3::ZERO;
         }
         let steer_idle_dir = steer_yaw.map(|yaw| Vector3::FORWARD.rotated(Vector3::UP, yaw));
         let turn_intent = if backpedal {
             camera_fwd
         } else {
-            ai_hold_for_scenery
+            ai_hold_heading
                 .or(steer_dir)
                 .or(steer_idle_dir)
                 .unwrap_or(giant_direction)
@@ -1903,7 +1896,7 @@ impl HarborRound {
             && carry_vel.length_squared() <= 0.0001
             && actor.pending_hand.is_none()
         {
-            if let Some(aim) = ai_hold_for_scenery {
+            if let Some(aim) = ai_hold_heading {
                 ((-aim.x).atan2(-aim.z), false)
             } else if let Some(view_yaw) = steer_yaw {
                 (view_yaw, false)
@@ -1982,12 +1975,14 @@ impl HarborRound {
     fn debug_resize_giant(&mut self, index: i32, height: f32) {
         let ceiling = (self.max_height / GIANT_START_HEIGHT).max(0.0001);
         let scale = (height / GIANT_START_HEIGHT).clamp(0.0001, ceiling);
-        let Some(actor) = self.giants.iter_mut().find(|giant| giant.index == index) else {
+        let Some(slot) = self.giants.iter().position(|giant| giant.index == index) else {
             return;
         };
+        let actor = &mut self.giants[slot];
         actor.health_fraction = 1.0;
         actor.growth_limit = ceiling;
         actor.resize(scale, self.max_height);
+        self.sync_spawn_stage(slot);
     }
 
     #[func]
@@ -2001,7 +1996,7 @@ impl HarborRound {
     }
 
     /// Test/debug view of the live coin field: tier, dwell requirement and
-    /// ground position of every coin in the wave.
+    /// ground position and remaining lifetime of every coin.
     #[func]
     fn coin_debug(&self) -> Array<VarDictionary> {
         self.coin_debug_entries()
@@ -2310,6 +2305,7 @@ impl HarborRound {
         );
         snapshot.set("giant_scale", giant.scale);
         snapshot.set("giant_height", giant.height(self.max_height));
+        snapshot.set("can_crush_buildings", self.can_crush_buildings(giant));
         snapshot.set("giant_respawning", giant.health_fraction <= 0.0);
         snapshot.set("giant_respawn_in", giant.respawn_in);
         self.snapshot_growth(giant, &mut snapshot);
@@ -2952,9 +2948,9 @@ impl HarborRound {
         self.settings.npc_interval * random_range(0.75, 1.25)
     }
 
-    /// Growth actors start as ordinary humans and only turn into giants at the demolition
-    /// height. Outside growth mode every actor is always in its giant stage.
-    fn is_human_stage(&self, scale: f32) -> bool {
+    /// The configured threshold classifies custom starting heights. During a life
+    /// the stage changes only when the actor banks enough coins.
+    fn starts_human(&self, scale: f32) -> bool {
         self.mode == Mode::Growth
             && self
                 .growth_rules
@@ -3014,13 +3010,23 @@ impl HarborRound {
         }
     }
 
-    fn sync_actor_stage(&mut self, index: usize) -> bool {
-        let human = self.is_human_stage(self.giants[index].scale);
-        let became_giant = self.giants[index].human && !human;
-        if human != self.giants[index].human {
-            self.giants[index].set_stage(human, self.max_height);
+    fn sync_spawn_stage(&mut self, index: usize) {
+        let human = self.starts_human(self.giants[index].scale);
+        if human {
+            self.max_height = self.max_height.max(GROWTH_CRUSH_HEIGHT);
         }
-        became_giant
+        let actor = &mut self.giants[index];
+        if human {
+            actor.scale = HUMAN_HEIGHT / GIANT_START_HEIGHT;
+        }
+        if actor.human == human {
+            actor.resize(actor.scale, self.max_height);
+        } else {
+            actor.set_stage(human, self.max_height);
+        }
+        let crush = self.can_crush_buildings(&self.giants[index]);
+        let mut body = self.giants[index].body.clone();
+        self.sync_building_mask(&mut body, crush);
     }
 
     pub(super) fn audio(&self) -> Option<Gd<Node>> {
@@ -3444,7 +3450,7 @@ impl HarborRound {
                 self.rivals
                     .iter()
                     .filter(|rival| {
-                        growth && rival.index != actor.index && self.is_human_stage(rival.scale)
+                        growth && rival.index != actor.index && rival.human
                     })
                     .map(|rival| {
                         (
@@ -3473,7 +3479,7 @@ impl HarborRound {
                 self.rivals
                     .iter()
                     .filter(|rival| rival.index != actor.index)
-                    .filter(|rival| !self.is_human_stage(rival.scale))
+                    .filter(|rival| !rival.human)
                     .map(|rival| CombatTarget {
                         body: rival.body.clone(),
                         position: rival.position,
@@ -3510,15 +3516,18 @@ impl HarborRound {
                 let enemy_reach = footfall_reach(scale) + GIANT_RADIUS * actor.scale;
                 let hits = scale * health * rules.base_health / (actor.scale * rules.base_attack);
                 let outmatched = scale * health > 1.5 * actor.scale * actor.health_fraction;
-                let attack_range = if !can_demolish {
+                let close_peer = HandMove::Punch.size_allows(actor_height, target.size.height)
+                    && distance <= close_combat_range(actor_height, target.size.radius);
+                let attack_range = if close_peer {
+                    close_combat_range(actor_height, target.size.radius)
+                } else if !can_demolish {
                     if outmatched || (scale >= actor.scale && hits > 2.0) {
                         continue;
                     }
                     reach * if hits <= 1.0 { 3.0 } else { 1.7 }
                 } else {
                     match tier {
-                        // Incidental footfall in passing only — never a chase.
-                        SizeTier::Trivial => reach,
+                        SizeTier::Trivial => reach + speed,
                         // Ambush the uphill rival only while scale×HP + boldness say so.
                         SizeTier::Uphill
                             if !ambush_uphill(
@@ -3586,7 +3595,13 @@ impl HarborRound {
         self.can_demolish(actor) && self.mode != Mode::Brawl && !self.ai_at_current_cap(actor)
     }
 
-    fn pursue(&mut self, actor: &mut Giant, speed: f32, dt: f32) -> Vector3 {
+    fn pursue(
+        &mut self,
+        actor: &mut Giant,
+        speed: f32,
+        dt: f32,
+        hold_heading: &mut Option<Vector3>,
+    ) -> Vector3 {
         self.refresh_damage_targets(actor);
         if actor.human {
             // Humans only forage for coins. They cannot start a fight, so they never chase one,
@@ -3691,6 +3706,7 @@ impl HarborRound {
             .map(|(target, _, _)| target.body.instance_id());
         if actor.chase_target != chosen {
             actor.chase_target = chosen;
+            actor.ai_punched = false;
             actor.chase_hidden_for = 0.0;
             actor.blocking_target = None;
             actor.replan_in = 0.0;
@@ -3812,31 +3828,38 @@ impl HarborRound {
             };
             let approaching = actor.footfall.as_ref()
                 .is_some_and(|step| step.threatens(predicted, target_radius));
-            if visible && self.mode != Mode::Human
-                && self.start_ai_hand_move(actor, &target, approaching)
-            {
-                return Vector3::ZERO;
+            let fits_punch = HandMove::Punch.size_allows(my_height, target.size.height);
+            let fits_grab = HandMove::GrabCrush.size_allows(my_height, target.size.height);
+            let close_peer = fits_punch && offset.length() <= close_combat_range(my_height, target_radius);
+            let attacking = actor.intent == Intent::Attack || (visible && close_peer);
+            if visible && self.mode != Mode::Human && attacking {
+                let seat_opportunity = (fits_punch && actor.ai_punched)
+                    || (!fits_punch && !fits_grab && target.size.height < my_height);
+                if seat_opportunity && !approaching
+                    && self.maybe_start_ai_combat_sit(actor, predicted, target_radius)
+                {
+                    return Vector3::ZERO;
+                }
+                if let Some(heading) = self.try_ai_hand_move(actor, &target, approaching) {
+                    *hold_heading = Some(heading);
+                    return Vector3::ZERO;
+                }
             }
-            // Trivial targets get incidental footfalls only. Pursued prey is
-            // intercepted ahead of its current velocity, offset to put an
-            // alternating shoe, rather than the gap between the feet, on course.
-            if actor.intent == Intent::Attack && (tier.chases() || target.rival.is_none()) {
-                let heading = offset.normalized_or_zero();
-                let side = actor.footfall.as_ref().map_or_else(
-                    || actor.last_footfall.as_ref().map_or(1.0, |sole| if sole.left { -1.0 } else { 1.0 }),
-                    |step| if step.sole.left { 1.0 } else { -1.0 },
+            if attacking && (tier.chases() || target.rival.is_none() || close_peer) {
+                let heading = Vector3::FORWARD.rotated(Vector3::UP, actor.body.get_rotation().y);
+                let left_shoe = actor.footfall.as_ref().map_or_else(
+                    || actor.last_footfall.as_ref().is_none_or(|sole| !sole.left),
+                    |step| step.sole.left,
                 );
-                let heel_alignment = if offset.length() <= lead_range {
-                    heading.cross(Vector3::UP) * (1.3 * scale * side)
-                } else {
-                    Vector3::ZERO
-                };
-                chase_goal = Some(predicted + heel_alignment);
-            } else if actor.intent == Intent::Attack && tier == SizeTier::Peer
-                && target.rival.is_some()
-            {
-                let side = if actor.index % 2 == 0 { 0.45 } else { -0.45 };
-                chase_goal = Some(predicted + offset.normalized_or_zero().rotated(Vector3::UP, side) * offset.length().min(18.0));
+                chase_goal = Some(ai::combat_approach(
+                    position,
+                    predicted,
+                    heading,
+                    scale,
+                    target.size.height / my_height,
+                    left_shoe,
+                    offset.length() <= lead_range,
+                ));
             }
         }
         if forage_for_coin || (!can_demolish && chase_goal.is_none()) {
@@ -4003,13 +4026,19 @@ impl HarborRound {
         let grudge = actor.memory.grudge.map(|(id, _)| id);
         let mut attack = 0.0;
         if target_visible && let Some(target) = target {
-            let base = if target.rival.is_none() {
+            let height = actor.height(self.max_height);
+            let close = horizontal(target.position - position).length()
+                <= close_combat_range(height, target.size.radius);
+            let base = if target.rival.is_none()
+                || (close && (target.size.height < height
+                    || HandMove::Punch.size_allows(height, target.size.height)))
+            {
                 // Humans and pedestrians are prey by design once they pass the
                 // human-ignore gate: hunting them always outranks demolishing.
                 100.0
             } else {
                 match tier {
-                    SizeTier::Trivial => 12.0,
+                    SizeTier::Trivial => 55.0,
                     SizeTier::Prey => 55.0,
                     SizeTier::Pushover => 65.0,
                     SizeTier::Peer => 48.0,
@@ -4566,10 +4595,20 @@ impl HarborRound {
     }
 
     fn can_crush_buildings(&self, actor: &Giant) -> bool {
-        if self.growth_rules.is_some() {
-            self.can_demolish(actor) && actor.scale >= GROWTH_CRUSH_HEIGHT / GIANT_START_HEIGHT
+        self.can_demolish(actor)
+            && self.mode.allows_step_demolition(actor.scale, actor.progress.destroyed)
+    }
+
+    fn sync_building_mask(&self, body: &mut Gd<CharacterBody3D>, crush: bool) {
+        let mask = body.get_collision_mask();
+        let scenery = if self.mode == Mode::Human {
+            BUILDING_LAYER
         } else {
-            actor.progress.touch_crush_buildings()
+            BUILDING_LAYER | RUBBLE_LAYER
+        };
+        let new_mask = if crush { mask & !scenery } else { mask | scenery };
+        if new_mask != mask {
+            body.set_collision_mask(new_mask);
         }
     }
 
@@ -4591,7 +4630,7 @@ impl HarborRound {
     }
 
     fn crush_touched_buildings(&mut self, actor: &mut Giant, position: Vector3) {
-        if !self.can_crush_buildings(actor) || !self.can_demolish(actor) {
+        if !self.can_crush_buildings(actor) {
             return;
         }
         let radius = GIANT_RADIUS * actor.scale;
@@ -4990,7 +5029,7 @@ mod tests {
         assert!(SizeTier::Pushover.chases());
         assert!(SizeTier::Peer.chases());
         assert!(SizeTier::Uphill.chases());
-        assert!(!SizeTier::Trivial.chases());
+        assert!(SizeTier::Trivial.chases());
         assert!(!SizeTier::Danger.chases());
         assert!(!SizeTier::Overwhelming.chases());
     }

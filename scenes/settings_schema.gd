@@ -166,7 +166,8 @@ const OPTIONS := [
 		"page": PAGE_GAMEPLAY, "group": "giant", "apply": APPLY_NEXT,
 	},
 	{
-		"key": "attack_height", "label": "成巨身高", "hint": "长到这个身高就从人类变成巨人。",
+		"key": "attack_height", "label": "开局巨人门槛",
+		"hint": "初始身高低于此值时，以 1.8 米人类开局。集齐 10 等值金币变身 40 米。",
 		"kind": "number", "step": 0.01, "suffix": " 米", "modes": [2], "advanced": true,
 		"page": PAGE_GAMEPLAY, "group": "giant", "apply": APPLY_NEXT,
 	},
@@ -257,12 +258,12 @@ const OPTIONS := [
 		"page": PAGE_GAMEPLAY, "group": "growth", "apply": APPLY_NEXT,
 	},
 	{
-		"key": "coin_interval", "label": "金币刷新", "hint": "多久补一波金币。",
+		"key": "coin_interval", "label": "金币寿命", "hint": "每枚金币的寿命在此时长的 0.6 至 1.5 倍之间。",
 		"kind": "number", "step": 0.5, "suffix": " 秒", "modes": [2], "advanced": true,
 		"page": PAGE_GAMEPLAY, "group": "growth", "apply": APPLY_NEXT,
 	},
 	{
-		"key": "coin_growth_rate", "label": "金币成长", "hint": "吃一枚金币能长多少。",
+		"key": "coin_growth_rate", "label": "金币成长", "hint": "巨人捡到金币时获得的身高增幅。",
 		"kind": "number", "step": 1.0, "suffix": " %", "percent": true, "modes": [2], "advanced": true,
 		"page": PAGE_GAMEPLAY, "group": "growth", "apply": APPLY_NEXT,
 	},

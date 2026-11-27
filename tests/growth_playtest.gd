@@ -23,7 +23,7 @@ func _run() -> void:
 	await _defaults_and_coins()
 	await _mapwide_coins()
 	await _split_growth_rates()
-	await _camera_switches_at_one_meter()
+	await _coin_lifecycle()
 	await _contact_damage()
 	await _combat_unlock()
 	await _demolition_and_rivals()
@@ -38,7 +38,6 @@ func _run() -> void:
 	await _manual_camera_toggle()
 	await _first_person_eye_tracks_head()
 	await _first_person_view_limits()
-	await _early_rival_combat()
 	await _giant_ai_vs_human()
 	await _huge_rivals_engage()
 	await _idle_ai_keeps_wandering()
@@ -71,18 +70,18 @@ func _defaults_and_coins() -> void:
 	button.pressed.emit()
 	var match_round := _round()
 	var state: Dictionary = match_round.snapshot()
-	_check(is_equal_approx(state.giant_height, 0.01) and is_equal_approx(state.giant_health, 100.0)
-			and is_equal_approx(state.giant_attack, 10.0) and state.get("human_stage", false)
+	_check(is_equal_approx(state.giant_height, 1.8) and is_equal_approx(state.giant_health, 18000.0)
+			and is_equal_approx(state.giant_attack, 1800.0) and state.get("human_stage", false)
 			and not state.can_attack and not state.can_demolish,
-			"The menu starts a one-centimeter human with 100 health and 10 attack")
+			"The menu starts a 1.8 m human with height-scaled health and attack")
 	await _ticks(5)
 	var giant := _giant()
 	var start := giant.position
 	var rival_start: Vector3 = match_round.get_node("OtherGiants/Giant2").position
 	_check(start.distance_to(rival_start) >= 900.0, "A two-giant opening spreads the rivals across the harbor")
-	_check(_first_person_camera_active() and giant.is_on_floor()
+	_check(root.get_camera_3d().get_parent() == match_round.get_node("Orbit/Arm") and giant.is_on_floor()
 			and (ui.find_child("GiantHealth", true, false) as ProgressBar).value == 1.0,
-			"The centimeter human starts at eye level with a visible body and a full health bar")
+			"The human starts with a usable camera and a full health bar")
 	_check(match_round.get_node("Civilians").get_child_count() == 0,
 			"Growth mode no longer spawns pedestrian NPCs")
 	var district: Node3D = match_round.get_node("District")
@@ -93,22 +92,24 @@ func _defaults_and_coins() -> void:
 			and is_zero_approx(district.get_node("Ground/Collision").position.y),
 			"The lowered pavement geometry leaves depth separation without moving the floor collision")
 	var orbit: Node3D = match_round.get_node("Orbit")
-	_mouse(Vector2(110.0, -155.0))
+	match_round.set_camera_view(2)
+	_mouse(Vector2(110.0, -300.0))
 	_check(angle_difference(0.0, orbit.rotation.y) < -0.20 and orbit.rotation.x > 0.35,
 			"The first-person camera follows yaw and can look up")
-	_mouse(Vector2(-110.0, 155.0))
+	_mouse(Vector2(-110.0, 300.0))
+	match_round.set_camera_view(0)
 	Input.action_press("move_forward")
 	await _ticks(8)
 	Input.action_release("move_forward")
 	var travel := start.z - giant.position.z
-	_check(travel > 0.0035 and travel < 0.0052 and giant.is_on_floor(),
-			"A one-centimeter human walks at the height-scaled human rate")
+	_check(travel > 0.65 and travel < 0.9 and giant.is_on_floor(),
+			"The human walks at the standard human rate")
 	_game.show_menu()
 
 	(ui.find_child("MenuSettings", true, false) as BaseButton).pressed.emit()
 	var panel := ui.find_child("GameplaySettings", true, false) as Control
 	(panel.find_child("GrowthSettingsTab", true, false) as Button).pressed.emit()
-	_check(is_equal_approx((panel.find_child("giant_height", true, false) as SpinBox).value, 0.01)
+	_check(is_equal_approx((panel.find_child("giant_height", true, false) as SpinBox).value, 1.8)
 			and (panel.find_child("coin_count", true, false) as SpinBox).value == 200
 			and (panel.find_child("coin_interval", true, false) as SpinBox).value == 60.0
 			and (panel.find_child("coin_growth_rate", true, false) as SpinBox).value == 10.0
@@ -120,7 +121,7 @@ func _defaults_and_coins() -> void:
 			and (panel.find_child("human_ignore_ratio", true, false) as SpinBox).value == 30.0
 			and panel.find_child("civilian_height", true, false) == null
 			and panel.find_child("safe_height", true, false) == null,
-			"The growth settings tab keeps the centimeter start, coin defaults and split growth rates without pedestrian controls")
+			"The growth settings tab keeps the 1.8 m start, coin defaults and split growth rates without pedestrian controls")
 	var fields := {"giant_count": 1, "npc_initial": 0, "coin_count": 4, "coin_interval": 2,
 			"respawn_delay": 1.5, "rival_ignore_ratio": 12.5}
 	for key in fields:
@@ -143,31 +144,17 @@ func _defaults_and_coins() -> void:
 	var first_spawn := _giant().position
 	var coins := match_round.get_node("Coins")
 	_check(coins.get_child_count() == 4, "The opening batch spawns the configured number of coins")
-	var first: Node3D = coins.get_child(0)
-	var old_position := first.position
-	for other: Node3D in coins.get_children():
-		if other != first and other.position.distance_to(first.position) < 0.015:
-			other.position += Vector3.RIGHT * 0.03
-	_giant().position = first.position + Vector3.UP * 0.01
-	await _ticks(28)
+	_giant().position = OPEN_STREET
+	_place_coins(coins, OPEN_STREET, 1)
+	await _ticks(8)
 	state = match_round.snapshot()
-	var expected := pow(1.1, state.coins_collected)
-	_check(state.coins_collected > 0 and is_equal_approx(state.giant_height, 0.01 * expected)
-			and is_equal_approx(state.giant_max_health, 100.0 * expected)
-			and is_equal_approx(state.giant_attack, 10.0 * expected),
-			"Coin pickup multiplies height, health and attack together")
-	var old_coins := coins.get_children()
-	var time_left: float = state.coin_refresh_in
-	_game.pause()
-	await _ticks(125)
-	_check(is_equal_approx(match_round.snapshot().coin_refresh_in, time_left), "Pause freezes the coin timer")
-	_game.resume()
-	await _ticks(125)
-	var old_present := false
-	for coin in old_coins:
-		old_present = old_present or is_instance_valid(coin)
-	_check(not old_present and coins.get_child_count() == 4 and coins.get_child(0).position != old_position,
-			"The next wave removes every leftover coin and generates new positions")
+	var hud: Label = ui.get("_growth_coins")
+	_check(state.coins_collected == 1 and state.coin_value == 1.0
+			and is_equal_approx(state.giant_height, 1.8)
+			and is_equal_approx(state.giant_max_health, 18000.0),
+			"An ordinary coin banks one equivalent without changing human height or health")
+	_check(hud.text == "金币 1 / 10 · 满额变身 40 米" and not state.has("coin_refresh_in"),
+			"The HUD shows transformation progress with no wave countdown")
 	_game.restart()
 	await _ticks(4)
 	_check(_round().snapshot().coins_collected == 0 and _round().get_node("Coins").get_child_count() == 4
@@ -183,8 +170,8 @@ func _mapwide_coins() -> void:
 	var state: Dictionary = match_round.snapshot()
 	var coins_node := match_round.get_node("Coins")
 	var coins := coins_node.get_children()
-	_check(coins.size() == 200 and state.coin_refresh_in > 58.0 and state.coin_refresh_in <= 60.0,
-			"Default growth spawns one map-wide wave of 200 coins with a 60-second timer regardless of giant count")
+	_check(coins.size() == 200 and match_round.coin_debug().all(func(row): return row.ttl > 35.0 and row.ttl <= 90.0),
+			"The default opening spawns 200 coins with lifetimes proportional to the 60-second setting")
 	var giants: Array[Node3D] = [_giant(), match_round.get_node("OtherGiants/Giant2")]
 	var min_x := INF
 	var max_x := -INF
@@ -306,24 +293,27 @@ func _split_growth_rates() -> void:
 			and not profile.has("growth_rate"),
 			"Coin settings outside the former limits and zero building growth persist independently")
 
-	_start({"giant_height": 2.0, "attack_height": 3.0, "coin_count": 2,
-			"coin_growth_rate": 0.5, "building_growth_rate": 0.2})
+	_start({"giant_count": 2, "coin_count": 2, "coin_growth_rate": 0.5,
+			"building_growth_rate": 0.2, "coin_interval": 600.0})
 	var match_round := _round()
 	var giant := _giant()
 	await _ticks(4)
-	var coin: Node3D = match_round.get_node("Coins").get_child(0)
-	giant.position = coin.position + Vector3.UP * 0.01
+	match_round.debug_resize_giant(0, 3.0)
+	giant.position = OPEN_STREET
+	match_round.get_node("OtherGiants/Giant2").position = Vector3(600.0, 0.02, 600.0)
+	_place_coins(match_round.get_node("Coins"), OPEN_STREET, 1)
 	await _ticks(35)
 	var after_coin: Dictionary = match_round.snapshot()
-	_check(after_coin.coins_collected == 1 and is_equal_approx(after_coin.giant_height, 3.0)
-			and after_coin.can_demolish,
-			"Coin pickup applies only the configured coin growth rate (50%)")
+	_check(after_coin.coins_collected == 1 and is_equal_approx(after_coin.giant_height, 4.5),
+			"A giant pickup applies only the configured coin growth rate (50%)")
 	var building: Node3D = match_round.get_node("District/Targets/DockPress1")
 	for hit in 9:
+		if building.get_node("BlockingBody").collision_layer == 0:
+			break
 		await FootfallFixture.sit_building(match_round, building)
 	await _ticks(35)
 	_check(match_round.snapshot().giant_destroyed == 1
-			and is_equal_approx(match_round.snapshot().giant_height, 3.6),
+			and is_equal_approx(match_round.snapshot().giant_height, 5.4),
 			"Active demolition applies only the configured building growth rate (20%)")
 	_game.show_menu()
 
@@ -379,81 +369,113 @@ func _split_growth_rates() -> void:
 	await process_frame
 
 
-func _camera_switches_at_one_meter() -> void:
-	_start({"giant_height": 0.95, "coin_count": 1, "base_health": 4.0})
-	var match_round := _round()
-	await _ticks(5)
-	var giant := _giant()
-	var orbit: Node3D = match_round.get_node("Orbit")
-	var camera := root.get_camera_3d()
-	_check(_first_person_camera_active(), "Camera stays first person just below one meter")
-	_mouse(Vector2(135.0, 5.0))
-	var yaw := orbit.rotation.y
-	var coin: Node3D = match_round.get_node("Coins").get_child(0)
-	giant.position = coin.position + Vector3.UP * 0.01
-	await _ticks(45)
-	var arm: SpringArm3D = match_round.get_node("Orbit/Arm")
-	_check(match_round.snapshot().giant_height >= 1.0 and root.get_camera_3d() == camera
-			and camera.get_parent() == arm and arm.get_hit_length() > 0.9
-			and not giant.get_node("Model").visible and giant.get_node("HumanModel").visible
-			and is_equal_approx(orbit.rotation.y, yaw),
-			"Coin growth across one meter keeps the human model and restores the third-person arm")
+func _coin_lifecycle() -> void:
+	seed(13124)
+	_start({"giant_count": 1, "coin_count": 8, "coin_interval": 6.0})
+	await _ticks(4)
+	var round := _round()
+	var opened: Array[Dictionary] = round.coin_debug()
+	opened.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.ttl < b.ttl)
+	var first: Dictionary = opened.front()
+	var last: Dictionary = opened.back()
+	var first_node := instance_from_id(first.id) as Node3D
+	_giant().position = OPEN_STREET
+	first_node.position = OPEN_STREET + Vector3.FORWARD * 12.0
+	_check(last.ttl - first.ttl > 0.5 and first.ttl >= 3.5 and last.ttl <= 9.0,
+			"Opening coins receive distinct lifetimes in the configured range")
+	_game.pause()
+	await _ticks(75)
+	_check(is_equal_approx(_coin_row(round, first.id).ttl, first.ttl),
+			"Pausing freezes each coin lifetime")
+	_game.resume()
+
+	var saw_visible := false
+	var saw_hidden := false
+	var switches := [0, 0]
+	var last_lit := true
+	var existed := true
+	for frame in 560:
+		await physics_frame
+		var row := _coin_row(round, first.id)
+		if row.is_empty():
+			existed = false
+			break
+		if row.expiring and first_node.has_meta("expiry_remaining"):
+			var lit: bool = first_node.get_child(0).visible
+			saw_visible = saw_visible or lit
+			saw_hidden = saw_hidden or not lit
+			if last_lit != lit:
+				if row.ttl >= 2.5:
+					switches[0] += 1
+				elif row.ttl < 1.5:
+					switches[1] += 1
+			last_lit = lit
+	_check(saw_visible and saw_hidden and switches[1] > switches[0],
+			"At four seconds the token starts flashing, and the flash accelerates toward expiry")
+	_check(not existed and not _coin_row(round, last.id).is_empty(),
+			"The earliest coin disappears while other opening coins survive")
+
+	var opening_ids := opened.map(func(row: Dictionary) -> int: return row.id)
+	var new_ids := {}
+	var largest_burst := 0
+	for frame in 150:
+		await physics_frame
+		var arrived := 0
+		for row in round.coin_debug():
+			if not opening_ids.has(row.id) and not new_ids.has(row.id):
+				new_ids[row.id] = true
+				arrived += 1
+		largest_burst = maxi(largest_burst, arrived)
+	_check(largest_burst >= 1 and largest_burst <= 3 and round.coin_debug().size() <= 8,
+			"Vacancies refill in batches of one to three without exceeding the count")
+	round.debug_resize_giant(0, 40.0)
+	_place_coins(round.get_node("Coins"), OPEN_STREET, 1)
+	var before_morph := {}
+	for row in round.coin_debug():
+		before_morph[row.id] = true
+	await _ticks(135)
+	_check(round.coin_debug().all(func(row): return before_morph.has(row.id))
+			and round.coin_debug().size() < before_morph.size(),
+			"Remaining coins can disappear after the last human is gone and no new coins spawn")
 	_game.show_menu()
 
+
+func _coin_row(round: Node, id: int) -> Dictionary:
+	for row in round.coin_debug():
+		if row.id == id:
+			return row
+	return {}
+
+
+func _place_coins(coins: Node, point: Vector3, count: int) -> void:
+	var placed := 0
+	for coin: Node3D in coins.get_children():
+		if coin.get_child_count() == 0:
+			continue
+		coin.position = point if placed < count else Vector3(500.0, 0.0, 500.0)
+		placed += 1
 
 func _contact_damage() -> void:
-	# A human twice as tall bumps a smaller human; just under twice does nothing.
-	_start({"giant_height": 1.0, "giant_count": 2, "coin_count": 1, "coin_interval": 600.0,
-			"coin_growth_rate": 1.0, "base_health": 1.0, "base_attack": 100.0, "respawn_delay": 60.0})
-	var match_round := _round()
-	var giant := _giant()
-	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
-	giant.position = OPEN_STREET
-	rival.position = Vector3(600.0, 0.02, 600.0)
-	await _ticks(4)
-	for coin in match_round.get_node("Coins").get_children():
-		coin.position = giant.position
-	await _ticks(50)
-	_check(is_equal_approx(match_round.snapshot().giant_height, 2.0),
-			"The larger human grows to exactly twice the rival's height")
-	rival.position = giant.position + Vector3.BACK * 0.55
-	await _ticks(2)
+	_start({"giant_height": 1.0, "giant_count": 2, "coin_count": 0,
+			"base_health": 1.0, "base_attack": 100.0, "respawn_delay": 60.0})
+	var round := _round()
+	var player := _giant()
+	var rival: CharacterBody3D = round.get_node("OtherGiants/Giant2")
+	player.position = OPEN_STREET
+	rival.position = OPEN_STREET + Vector3.FORWARD * 0.86
 	Input.action_press("move_forward")
-	await _ticks(80)
+	for frame in 30:
+		rival.position = OPEN_STREET + Vector3.FORWARD * 0.86
+		await physics_frame
 	Input.action_release("move_forward")
-	var board: Array[Dictionary] = match_round.growth_leaderboard()
-	_check(board[1].rank == 0 and match_round.snapshot().giants_alive == 1,
-			"A human twice as tall bumps the smaller human down")
-	_check(_defeat_messages().size() == 1 and _defeat_messages()[0].contains("撞击击倒"),
-			"The bump broadcasts a collision defeat")
+	var actors: Array = round.growth_actors()
+	var safe := actors.all(func(actor): return actor.human and is_equal_approx(actor.height, 1.8) and is_equal_approx(actor.health, 1.0))
+	_check(safe,
+			"Equal-height growth humans do not damage each other on body contact")
 	_game.show_menu()
-
-	_start({"giant_height": 1.0, "giant_count": 2, "coin_count": 1, "coin_interval": 600.0,
-			"coin_growth_rate": 0.9, "base_health": 1.0, "base_attack": 100.0, "respawn_delay": 60.0})
-	match_round = _round()
-	giant = _giant()
-	rival = match_round.get_node("OtherGiants/Giant2")
-	giant.position = OPEN_STREET
-	rival.position = Vector3(600.0, 0.02, 600.0)
-	await _ticks(4)
-	for coin in match_round.get_node("Coins").get_children():
-		coin.position = giant.position
-	await _ticks(50)
-	rival.position = giant.position + Vector3.BACK * 0.5
-	await _ticks(2)
-	Input.action_press("move_forward")
-	await _ticks(80)
-	Input.action_release("move_forward")
-	board = match_round.growth_leaderboard()
-	_check(is_equal_approx(match_round.snapshot().giant_height, 1.9)
-			and match_round.snapshot().giants_alive == 2 and board[1].rank > 0
-			and _defeat_messages().is_empty(),
-			"Body checks below the two-times height gap deal no damage")
-	_game.show_menu()
-
 
 func _combat_unlock() -> void:
-	_start({"giant_height": 2.8, "giant_count": 2, "coin_count": 1, "coin_interval": 600.0,
+	_start({"giant_height": 2.8, "giant_count": 2, "coin_count": 11, "coin_interval": 600.0,
 			"coin_growth_rate": 0.1, "base_attack": 200.0, "respawn_delay": 60.0})
 	var match_round := _round()
 	await _ticks(5)
@@ -473,13 +495,27 @@ func _combat_unlock() -> void:
 			and not building.get("_cracked") and match_round.snapshot().destroyed == 0,
 			"Human movement below the demolition height leaves buildings and heavy footfalls unchanged")
 	var coins := match_round.get_node("Coins")
-	var coin: Node3D = coins.get_child(0)
-	giant.position = coin.position + Vector3.UP * 0.01
-	await _ticks(70)
+	giant.position = OPEN_STREET
+	_place_coins(coins, OPEN_STREET, 9)
+	await _ticks(6)
+	var ui := _game.get_node("Interface")
+	var radar: Control = ui.get("_coin_radar")
 	var state: Dictionary = match_round.snapshot()
-	_check(state.giant_height >= 3.0 and state.can_demolish and not state.get("human_stage", true)
-			and state.coins_collected >= 1 and coins.get_child_count() == 0,
-			"Coin growth at the demolition height turns the human into a giant and retires the coin field")
+	_check(state.human_stage and is_equal_approx(state.giant_height, 1.8)
+			and state.coin_value == 9.0 and radar.visible,
+			"Nine equivalents leave the player at 1.8 m with human radar")
+	_place_coins(coins, OPEN_STREET, 1)
+	var heights := {}
+	for frame in 8:
+		await physics_frame
+		heights[snappedf(float(match_round.snapshot().giant_height), 0.01)] = true
+	await process_frame
+	state = match_round.snapshot()
+	_check(heights.has(1.8) and heights.has(40.0) and heights.size() == 2
+			and is_equal_approx(state.giant_height, 40.0) and state.coin_value == 10.0
+			and state.can_demolish and state.can_crush_buildings and not state.human_stage
+			and (giant.collision_mask & 24) == 0 and not state.has("coin_radar") and not radar.visible,
+			"The tenth equivalent jumps straight to 40 m, unlocks building passage and hides the radar")
 	_check(giant.get_node("Model").visible and not giant.get_node("HumanModel").visible,
 			"The giant stage swaps the human model for the rounded giant rig")
 	var harvested: int = state.coins_collected
@@ -572,8 +608,8 @@ func _foraging_ai() -> void:
 	coins.get_child(1).position = start + Vector3.FORWARD * 0.474
 	await _ticks(280)
 	var capsule: CapsuleShape3D = rival.get_node("Collision").shape
-	_check(rival.position.distance_to(start) > 0.004 and is_equal_approx(capsule.height, 0.0121)
-			and coins.get_child_count() == 0
+	_check(rival.position.distance_to(start) > 0.004 and is_equal_approx(capsule.height, 1.8)
+			and FootfallFixture.actor(match_round, 1).coin_value == 2.0
 			and int(FootfallFixture.actor(match_round, 1).footfall_count) == 0,
 			"Without a rival in reach the small AI seeks coins before it can demolish")
 	_game.show_menu()
@@ -590,10 +626,11 @@ func _foraging_ai() -> void:
 	far_coin.position = building.position + Vector3(0.0, 0.02, -(float(building.footprint.z) * 0.5 + 3.0))
 	var routed_capsule: CapsuleShape3D = rival.get_node("Collision").shape
 	for frame in 900:
-		if routed_capsule.height >= 2.2:
+		if FootfallFixture.actor(match_round, 1).coin_value == 1.0:
 			break
 		await physics_frame
-	_check(routed_capsule.height >= 2.2,
+	_check(is_equal_approx(routed_capsule.height, 1.8)
+			and FootfallFixture.actor(match_round, 1).coin_value == 1.0,
 			"A small AI routes around a standing building to collect a map-wide coin behind it")
 	_game.show_menu()
 
@@ -658,6 +695,7 @@ func _coin_tiers_and_dwell() -> void:
 	var anchor := OPEN_STREET + Vector3.FORWARD * 60.0
 	var coins := match_round.get_node("Coins")
 	var near_coin: Node3D = coins.get_child(0)
+	var near_id := near_coin.get_instance_id()
 	var zone_coin: Node3D = coins.get_child(1)
 	var far_coin: Node3D = coins.get_child(2)
 	var player := _giant()
@@ -678,14 +716,17 @@ func _coin_tiers_and_dwell() -> void:
 
 	# Human-stage dwell: standing on the Extreme coin fills the bar slowly.
 	player.position = near_coin.position + Vector3.UP * 0.01
+	await _ticks(3)
+	var paused_ttl := float(_coin_row(match_round, near_id).ttl)
 	for frame in 30:
 		rival.position = anchor
 		await physics_frame
 	var actors: Array = match_round.growth_actors()
 	var dwell_while_inside := float(actors[0].dwell)
 	_check(dwell_while_inside > 0.05 and dwell_while_inside < 0.35
-			and int(actors[0].dwell_tier) == 2,
-			"Standing on an Extreme coin fills the dwell bar instead of an instant pickup")
+			and int(actors[0].dwell_tier) == 2
+			and is_equal_approx(_coin_row(match_round, near_id).ttl, paused_ttl),
+			"Standing in the Extreme coin circle fills the dwell bar and holds its lifetime")
 
 	# Leaving the circle decays the bar gradually (~27 %/s), never snapping to zero.
 	player.position = near_coin.position + Vector3.RIGHT * 3.0
@@ -709,19 +750,35 @@ func _coin_tiers_and_dwell() -> void:
 	await _ticks(45)
 	var state: Dictionary = match_round.snapshot()
 	_check(collected > 60 and state.coins_collected == 1
-			and is_equal_approx(state.giant_height, 2.7),
-			"An Extreme coin only completes after the full dwell and pays the 5x growth reward")
+			and state.coin_value == 5.0 and is_equal_approx(state.giant_height, 1.8),
+			"An Extreme coin banks five equivalents after its full dwell")
 
-	# Growing into the giant stage restores instant pickup on every tier.
-	var zone_tier := _tier_of(match_round, zone_coin)
-	match_round.debug_resize_giant(0, 4.0)
-	player.position = zone_coin.position + Vector3.UP * 0.01
-	await _ticks(12)
-	actors = match_round.growth_actors()
+	var third: Node3D = null
+	for coin: Node3D in coins.get_children():
+		if coin != zone_coin and coin.get_child_count() > 0:
+			third = coin
+			break
+	var high_position := zone_coin.position
+	var high_coins: Array[Node3D] = [zone_coin, third]
+	for index in high_coins.size():
+		var high := high_coins[index]
+		player.position = high_position + Vector3.RIGHT * 4.0
+		high.position = high_position
+		for frame in 35:
+			rival.position = anchor
+			await physics_frame
+		player.position = high_position + Vector3.UP * 0.01
+		for frame in 125:
+			rival.position = anchor
+			await physics_frame
+		if index == 0:
+			state = match_round.snapshot()
+			_check(state.coin_value == 7.5 and is_equal_approx(state.giant_height, 1.8),
+					"A High coin banks 2.5 equivalents without changing the human height")
+		await _ticks(2)
 	state = match_round.snapshot()
-	_check(zone_tier == 1 and state.coins_collected == 2
-			and float(actors[0].dwell) == 0.0 and not is_instance_valid(zone_coin),
-			"A giant-stage actor sweeps even a High-tier coin instantly with no dwell bar")
+	_check(state.coin_value == 10.0 and state.can_crush_buildings and is_equal_approx(state.giant_height, 40.0),
+			"One Extreme and two High coins reach the same transformation threshold as ten Normal coins")
 	_game.show_menu()
 
 
@@ -835,36 +892,22 @@ func _demolition_ai() -> void:
 
 
 func _avoidance_ai() -> void:
-	# The growing human AI treats a twice-as-tall human as a threat and walks around it.
-	_start({"giant_height": 1.0, "giant_count": 2, "coin_count": 2, "coin_interval": 600.0,
-			"coin_growth_rate": 1.0, "base_health": 1.0, "respawn_delay": 60.0})
-	var match_round := _round()
-	var player := _giant()
-	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
-	player.position = OPEN_STREET
-	rival.position = Vector3(600.0, 0.02, 600.0)
+	_start({"giant_count": 2, "coin_count": 2, "coin_interval": 600.0, "respawn_delay": 60.0})
 	await _ticks(4)
-	var coins := match_round.get_node("Coins")
-	coins.get_child(0).position = player.position
-	coins.get_child(1).position = Vector3(500.0, 0.0, 500.0)
-	await _ticks(50)
-	_check(is_equal_approx(match_round.snapshot().giant_height, 2.0),
-			"The player is twice the AI's height before the avoidance test")
-	var vessel := OPEN_STREET
-	player.position = vessel
-	rival.position = vessel + Vector3.BACK * 3.0
-	await _ticks(2)
-	var remaining := coins.get_children()
-	if remaining.size() > 0:
-		remaining[0].position = vessel + Vector3.BACK * 7.0
+	var round := _round()
+	var player := _giant()
+	var rival: CharacterBody3D = round.get_node("OtherGiants/Giant2")
+	round.debug_resize_giant(0, 25.2)
+	player.position = OPEN_STREET
+	rival.position = OPEN_STREET + Vector3.BACK * 4.0
+	_place_coins(round.get_node("Coins"), OPEN_STREET + Vector3.FORWARD * 8.0, 1)
 	var closest := INF
-	for frame in 240:
+	for frame in 150:
 		await physics_frame
-		closest = minf(closest, (rival.position - vessel).slide(Vector3.UP).length())
-	var actors: Array = match_round.growth_actors()
-	var alive := float(actors[1]["health"]) > 0.0
-	_check(closest > 0.58 and alive,
-			"The coin-seeking human AI stays outside the larger human's body check")
+		closest = minf(closest, (rival.position - player.position).slide(Vector3.UP).length())
+	var actor := FootfallFixture.actor(round, 1)
+	_check(closest > 2.9 and actor.human and actor.health == 1.0,
+			"A human AI keeps a safe distance from a giant blocking its route")
 	_game.show_menu()
 
 
@@ -887,7 +930,7 @@ func _human_speed_multiplier() -> void:
 		await _ticks(75)
 		Input.action_release("move_forward")
 		var distance := (actor.position - begin).slide(Vector3.UP).length()
-		var expected := 5.8 * 0.5 / 1.8 * 75.0 / 60.0 * speed
+		var expected := 5.8 * 75.0 / 60.0 * speed
 		_check(absf(distance - expected) < expected * 0.09,
 				"Human speed %.1fx scales the growth human walk rate" % speed)
 	_game.show_menu()
@@ -909,7 +952,7 @@ func _walk_tempo_and_own_shake() -> void:
 			peak = maxf(peak, root.get_camera_3d().rotation.length())
 		Input.action_release("move_forward")
 		var distance := (giant.position - at).slide(Vector3.UP).length()
-		var expected := 5.8 * height / 1.8 * 75.0 / 60.0
+		var expected := 5.8 * 75.0 / 60.0
 		_check(is_zero_approx(peak) and absf(distance - expected) < expected * 0.09,
 				"A walking human feels no giant footfall shake and moves at the human rate")
 		_game.show_menu()
@@ -1001,8 +1044,8 @@ func _smallest_walk_at_map_edge() -> void:
 	await _ticks(120)
 	Input.action_release("move_forward")
 	var distance := at - giant.position.z
-	_check(distance > 0.028 and distance < 0.037,
-			"The smallest human walks at the height-scaled human rate far from the map origin")
+	_check(distance > 11.0 and distance < 12.1,
+			"A legacy miniature start walks at the fixed human rate far from the map origin")
 	_game.show_menu()
 
 
@@ -1017,7 +1060,7 @@ func _small_giant_ground_contact_stays_steady() -> void:
 		var camera := root.get_camera_3d()
 		var idle_height := camera.global_position.y
 		await _ticks(12)
-		var stable_at_rest := absf(camera.global_position.y - idle_height) < height * 0.1
+		var stable_at_rest := absf(camera.global_position.y - idle_height) < 0.18
 		var min_height := INF
 		var max_height := -INF
 		var grounded := true
@@ -1029,72 +1072,42 @@ func _small_giant_ground_contact_stays_steady() -> void:
 			max_height = maxf(max_height, camera.global_position.y)
 			grounded = grounded and giant.is_on_floor()
 		Input.action_release("move_forward")
-		_check(stable_at_rest and grounded and giant.position.z < start_z and max_height - min_height < height * 0.1,
-				"The %.0f mm human stays grounded with a steady first-person camera while walking" % (height * 1000.0))
+		_check(stable_at_rest and grounded and giant.position.z < start_z and max_height - min_height < 0.18,
+				"The %.0f mm legacy start stays grounded with a steady camera at normal human scale" % (height * 1000.0))
 		_game.show_menu()
 
 
-func _early_rival_combat() -> void:
-	# Growing into a giant unlocks the heavy gait and hand attacks.
-	_start({"giant_height": 0.5, "giant_count": 2, "coin_count": 4, "coin_interval": 600.0,
-			"coin_growth_rate": 1.0, "giant_speed": 2.0, "respawn_delay": 60.0, "base_attack": 70.0})
-	var match_round := _round()
-	var giant := _giant()
-	var rival: CharacterBody3D = match_round.get_node("OtherGiants/Giant2")
-	giant.position = OPEN_STREET
-	rival.position = OPEN_STREET + Vector3.BACK * 5.0
-	await _ticks(4)
-	var state: Dictionary = match_round.snapshot()
-	_check(is_equal_approx(state.giant_height, 0.5) and state.get("human_stage", false)
-			and not state.can_attack and not state.can_demolish,
-			"Both actors start below the demolition height as humans")
-	var before := int(FootfallFixture.actor(match_round).footfall_count)
-	Input.action_press("move_forward")
-	await _ticks(30)
-	Input.action_release("move_forward")
-	_check(int(FootfallFixture.actor(match_round).footfall_count) == before,
-			"Human-stage walking produces no heavy footfalls")
-	var coins := match_round.get_node("Coins")
-	for coin in coins.get_children():
-		coin.position = giant.position
-	await _ticks(230)
-	state = match_round.snapshot()
-	_check(state.giant_height > 3.0 and state.can_demolish and not state.get("human_stage", true),
-			"Eating coins turns the human into a giant")
-	var rival_health := float(match_round.growth_actors()[1]["health"])
-	FootfallFixture.face(match_round, giant, 0.0)
-	await _ticks(6)
-	await FootfallFixture.land(match_round, func(gait: Dictionary) -> void:
-		FootfallFixture.place_under(rival, gait))
-	await _ticks(60)
-	var after: Array = match_round.growth_actors()
-	_check(float(after[1]["health"]) < rival_health or int(after[1]["health"]) == 0,
-			"A giant footfall hurts the smaller human actor")
-	_game.show_menu()
-
-
 func _giant_ai_vs_human() -> void:
-	_start({"giant_height": 0.5, "giant_count": 2, "coin_count": 4, "coin_interval": 600.0,
-			"coin_growth_rate": 1.0, "base_health": 1.0, "base_attack": 1.0, "respawn_delay": 30.0})
+	_start({"giant_height": 0.5, "giant_count": 2, "coin_count": 11, "coin_interval": 600.0,
+			"base_health": 1.0, "base_attack": 1.0, "respawn_delay": 30.0})
 	var round := _round()
 	var giant := _giant()
 	var rival: CharacterBody3D = round.get_node("OtherGiants/Giant2")
-	giant.position = OPEN_STREET
-	rival.position = OPEN_STREET + Vector3.BACK * 10.0
+	giant.position = OPEN_STREET + Vector3.FORWARD * 40.0
+	rival.position = OPEN_STREET
+	rival.rotation.y = 0.0
 	await _ticks(4)
-	for coin in round.get_node("Coins").get_children():
-		coin.position = rival.position + Vector3.RIGHT * 0.3
-	var actors: Array = round.growth_actors()
+	var coins := round.get_node("Coins")
+	_place_coins(coins, rival.position, 9)
+	await _ticks(3)
+	var actor := FootfallFixture.actor(round, 1)
+	_check(actor.human and actor.coin_value == 9.0 and is_equal_approx(actor.height, 1.8),
+			"AI banks the first nine equivalents at exactly 1.8 m")
+	_place_coins(coins, rival.position, 1)
+	await _ticks(4)
+	actor = FootfallFixture.actor(round, 1)
+	_check(not actor.human and actor.coin_value == 10.0 and is_equal_approx(actor.height, 40.0)
+			and actor.can_crush_buildings, "The AI also transforms directly to 40 m at ten equivalents")
+	rival.position = OPEN_STREET
+	giant.position = OPEN_STREET + Vector3.FORWARD * 13.0
+	rival.rotation.y = 0.0
 	var defeated := false
-	for frame in 660:
+	for frame in 470:
 		await physics_frame
 		if round.snapshot().giant_respawning:
 			defeated = true
 			break
-	actors = round.growth_actors()
-	_check(float(actors[1]["height"]) > 3.0 and bool(actors[1]["can_demolish"]),
-			"The coin-eating AI becomes a giant")
-	_check(defeated, "A giant AI can defeat the growth human with its normal combat behavior")
+	_check(defeated, "A giant AI defeats a remaining human through normal combat")
 	_game.show_menu()
 
 	_start({"giant_height": 0.5, "giant_count": 1, "coin_count": 0})
@@ -1211,7 +1224,7 @@ func _random_start_and_height_bands() -> void:
 	for giant in roster:
 		var shape: CapsuleShape3D = giant.get_node("Collision").shape
 		heights[shape.height] = true
-		in_bounds = in_bounds and shape.height >= 0.0099 and shape.height <= 12.0
+		in_bounds = in_bounds and shape.height >= 1.799 and shape.height <= 12.0
 	var actors: Array = current.growth_actors()
 	var stages_match := true
 	var humans_seen := false
@@ -1222,9 +1235,9 @@ func _random_start_and_height_bands() -> void:
 		humans_seen = humans_seen or human
 		giants_seen = giants_seen or not human
 	_check(stages_match and humans_seen and giants_seen,
-			"Random heights below the demolition height spawn humans and above spawn giants")
-	_check(current.snapshot().giant_count == 60 and heights.size() > 45 and in_bounds,
-			"Growth spawns more than 32 actors with independent height rolls")
+			"Random draws below the opening threshold spawn 1.8 m humans; higher draws spawn giants")
+	_check(current.snapshot().giant_count == 60 and heights.size() >= 12 and in_bounds,
+			"Growth spawns more than 32 actors with independent height rolls and one fixed human height")
 	var closest := INF
 	for index in roster.size():
 		for other in range(index):
@@ -1271,13 +1284,13 @@ func _random_start_and_height_bands() -> void:
 			"Tab restores the compact leaderboard and its width")
 	_game.show_menu()
 
-	_start({"giant_height": 0.0013, "giant_max_height": 0.0007, "random_start": true, "coin_count": 0})
+	_start({"giant_height": 0.0013, "giant_max_height": 0.0007, "random_start": false, "coin_count": 0})
 	current = _round()
 	var small_capsule: CapsuleShape3D = _giant().get_node("Collision").shape
 	await _ticks(3)
-	_check(is_equal_approx(current.snapshot().giant_height, 0.0013) and is_equal_approx(small_capsule.height, 0.0013)
+	_check(is_equal_approx(current.snapshot().giant_height, 1.8) and is_equal_approx(small_capsule.height, 1.8)
 			and current.get_node("Coins").get_child_count() == 0,
-			"A sub-millimeter growth cap preserves the chosen start and zero coins spawn none")
+			"A legacy sub-millimeter human start normalizes to 1.8 m and zero coins spawn none")
 	_game.show_menu()
 
 	seed(733)
@@ -1295,9 +1308,9 @@ func _random_start_and_height_bands() -> void:
 			"The full roster fits at 200 meters using safe spaces beyond the road centers")
 	_game.show_menu()
 
-	_start({"giant_count": 3, "giant_height": 4.0, "giant_speed": 0.1,
+	_start({"giant_count": 4, "giant_height": 4.0, "giant_speed": 0.1,
 			"band_start": 2, "band_step": 2, "coin_growth_rate": 1.0, "coin_count": 3,
-			"coin_interval": 60.0, "attack_height": 25.0})
+			"coin_interval": 60.0, "attack_height": 0.5})
 	current = _round()
 	player = _giant()
 	var second: CharacterBody3D = current.get_node("OtherGiants/Giant2")
@@ -1309,6 +1322,8 @@ func _random_start_and_height_bands() -> void:
 	player.position = OPEN_STREET
 	second.position = OPEN_STREET + Vector3.BACK * 22.0
 	third.position = OPEN_STREET + Vector3.BACK * 38.0
+	current.debug_resize_giant(3, 0.2)
+	current.get_node("OtherGiants/Giant4").position = Vector3(600.0, 0.02, 600.0)
 	await _ticks(3)
 	var coins := current.get_node("Coins").get_children()
 	coins[0].position = second.position
@@ -1344,18 +1359,16 @@ func _random_start_and_height_bands() -> void:
 
 
 func _ranking_follows_growth() -> void:
-	_start({"giant_count": 2, "coin_count": 2, "coin_interval": 60.0, "coin_growth_rate": 1.0})
+	_start({"giant_count": 2, "coin_count": 11, "coin_interval": 60.0, "coin_growth_rate": 1.0})
 	var current := _round()
 	var initial: Array[Dictionary] = current.growth_leaderboard()
 	_check(initial[0].is_player and initial[0].height == initial[1].height,
 			"Equal heights use a stable starting order")
 	var rival: CharacterBody3D = current.get_node("OtherGiants/Giant2")
 	_giant().position = OPEN_STREET
-	rival.position = OPEN_STREET + Vector3.BACK * 20.0
+	rival.position = OPEN_STREET + Vector3.BACK * 140.0
 	await _ticks(3)
-	var coins := current.get_node("Coins").get_children()
-	coins[0].position = rival.position
-	coins[1].position = Vector3(500.0, 0.0, 500.0)
+	_place_coins(current.get_node("Coins"), rival.position, 10)
 	await _ticks(45)
 	var rows: Array[Dictionary] = _game.find_child("RankRows", true, false).get("rows")
 	_check(rows[0].name == initial[1].name and rows[0].rank == 1 and rows[1].is_player and rows[1].rank == 2,
@@ -1455,6 +1468,8 @@ func _human_stage_visuals() -> void:
 
 	_start({"giant_height": 0.5, "giant_count": 1, "coin_count": 0})
 	giant = _giant()
+	_round().set_camera_view(2)
+	await _ticks(2)
 	head = giant.get("_human_head")
 	_check(_first_person_camera_active() and _head_part_shadow_only(head),
 			"The human model keeps only its head shadow in first person")
@@ -1717,16 +1732,16 @@ func _manual_camera_toggle() -> void:
 	_check(_first_person_camera_active(), "The round can switch the smallest giant back to first person")
 	_game.show_menu()
 
-	_start({"giant_height": 0.95, "coin_count": 1, "base_health": 4.0})
+	_start({"giant_height": 0.95, "coin_count": 10, "base_health": 4.0})
 	await _ticks(5)
 	_round().set_camera_view(2)
 	giant = _giant()
+	giant.position = OPEN_STREET
 	var match_round := _round()
-	var coin: Node3D = match_round.get_node("Coins").get_child(0)
-	giant.position = coin.position + Vector3.UP * 0.01
-	await _ticks(45)
-	_check(match_round.snapshot().giant_height > 1.0 and _first_person_camera_active(),
-			"A manual first-person selection survives growth past one meter")
+	_place_coins(match_round.get_node("Coins"), OPEN_STREET, 10)
+	await _ticks(8)
+	_check(is_equal_approx(match_round.snapshot().giant_height, 40.0) and _first_person_camera_active(),
+			"A manual first-person selection survives the 40 m transformation")
 	_game.show_menu()
 
 	_start({"giant_height": 200.0, "view_distance": 40.0})
@@ -2116,12 +2131,12 @@ func _human_stage_stats() -> void:
 		var giant := _giant()
 		var state: Dictionary = round.snapshot()
 		var capsule: CapsuleShape3D = giant.get_node("Collision").shape
-		_check(is_equal_approx(capsule.height, height)
-				and is_equal_approx(capsule.radius, 0.42 * height / 1.8)
-				and is_equal_approx(state.giant_max_health, 100.0 * height / 0.01)
-				and is_equal_approx(state.giant_attack, 10.0 * height / 0.01)
+		_check(is_equal_approx(capsule.height, 1.8)
+				and is_equal_approx(capsule.radius, 0.42)
+				and is_equal_approx(state.giant_max_health, 100.0 * 1.8 / 0.01)
+				and is_equal_approx(state.giant_attack, 10.0 * 1.8 / 0.01)
 				and state.get("human_stage", false),
-				"A %.1f m human uses a human capsule with metre-scaled health and attack" % height)
+				"A %.1f m legacy start uses the standard human capsule and stats" % height)
 		_game.show_menu()
 	_start({"giant_height": 3.0, "giant_count": 1, "coin_count": 0})
 	var round := _round()
@@ -2150,11 +2165,7 @@ func _hand_attacks() -> void:
 	round.tap_grab_crush()
 	await _ticks(20)
 	_check(round.snapshot().hand_action.is_empty(), "A human cannot start a grab")
-	for coin in round.get_node("Coins").get_children():
-		coin.position = giant.position
-	await _ticks(50)
-	_check(is_equal_approx(round.snapshot().giant_height, 3.0) and round.snapshot().can_demolish,
-			"Coin growth turns the player into a three-metre giant")
+	round.debug_resize_giant(0, 3.6)
 	rival.position = giant.position + Vector3.FORWARD * 1.1
 	await _ticks(2)
 	round.tap_punch()
@@ -2170,20 +2181,15 @@ func _hand_attacks() -> void:
 			"The punch damages the human actor")
 	_game.show_menu()
 
-	_start({"giant_height": 0.5, "giant_count": 2, "coin_count": 4, "coin_interval": 600.0,
-			"coin_growth_rate": 1.0, "respawn_delay": 60.0})
+	_start({"giant_height": 0.5, "giant_count": 2, "coin_count": 0, "respawn_delay": 60.0})
 	round = _round()
 	giant = _giant()
 	rival = round.get_node("OtherGiants/Giant2")
 	giant.position = OPEN_STREET
 	rival.position = Vector3(600.0, 0.02, 600.0)
-	await _ticks(4)
-	for coin in round.get_node("Coins").get_children():
-		coin.position = giant.position
-	await _ticks(230)
-	_check(round.snapshot().giant_height >= 8.0 and round.snapshot().can_demolish,
-			"The player grows into a giant before the grab test")
-	var rival_at := giant.position + Vector3.FORWARD * 2.0
+	round.debug_resize_giant(0, 40.0)
+	await _ticks(6)
+	var rival_at := giant.position + Vector3.FORWARD * 6.0
 	rival.position = rival_at
 	round.tap_grab_crush()
 	await _ticks(3)
@@ -2195,7 +2201,7 @@ func _hand_attacks() -> void:
 		rival.position = rival_at
 		await physics_frame
 	_check(rival.collision_mask == 0, "The grab lifts the human actor")
-	await _ticks(70)
+	await _ticks(110)
 	var board: Array[Dictionary] = round.growth_leaderboard()
 	_check(board[1].rank == 0, "The crush defeats the smaller human")
 	_game.show_menu()

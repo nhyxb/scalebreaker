@@ -543,8 +543,8 @@ func _ready() -> void:
 	_roll_skin()
 
 
-## The growth round starts every actor as a human and swaps to this giant rig at the
-## demolition height. The giant skin is rolled once per round and survives respawns.
+## Growth-mode humans swap to this giant rig after banking their coins.
+## The giant skin is rolled once per round and survives respawns.
 func set_stage(human: bool) -> void:
 	if _human_stage == human:
 		return

@@ -171,6 +171,14 @@ func _test_growth_ranking() -> void:
 	_game.save_mode_settings(_game.get_mode_settings(0), _game.get_mode_settings(1), growth)
 	_game.start_growth()
 	await _ticks(3)
+	var coins_label: Label = _view.get("_growth_coins")
+	var font := coins_label.get_theme_font("font")
+	var covered := true
+	var sample := coins_label.text + "如履平地开局巨人门槛金币寿命"
+	for index in sample.length():
+		covered = covered and font.has_char(sample.unicode_at(index))
+	_check(coins_label.visible and coins_label.text == "金币 0 / 10 · 满额变身 40 米" and covered,
+			"Touch HUD shows coin progress with bundled glyphs for all new Chinese labels")
 	var layer: Control = _view.find_child("TouchRanking", true, false)
 	var board: Control = layer.find_child("GrowthRanking", true, false)
 	var table: Control = layer.find_child("RankRows", true, false)

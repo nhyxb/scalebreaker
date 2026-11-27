@@ -94,7 +94,7 @@ impl Personality {
 /// `human_ignore_ratio` settings stay hard gates in front of this matrix.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum SizeTier {
-    /// `< 0.1×` — incidental footfall in passing, never a deliberate chase.
+    /// `< 0.1×` — small prey, pursued at close range.
     Trivial,
     /// `0.1–0.5×` — actively chased with lead prediction, intercepted via footfall or sit.
     Prey,
@@ -157,7 +157,7 @@ impl SizeTier {
 
     /// Whether the matrix wants a deliberate pursuit of this tier at all.
     pub fn chases(self) -> bool {
-        !matches!(self, Self::Trivial | Self::Danger | Self::Overwhelming)
+        !matches!(self, Self::Danger | Self::Overwhelming)
     }
 
     /// Debug/test index of the tier (0 = trivial .. 6 = overwhelming).
@@ -171,6 +171,46 @@ impl SizeTier {
             Self::Danger => 5,
             Self::Overwhelming => 6,
         }
+    }
+}
+
+/// Once close, carry a heavy step through small prey and line up one shoe.
+/// Against a peer, approach the center so the hands can reach before circling.
+pub(super) fn combat_approach(
+    origin: Vector3,
+    predicted: Vector3,
+    heading: Vector3,
+    scale: f32,
+    target_ratio: f32,
+    left_shoe: bool,
+    near: bool,
+) -> Vector3 {
+    if target_ratio >= 0.5 || !near {
+        return predicted;
+    }
+    let forward = horizontal(predicted - origin).try_normalized().unwrap_or(heading);
+    let side = if left_shoe { 1.0 } else { -1.0 };
+    predicted + forward * (3.0 * scale) + forward.cross(Vector3::UP) * (1.3 * scale * side)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_on_smaller_targets_aims_beyond_them_with_the_swinging_shoe() {
+        let target = Vector3::FORWARD * 5.0;
+        let goal = |ratio, left, near| {
+            combat_approach(Vector3::ZERO, target, Vector3::FORWARD, 2.0, ratio, left, near)
+        };
+        let left = goal(0.4, true, true);
+        let right = goal(0.4, false, true);
+        assert!(left.z < target.z && right.z < target.z);
+        assert_eq!(left.x, -right.x);
+        assert_ne!(left.x, 0.0);
+        assert_eq!(goal(0.4, true, false), target);
+        assert_eq!(goal(0.5, true, true), target);
+        assert_eq!(goal(2.0, true, true), target);
     }
 }
 

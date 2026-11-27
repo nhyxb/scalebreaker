@@ -372,6 +372,35 @@ impl HarborRound {
         true
     }
 
+    pub(super) fn maybe_start_ai_combat_sit(
+        &mut self,
+        actor: &mut Giant,
+        target: Vector3,
+        target_radius: f32,
+    ) -> bool {
+        if !self.settings.sit.crush_enabled
+            || actor.sit_in > 0.0
+            || !Self::ready_for_hand_move(actor)
+        {
+            return false;
+        }
+        let position = actor.body.get_global_position();
+        let offset = target - position;
+        let distance = horizontal(offset).length();
+        // Use the landing circle after turning, with a margin for the victim's movement.
+        let reach = actor.sit_radius() + target_radius * 0.5;
+        if (distance - SEAT_FORWARD * actor.scale).abs() > reach
+            || offset.y.abs() > (0.12 * actor.height(self.max_height)).max(0.25)
+        {
+            return false;
+        }
+        let settings = self.settings.sit;
+        let hold = crush_hold_seconds(settings.hold_base, settings.hold_per_scale, actor.scale);
+        self.begin_sit(actor, false, hold, actor.back_to(target), true);
+        actor.ai_punched = false;
+        true
+    }
+
     fn sit_impact(&mut self, actor: &mut Giant) {
         let area = ImpactArea {
             center: actor.sit_center(),

@@ -881,20 +881,19 @@ func _walking_attack() -> void:
 	var giant := _actor(1)
 	var target: Node3D = current.get_node("District/Targets/DockPress3")
 	giant.call("_set_skin", &"Kawaii")
-	# Before touch-crush unlocks (6 destroyed), walking over open ground or facades never damages buildings.
-	var walk_contact := await FootfallFixture.strike_building(current, target, 0.0, -1.0, 3.8, -5.0)
-	_check(not walk_contact.is_empty() and not _has_strike_overlay(target)
-			and current.snapshot().destroyed == 0 and (giant.collision_mask & BUILDING_LAYER) != 0,
-			"Below touch-crush threshold a walking footfall leaves buildings intact")
-	await FootfallFixture.sit_building(current, target, 0.0)
-	_check(_has_strike_overlay(target) and current.snapshot().destroyed == 0,
-			"An active sit-crush cracks a building once")
-	_check(target.has_node("IntactModel") and _giant_has_scale(giant, 1.0),
-			"First hit keeps the intact model and base size")
-
-	await FootfallFixture.sit_building(current, target, 0.0, -1.0, false)
-	_check(current.snapshot().destroyed == 1 and target.has_node("CollapseModel")
-			and _giant_has_scale(giant, 1.0), "The next sit-crush destroys the building and starts growth")
+	FootfallFixture.face(current, giant, 0.0)
+	giant.position = target.position + Vector3(0.0, 0.02, float(target.footprint.z) * 0.5 + 4.0)
+	await _ticks(6)
+	Input.action_press("move_forward")
+	for frame in 120:
+		await physics_frame
+		if current.snapshot().destroyed > 0:
+			break
+	Input.action_release("move_forward")
+	_check(current.snapshot().can_crush_buildings
+			and (giant.collision_mask & 24) == 0 and current.snapshot().destroyed == 1
+			and target.get_node("BlockingBody").collision_layer == 0,
+			"Sandbox walking can immediately pass through and demolish an intact building")
 	await _ticks(14)
 	var model: Node3D = giant.get_node("Model")
 	var arm: SpringArm3D = current.get_node("Orbit/Arm")
@@ -1018,10 +1017,11 @@ func _giant_layered_turn() -> void:
 
 	# 2. Hand attacks (grab_crush / punch) only hit targets in front of current body facing;
 	#    to attack a building directly behind, the giant must turn around first.
+	_park_civilians(current)
 	var dock3: Node3D = current.get_node("District/Targets/DockPress3")
-	giant.position = dock3.position + Vector3(0.0, 0.03, -(float(dock3.footprint.z) * 0.5 + 5.0))
-	giant.rotation = Vector3.ZERO
-	_mouse(Vector2(-angle_difference(orbit.rotation.y, PI) / 0.0028, 0.0))
+	giant.position = dock3.position + Vector3(0.0, 0.03, float(dock3.footprint.z) * 0.5 + 5.0)
+	giant.rotation = Vector3(0.0, PI, 0.0)
+	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
 	await _ticks(6)
 	current.tap_grab_crush()
 	await _ticks(4)
@@ -1029,16 +1029,12 @@ func _giant_layered_turn() -> void:
 	current.tap_punch()
 	await _ticks(4)
 	var rear_punch_empty: bool = current.snapshot().hand_action.is_empty()
-	var facing_still_north := absf(angle_difference(0.0, giant.rotation.y)) < 0.02
-	_check(rear_grab_empty and rear_punch_empty and facing_still_north,
+	var facing_still_south := absf(angle_difference(PI, giant.rotation.y)) < 0.02
+	_check(rear_grab_empty and rear_punch_empty and facing_still_south,
 			"hand attacks reject targets behind the giant even when the camera looks straight at them")
 
-	# Now turn the body to face DockPress3 (south) and grab: facing the target is what unlocks
-	# the hand attack, while the rear rejection above stays covered by the pivot tests.
-	# Stand on the open street south of DockPress3 (the north side is filled by MarineWorks3's
-	# lot) and face north into it, then grab.
+	# Face north into the same building without changing position.
 	giant.rotation = Vector3.ZERO
-	giant.position = dock3.position + Vector3(0.0, 0.03, float(dock3.footprint.z) * 0.5 + 5.0)
 	await _ticks(12)
 	current.tap_grab_crush()
 	await _ticks(4)
@@ -1048,7 +1044,7 @@ func _giant_layered_turn() -> void:
 	current = _round()
 	giant = _actor(1)
 	orbit = current.get_node("Orbit")
-	giant.position = Vector3(0.0, 0.03, 36.0)
+	giant.position = Vector3(0.0, 0.03, -675.0)
 	giant.rotation = Vector3.ZERO
 	_mouse(Vector2(-angle_difference(orbit.rotation.y, 0.0) / 0.0028, 0.0))
 	await _ticks(8)
@@ -1588,39 +1584,14 @@ func _giant_sandbox() -> void:
 		var before_count: int = current.snapshot().destroyed
 		await _wait_growth(current, before_count)
 		var yaw := 0.0 if from_south else PI
-		if before_count == 3:
-			_check(not _has_strike_overlay(target), "the first building after the unlock starts undamaged")
-		if before_count == 6:
-			_check((giant.collision_mask & BUILDING_LAYER) == 0,
-					"unlocking touch-crush excludes the building collision layer so giants pass cleanly")
-		var attacks := 2 if before_count < 3 else 1
-		for hit in attacks:
-			if building_blocker.collision_layer == 0:
-				break
-			if before_count < 6:
-				var keep_live := target.name == &"DockPress1" and hit == attacks - 1
-				await FootfallFixture.sit_building(current, target, yaw, -1.0, not keep_live)
-			else:
-				await FootfallFixture.strike_building(current, target, yaw)
-			if target.name == &"DockPress1" and hit == 0:
-				_check(building_blocker.collision_layer == BUILDING_LAYER and target.has_node("IntactModel")
-						and not target.has_node("CollapseModel") and _giant_has_scale(giant, 1.0),
-						"first building hit keeps the intact model, collision and giant size")
-			if before_count == 2 and hit == 0:
-				_check(building_blocker.collision_layer == BUILDING_LAYER and current.snapshot().destroyed == 2,
-						"the third building still takes two attacks")
-		if before_count == 2:
-			_check(current.snapshot().destroyed == 3 and building_blocker.collision_layer == 0,
-					"destroying the third building reaches the unlock threshold")
-		if before_count == 3:
-			_check(current.snapshot().destroyed == 4 and building_blocker.collision_layer == 0,
-					"the first attack after the unlock destroys an undamaged building")
+		await FootfallFixture.strike_building(current, target, yaw)
+		_check(building_blocker.collision_layer == 0 and current.snapshot().destroyed > before_count,
+				"An intact building collapses on the first walking approach")
 		if target.name == &"DockPress1":
+			await _check_collapse_pause(target, building_blocker)
 			await _wait_growth(current, 1)
 			_check(_giant_has_scale(giant, GROWTH_PER_BUILDING), "one destroyed building grows the model and capsule by ten percent")
-			await _check_collapse_pause(target, building_blocker)
-		if target.name == &"Tidewater1":
-			_check(building_blocker.collision_layer == 0, "After touch-crush unlocks a walking giant passes through and crushes towers")
+
 	_check(current.snapshot().destroyed == 12, "giant can destroy all 12 buildings")
 	await _wait_growth(current, 12)
 	var final_scale := pow(GROWTH_PER_BUILDING, 12)
@@ -1639,7 +1610,10 @@ func _giant_sandbox() -> void:
 		all_settled = all_settled and target.has_node("RuinModel") and not target.has_node("CollapseModel")
 	_check(all_settled, "all three building variants settle with static rubble collision")
 	var tower := targets.get_node("Tidewater4") as Node3D
-	_check(await _walk_rubble(giant, tower, 2.5), "giant walks up and over the tower rubble")
+	giant.global_position = tower.global_position + Vector3.UP * 0.02
+	await _ticks(12)
+	_check(giant.global_position.y < 0.2 and (giant.collision_mask & 16) == 0,
+			"The giant can stand inside tower rubble at ground level")
 	# Growing scales both dimensions of the live sole.
 	giant.position = Vector3(0.0, 0.03, -110.0)
 	FootfallFixture.face(current, giant, 0.0)
@@ -1655,10 +1629,10 @@ func _giant_sandbox() -> void:
 	_game.restart()
 	var replacement := _round()
 	var fresh_target: Node3D = replacement.get_node("District/Targets/DockPress3")
-	await FootfallFixture.sit_building(replacement, fresh_target, 0.0)
-	_check(replacement.snapshot().destroyed == 0 and fresh_target.has_node("IntactModel"),
-			"Restarting resets the one-hit building upgrade and leaves the first strike nonlethal")
-	await FootfallFixture.sit_building(replacement, fresh_target, 0.0)
+	_check(replacement.snapshot().destroyed == 0 and fresh_target.has_node("IntactModel")
+			and replacement.snapshot().can_crush_buildings,
+			"Restart restores the buildings and keeps Sandbox building passage enabled")
+	await FootfallFixture.strike_building(replacement, fresh_target, 0.0)
 	_check(fresh_target.has_node("CollapseModel"),
 			"a new round can play the same source clip again")
 	_game.pause()
@@ -1901,7 +1875,7 @@ func _check_collapse_pause(building: Node, blocker: StaticBody3D) -> void:
 	_check(tris > 0 and tris <= 4000 and model.position.y < 0.0
 			and not building.has_node("IntactModel") and building.has_node("RuinBody")
 			and blocker.collision_layer == 0,
-			"second hit immediately enables rubble collision while the low-poly building collapses")
+			"demolition immediately enables rubble collision for other actors while the low-poly building collapses")
 	_game.pause()
 	var paused_at := model.transform
 	await _ticks(45)

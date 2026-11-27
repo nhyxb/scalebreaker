@@ -9,7 +9,7 @@
 ## 巨人重步与鞋印（2026-11-27）
 
 - `giant_visual.gd` 使用四种皮肤各自的左右鞋底凸轮廓，摆脚约到 46% 时锁定横向落点和朝向，后段加速垂落。支撑脚按世界坐标锁定，停步会完成当前摆脚，需要收脚时另一只鞋单独结算。只有着地事件才传给 `round/footfalls.rs`，每次包含 `center / yaw / half_extents / left / profile`。鞋底局部坐标 X 向右、-Z 向前，轮廓以半长宽归一化。
-- `HarborRound::resolve_footfall()` 用同一鞋底区域同时提交建筑、行人和对手的命中判定、扬尘、低频空间音效和一次震动。40 米门槛保留一脚拆楼和废墟通行，身体扫过建筑不结算。手部、坐压和人类撞击沿用各自入口。
+- `HarborRound::resolve_footfall()` 用同一鞋底区域同时提交建筑、行人和对手的命中判定、扬尘、低频空间音效和一次震动。成长模式的 40 米巨人以及任意身高的沙盒、大乱斗巨人可直接穿楼拆毁，鞋底命中也可结算拆楼。手部和坐压沿用各自入口。
 - `heavy_step_preview()` 提供预测 `eta / progress / locked / lift`，AI 可用早期预测避让。严格比较最终落点时等 `locked`，以 `growth_actors()` 的 `footfall_count` 和 `last_footfall_*` 确认。市民优先远离即将着地的鞋底，复用原有恐慌状态。
 - `round_effects.gd::footprint_debug()` 可以查看鞋印池。每局复用 72 个槽位，12 秒过期，末 4.5 秒淡出。鞋印从场景深度投影到可见表面，避免叠放平面产生 Z-fighting。
 - 撤离和成长人类观察视角可向上看约 83°。弹簧臂保留原上仰限位，摄像机本身补足抬头角度，保持街面上方。
@@ -38,24 +38,26 @@
 
 ## 大乱斗与成长模式共用的回合逻辑
 
-- `Mode::has_growth()` 同时涵盖成长模式和大乱斗，用于共用体型战斗、建筑耐久、排名和播报。人类阶段、建筑身高奖励和地图金币波次仅在 `Mode::Growth` 启用。
+- `Mode::has_growth()` 同时涵盖成长模式和大乱斗，用于共用体型战斗、建筑耐久、排名和播报。人类阶段、建筑身高奖励和有寿命的地图金币仅在 `Mode::Growth` 启用。
 - 大乱斗的金币在共享的 `damage_rival()` 击杀结算里生成，保存击杀时身高计算出的固定米数。随机开局和复活分别读取独立的身高范围。复活先抽身高，再按相对体型和距离加权选择落点，优先避开所有存活巨人的 `sight_range()`。范围外的常规道路和细网格都无安全点时才进入范围内备选，仍需有碰撞净空。相关回归入口为 `tests/brawl_playtest.gd`。
 - 大乱斗随机开局遇到放不下的体型时，`random_brawl_start()` 按地图和已占用位置排除该身高及更大的体型，再均匀重抽。把失败抽签直接降为区间最低值会使宽区间大量堆积在同一身高。
-- 大乱斗 AI 的主动攻击只针对其他巨人。空闲时用 `wander_goal()` 持续游走，撞墙会重选目标。达到 `GROWTH_CRUSH_HEIGHT` 后，游走、追击和捡币的寻路将可碾压建筑视为可通行，步行碾压照常结算。
+- 大乱斗 AI 的主动攻击只针对其他巨人。空闲时用 `wander_goal()` 持续游走，撞墙会重选目标。任意身高都可在游走、追击和捡币时穿过建筑与废墟，步行直接拆楼。沙盒同样默认开启如履平地，成长模式仍以 40 米解锁。
 
-## 成长模式的人类/巨人两阶段（2026-11-23 确认）
-- 成长模式不再有行人 NPC。`Giant` 结构新增 `human` 阶段字段，由 `HarborRound::sync_actor_stage()` 按 `actor.scale` 与 `attack_height / GIANT_START_HEIGHT` 切换；`Giant::resize()` 在人类阶段使用 human 胶囊（半径 `HUMAN_RADIUS × 身高 / HUMAN_HEIGHT`）与 `HumanModel` 缩放（`身高 / HUMAN_HEIGHT`），巨人阶段恢复 `GIANT_RADIUS × scale` 和 `Model` 皮肤。
-- 人类阶段没有主动攻击。玩家不能发出手部攻击，AI 只捡金币和避险。速度是 `HUMAN_WALK × 身高 / HUMAN_HEIGHT × settings.human_speed`。
-- 人类与人类相撞时，通过 `apply_human_bumps()` 由至少两倍身高的一方造成 `DefeatMethod::Bump`。巨人与角色之间的行走伤害在重步鞋底着地时结算。
-- 巨人 AI 的 `combat_target()` 把 human 阶段的其他 `Rival` 放进 humans 候选，行为与旧行人一致（近处才注意、可踩/抓/拳）；人类 AI 不做战斗，只捡金币和躲避两倍以上身高的角色。
-- 皮肤固定：`giant_visual.gd` 只在 `_ready()` 调 `_roll_skin()`，`show_respawn()` 不再重抽。人类/巨人切换走 `set_stage()`，人类第一人称隐藏 `head-mesh`。
-- 随机开局（`random_start`）在 `initial_growth_spawn()` 于 `[giant_height, giant_max_height]` 之间对数采样，按采样高度自动决定人类或巨人 AI。
-- 调试/测试接口：`round.growth_actors()` 返回每名成长角色的 `height/human/health/can_demolish/chase`，`growth_playtest.gd` 依赖它检查阶段。
+## 成长模式的人类/巨人两阶段（2026-11-28）
+
+- 玩家和 AI 共用 `GiantProgress::coin_value`。开局/复活由 `sync_spawn_stage()` 读取旧设置键 `attack_height` 决定初始形态，落在人类阶段就使用固定 1.8 米胶囊和人类模型。随机开局的抽样上限仍取配置值，回合实际身高上限在出现人类阶段时至少为 40 米。
+- 人类阶段没有主动攻击，使用 `HUMAN_WALK × settings.human_speed`。攒满 10 等值后 `advance_giant_growth()` 直接切换到 40 米巨人、更新建筑碰撞掩码和相机、播放变身音效。低档位上限不能把已变身角色压回 40 米以下。倒下后清空本命累计，保留皮肤与本局击倒数。
+- `snapshot_growth()` 提供 `coin_value / coin_transform_target / transform_height` 给桌面与触屏共用 HUD；变身时立即清除模糊雷达。近处无雷达读数时仍走原渐隐动画。
+- 安卓 HUD 使用 `assets/fonts/harbor-ui.otf` 的 Noto Sans CJK SC 可变字体子集；新增中文文案时应用 `fc-query` 或 `Font.has_char()` 核查。需要补字时从同版本完整字体重建子集，保留旧码点及字重范围。
+- 地图金币由 `update_map_coins()` 管理，开局铺满；每币寿命为 `coin_interval × 0.6–1.5`，拾取圈内读条时冻结该币寿命。最后 4 秒由 `coins.gd` 加速闪烁。有人类阶段存活且场上有缺额时，每隔 0.5–1.8 秒补 1–3 枚；最后一个人类阶段结束后，剩余币继续各自到期。大乱斗金币按原击倒掉落逻辑常驻。
+- 回归读取 `round.coin_debug()` 的 `id / ttl / expiring / tier / dwell / position`，以及 `growth_actors()` 的 `height / human / coin_value / can_crush_buildings / hand_action`。验证闪烁时把目标币放在相机剔除距离内，按同一个实例 ID 跨帧跟踪。
 
 ## AI 交战距离必须随体型缩放（2026-11-23 确认）
 - 巨人胶囊半径是 `GIANT_RADIUS(2.9) × scale`，`scale = 身高 / 25.2`，即约 `0.115 × 身高`；两个巨人的身体中心最近只能到 `0.115 ×（双方身高之和）`。
 - `rust/src/round.rs` 里 `rival_engage_range()` 用 `max(75, 2 × 自身半径 + 踩踏射程)` 作为对手的交战距离上限，`sight_range()` 用 `max(150, 身高)` 作为视野。以后改动这两个数、或新增“多近才理目标”的常量，都要跟着体型缩放；写死小常量会让几百米的巨人对走到一起也不打。
 - 已锁定的目标（`chase_target`）不受 `attack_range` 限制，只要在 `sight_range` 内就一直交战，连续丢失 2 秒才放弃。遇到“有时打有时不打”，先查交战距离和视野这两个门。
+
+- 交战时，`ai::combat_approach()` 让低于自身一半高的目标成为鞋底穿越点。近身可交战的 0.5–2 倍目标仍可挥拳；站稳对齐后会尝试坐压。两项忽略倍率与危险预警仍优先。大乱斗回归以实际扣血验证 0.075、0.4、0.5、1、2 倍目标，以及同级拳击与坐压闭环。
 
 ## AI 待机行为
 - `pursue()` 的漫游分支和成长模式的 `forage()` 都走 `wander_goal()`：没有对手、建筑或金币时按体型与步速选 0.5～320 米的漫游点，不会停在原地。新增 AI 分支时不要在无目标路径返回 `Vector3::ZERO`。
@@ -124,14 +126,14 @@
 
 ## 阶段 4：金币风险分级 + 全场 Utility AI（2026-11-27 确认）
 
-- **金币 3 档**（`growth.rs::CoinTier`）：Normal/High/Extreme = 1×/2.5×/5× 奖励、0/2.0/3.75 s 读条；分级来源＝巨人脚边踩踏射程(Extreme)、活动区 `max(视距×1.4, 身高×2.2)`(High)、交战热区（重步落脚/拆迁/击杀喂入 `note_hotspot`，12 s TTL，容量 24）；热区与巨人位置每 0.5 s 对存量币重估（`update_hotspots_and_coin_tiers`，热区衰减在 `physics_process` 里无条件跑——`coin_count=0` 时波函数提前返回）。**离开拾取圈按 ~27 %/s 缓退不清零**（`advance_dwell`，纯函数有单测）；成长为巨人后全部瞬拾；brawl 击杀掉落币恒 Normal。读条状态在 `Giant.coin_dwell: Option<CoinDwell>`（按币 InstanceId 跟踪），玩家有地面进度环（`coins.gd::show_dwell`）与递增音效（`coin_dwell_tick`，复用 coin_pickup wav 的独立冷却别名），AI 无视觉但共用同一时序代码。
+- **金币 3 档**（`growth.rs::CoinTier`）：Normal/High/Extreme = 1×/2.5×/5× 奖励、0/2.0/3.75 s 读条；分级来源＝巨人脚边踩踏射程(Extreme)、活动区 `max(视距×1.4, 身高×2.2)`(High)、交战热区（重步落脚/拆迁/击杀喂入 `note_hotspot`，12 s TTL，容量 24）；热区与巨人位置每 0.5 s 对存量币重估（`update_hotspots_and_coin_tiers`，热区衰减在 `physics_process` 里无条件跑——`coin_count=0` 时金币更新提前返回）。**离开拾取圈按 ~27 %/s 缓退不清零**（`advance_dwell`，纯函数有单测）；成长为巨人后全部瞬拾；brawl 击杀掉落币恒 Normal。读条状态在 `Giant.coin_dwell: Option<CoinDwell>`（按币 InstanceId 跟踪），玩家有地面进度环（`coins.gd::show_dwell`）与递增音效（`coin_dwell_tick`，复用 coin_pickup wav 的独立冷却别名），AI 无视觉但共用同一时序代码。
 - **模糊雷达**：`snapshot_growth` 仅在成长模式人类阶段发 `coin_radar`（angle/span≈40°/tier/proximity 3 档，110 m 内不发=淡出）；HUD 是 `interface.gd` 的 `CoinRadar` 类（顶部居中弧形扇区，tier 三色，脉冲速率 5.2/9.0/14.5 Hz）。成长模式**不再发** `coin_distance/coin_angle`（精确罗盘只保留给 brawl 小巨人）；`growth_playtest._mapwide_coins` 的旧精确断言已改为雷达断言。
 - **AI 模块 `rust/src/round/ai.rs`**：`Personality`（6 维 0–100，`roll()` 走 godot 随机流→测试 `seed()` 可复现，跨复活保留；**不要改回 wall-clock 随机**，会让回归按掷骰结果漂移）、`SizeTier`（7 档 +10 %/−10 % 滞回，`from_ratio_with_hysteresis`）、`CombatMemory`（目击 6 s/受击 2.5 s/仇恨 25 s/失败逃跑拉黑 4 s/危险区 13 s，全部 tick 衰减）、`escape_direction`（16 射线按"探针-威胁距离增量"给分 + 边界侵入斥力，**任何情况不返回零向量**，有单测）。
 - **pursue 重构要点**：预警圈内每帧直接 Evade（100+，绕过 0.25 s 重评），utility 重评带 +13 惯性；**逃避期间豁免站立小碎步转身**（`update_giant` 里 `intent == Evade` 清 pivot，否则 4× giant_speed 下 0.13 s 预警窗会被 180° 转身耗光——回归 `_ai_evades_warning_circles`）；Search 分数按目击点距离 60/(60+d) 衰减（远处逃兵让位给拆楼，否则 playtest 的拆楼回归会因 6 s 搜索超窗）；**击杀清空进攻方 last_seen/hit_from/grudge**（搜尸体无意义）；撤离/沙盒 AI 对人类/市民目标 attack 恒 100 分且 `chases()` 不拦（掠食者设计，性格不得让撤离巨人对人类摆烂）。
 - **挑高楼倾向**：`choose_building(actor, position, prefer_tall)` 只在**距最近楼 6 m 窗口内**取最高楼（destructiveness>0.6 触发）；窗口放宽会抢走明确最近楼、打破 playtest 的拆楼断言（该断言已改为"最近簇 ±7 m 内被拆"）。
 - **市民三态**（`update_civilians` + `CivilianState::{Calm,Panic,Cover}`）：0.28 s 节流感威胁（巨人活动范围/鞋底落点预测/落地震动都算），panic 速度 ×2.4、动画传 sprint=true，撞墙沿墙滑行；`round.civilian_debug()` 暴露 state/position。**测试市民恐慌时先等开局恐慌平息**（出生在巨人旁的市民开局就在 panic，最多 ~14 s 才回 calm，中途瞬移会因 cover 目标点在旧位置而拉长回程）。
-- **测试/调试接口**：`round.coin_debug()`（tier/dwell/position）、`round.civilian_debug()`、`growth_actors()` 新增 `intent/size_tier/evading/dwell/dwell_tier`。
-- **易踩坑**：`coins.gd` 的 dwell ring 挂在 Coins 根下，`_refresh_visible` 必须跳过无子节点的孩子（否则每帧 Index error 刷屏）；测试巨人瞬拾时场上必须仍有**人类阶段角色**（`update_coin_wave` 在全员巨化时清场退币）；重步预测回归可临时设 `giant_speed=1×` 留出可测的避让窗口。
+- **测试/调试接口**：`round.coin_debug()`（id/ttl/expiring/tier/dwell/position）、`round.civilian_debug()`、`growth_actors()` 新增 `intent/size_tier/evading/dwell/dwell_tier`。
+- **易踩坑**：`coins.gd` 的 dwell ring 挂在 Coins 根下，`_refresh_visible` 必须跳过无子节点的孩子（否则每帧 Index error 刷屏）；测试成长模式地图币补刷时保留存活人类阶段角色；重步预测回归可临时设 `giant_speed=1×` 留出可测的避让窗口。
 
 ## 阶段 3B-1 & 单世界 Vulkan `mobile` 渲染升级（2026-11-27 确认）
 

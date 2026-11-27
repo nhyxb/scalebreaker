@@ -4,6 +4,7 @@ const SPIN_RATE := TAU / 1.8
 const DEFAULT_DRAW_DISTANCE := 300.0
 const DRAW_MARGIN := 24.0
 const CULL_INTERVAL := 0.18
+const EXPIRY_WARNING_SECONDS := 4.0
 
 # Risk-tier visual language (index matches CoinTier on the Rust side):
 #   0 normal  — the classic gold coin.
@@ -55,6 +56,11 @@ func set_coin_tier(coin: Node3D, tier: int) -> void:
 		coin.remove_child(child)
 		child.queue_free()
 	_dress_coin(coin, radius, tier)
+	_cull_in = 0.0
+
+
+func set_coin_expiry(coin: Node3D, remaining: float) -> void:
+	coin.set_meta(&"expiry_remaining", remaining)
 
 
 func show_dwell(at: Vector3, progress: float, tier: int) -> void:
@@ -92,6 +98,14 @@ func _process(delta: float) -> void:
 			_visible_tokens.remove_at(i)
 			continue
 		token.rotation.y = fposmod(token.rotation.y + step, TAU)
+		var coin := token.get_parent_node_3d()
+		if coin != null and coin.has_meta(&"expiry_remaining"):
+			var elapsed := EXPIRY_WARNING_SECONDS - float(coin.get_meta(&"expiry_remaining"))
+			# Integrate a steadily rising frequency, from 1 to 4 flashes per second.
+			var lit := fposmod(elapsed * (1.0 + 0.375 * elapsed), 1.0) < 0.65
+			token.visible = lit
+			if coin.get_child_count() > 1:
+				(coin.get_child(1) as Node3D).visible = lit
 	_pulse += delta * EXTREME_PULSE_SPEED
 	var breathe := 0.5 + 0.5 * sin(_pulse)
 	for halo in _halos:

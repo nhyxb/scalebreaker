@@ -7,6 +7,7 @@ const MAP_COIN_RADIUS: f32 = 0.45;
 const COIN_GIANT_CLEARANCE: f32 = 18.0;
 const COIN_MIN_SPACING: f32 = 4.0;
 const COIN_BUILDING_CLEARANCE: f32 = MAP_COIN_RADIUS + 0.35;
+const COIN_WARNING_SECONDS: f32 = 4.0;
 const LOCAL_COIN_SEARCH: f32 = 80.0;
 const GIANT_PASS_HEIGHT_RATIO: f32 = 3.0;
 /// Fuzzy coin radar: coins closer than this are visible to the naked eye, so
@@ -246,16 +247,24 @@ struct Coin {
     radius: f32,
     reward: CoinReward,
     tier: CoinTier,
+    remaining: f32,
+    collecting: bool,
 }
 
 #[derive(Clone, Copy)]
 enum CoinReward {
-    Wave,
+    Map,
     Height(f32),
 }
 
 impl Coin {
-    fn spawn(root: &mut Gd<Node3D>, position: Vector3, reward: CoinReward, tier: CoinTier) -> Self {
+    fn spawn(
+        root: &mut Gd<Node3D>,
+        position: Vector3,
+        reward: CoinReward,
+        tier: CoinTier,
+        remaining: f32,
+    ) -> Self {
         let node = root
             .call(
                 "spawn_coin",
@@ -272,6 +281,8 @@ impl Coin {
             radius: MAP_COIN_RADIUS,
             reward,
             tier,
+            remaining,
+            collecting: false,
         }
     }
 }
@@ -279,7 +290,8 @@ impl Coin {
 #[derive(Default)]
 pub(super) struct CoinField {
     coins: Vec<Coin>,
-    refresh_in: f32,
+    seeded: bool,
+    refill_in: f32,
 }
 
 pub(super) struct Rival {
@@ -372,8 +384,7 @@ fn coin_grid_layout(count: usize, limit: f32) -> (usize, f32, f32) {
     (side, -limit, cell)
 }
 
-fn coin_giant_exclusion(giant_scale: f32, giant_height: f32) -> (f32, f32) {
-    let body = GIANT_RADIUS * giant_scale;
+fn coin_giant_exclusion(body: f32, giant_height: f32) -> (f32, f32) {
     let pickup = (body + MAP_COIN_RADIUS + coin_pickup_margin(giant_height)) * 1.2;
     let preferred = (body + MAP_COIN_RADIUS + COIN_GIANT_CLEARANCE).max(pickup);
     (preferred, pickup)
@@ -536,6 +547,9 @@ impl HarborRound {
             entry.set("human", giant.human);
             entry.set("health", giant.health_fraction);
             entry.set("can_demolish", self.can_demolish(giant));
+            entry.set("can_crush_buildings", self.can_crush_buildings(giant));
+            entry.set("coin_value", giant.progress.coin_value);
+            entry.set("hand_action", giant.hand_attack.as_ref().map_or("", |attack| attack.kind.name()));
             entry.set(
                 "chase",
                 giant.chase_target.map_or(0, InstanceId::to_i64),
@@ -628,17 +642,42 @@ impl HarborRound {
             order.sort_by(|&a, &b| self.giants[b].scale.total_cmp(&self.giants[a].scale));
         }
         for index in order {
+            if self.giants[index].human {
+                if self.giants[index].progress.ready_to_transform() {
+                    let actor = &mut self.giants[index];
+                    actor.scale = GROWTH_CRUSH_HEIGHT / GIANT_START_HEIGHT;
+                    actor.growth_limit = f32::INFINITY;
+                    actor.progress.growth_count += 1;
+                    actor.clear_path();
+                    actor.roam_goal = None;
+                    actor.coin_dwell = None;
+                    actor.set_stage(false, self.max_height);
+                    let mut body = actor.body.clone();
+                    self.sync_building_mask(&mut body, true);
+                    if index == 0 && self.player == PlayerRole::Giant
+                        && let Some(mut audio) = self.audio()
+                    {
+                        audio.call("play_transform_giant", &[]);
+                    }
+                }
+                continue;
+            }
             let limit = bands.map_or(f32::INFINITY, |bands| {
                 bands.growth_limit(
                     self.giants[index].scale,
                     self.giants
                         .iter()
                         .enumerate()
-                        .filter(|(i, giant)| *i != index && giant.health_fraction > 0.0)
+                        .filter(|(i, giant)| *i != index && !giant.human && giant.health_fraction > 0.0)
                         .map(|(_, giant)| giant.scale),
                 )
             });
             let actor = &mut self.giants[index];
+            let limit = if actor.progress.ready_to_transform() {
+                limit.max(GROWTH_CRUSH_HEIGHT / GIANT_START_HEIGHT)
+            } else {
+                limit
+            };
             actor.growth_limit = limit;
             if actor.scale > limit {
                 // A new occupant can claim the band while a follower is within the one-meter gap.
@@ -661,17 +700,10 @@ impl HarborRound {
                 self.growth_rules.is_some(),
             );
             let started_growth = !was_growing && actor.growth.is_some();
-            let became_giant = self.sync_actor_stage(index);
-            if index == 0 && self.player == PlayerRole::Giant {
-                if became_giant {
-                    if let Some(mut audio) = self.audio() {
-                        audio.call("play_transform_giant", &[]);
-                    }
-                } else if started_growth
-                    && let Some(mut audio) = self.audio()
-                {
-                    audio.call("play_growth_surge", &[]);
-                }
+            if index == 0 && self.player == PlayerRole::Giant && started_growth
+                && let Some(mut audio) = self.audio()
+            {
+                audio.call("play_growth_surge", &[]);
             }
         }
         let player = &self.giants[0];
@@ -689,7 +721,7 @@ impl HarborRound {
         let mut scale = self.open_spawn_scale(if random {
             // Random heights stay between the configured starting height and the height cap.
             let lower = f64::from(self.settings.giant_height);
-            let upper = f64::from(self.max_height).max(lower);
+            let upper = f64::from(self.settings.giant_max_height).max(lower);
             // Sample across orders of magnitude so small starts remain possible.
             (lower * (upper / lower).powf(godot::global::randf()) / f64::from(GIANT_START_HEIGHT)) as f32
         } else {
@@ -782,7 +814,7 @@ impl HarborRound {
     }
 
     pub(super) fn can_demolish(&self, actor: &Giant) -> bool {
-        actor.health_fraction > 0.0 && !self.is_human_stage(actor.scale)
+        actor.health_fraction > 0.0 && !actor.human
     }
 
     pub(super) fn reward_building_growth(&self, actor: &mut Giant) {
@@ -799,21 +831,25 @@ impl HarborRound {
         let occupied: Vec<_> = self
             .giants
             .iter()
-            .filter(|giant| giant.health_fraction > 0.0)
+            .filter(|giant| giant.health_fraction > 0.0 && !giant.human)
             .filter_map(|giant| bands.floor(giant.scale))
             .collect();
         bands.spawn_scale(scale, &occupied)
     }
 
     fn giant_spawn_safety(&self, scale: f32) -> impl Fn(Vector3, bool) -> bool + '_ {
-        let radius = GIANT_RADIUS * scale;
+        let radius = if self.starts_human(scale) {
+            HUMAN_RADIUS
+        } else {
+            GIANT_RADIUS * scale
+        };
         let clearance = radius + 0.5;
         let occupied: Vec<_> = self
             .giants
             .iter()
             .filter(|giant| giant.health_fraction > 0.0)
             .map(|giant| {
-                let capsule = radius + GIANT_RADIUS * giant.scale + 2.0;
+                let capsule = radius + self.actor_radius(giant) + 2.0;
                 let footfall =
                     radius + footfall_reach(giant.scale) + 4.0;
                 (
@@ -1040,9 +1076,10 @@ impl HarborRound {
                 continue;
             };
             self.giants[index].respawn(spawn, scale, self.max_height);
-            self.sync_actor_stage(index);
+            self.sync_spawn_stage(index);
             if index == 0 && self.player == PlayerRole::Giant {
                 self.yaw = 0.0;
+                let scale = self.giants[0].scale;
                 self.pitch = self.starting_giant_camera_pitch(scale);
                 self.camera_focus_offset = Vector3::ZERO;
                 self.reset_camera_shake();
@@ -1161,7 +1198,7 @@ impl HarborRound {
         let threats: Vec<CoinThreat> = self
             .giants
             .iter()
-            .filter(|giant| giant.health_fraction > 0.0 && !self.is_human_stage(giant.scale))
+            .filter(|giant| giant.health_fraction > 0.0 && !giant.human)
             .map(|giant| {
                 let height = giant.height(self.max_height);
                 let at = giant.body.get_global_position();
@@ -1182,7 +1219,7 @@ impl HarborRound {
         (threats, hotspots)
     }
 
-    /// Ages combat hotspots and re-grades live coins so a wave that spawned in
+    /// Re-grades live coins so a coin that spawned in
     /// a quiet street turns valuable (and slower to grab) once giants move in.
     fn update_hotspots_and_coin_tiers(&mut self, dt: f32) {
         self.coin_regrade_in -= dt;
@@ -1191,9 +1228,6 @@ impl HarborRound {
         }
         self.coin_regrade_in = 0.5;
         let (threats, hotspots) = self.coin_threats();
-        if threats.is_empty() && hotspots.is_empty() {
-            return;
-        }
         let mut root = self.base().get_node_as::<Node3D>("Coins");
         let mut restyled: Vec<(Gd<Node3D>, CoinTier)> = Vec::new();
         for coin in &mut self.coins.coins {
@@ -1211,11 +1245,14 @@ impl HarborRound {
         }
     }
 
-    /// Test/debug rows for the live coin wave.
+    /// Test/debug rows for live coins, keyed by their scene instance ID.
     pub(super) fn coin_debug_entries(&self) -> Array<VarDictionary> {
         let mut entries = Array::new();
         for coin in &self.coins.coins {
             let mut entry = VarDictionary::new();
+            entry.set("id", coin.node.instance_id().to_i64());
+            entry.set("ttl", coin.remaining);
+            entry.set("expiring", coin.remaining <= COIN_WARNING_SECONDS);
             entry.set("tier", coin.tier.index());
             entry.set("dwell", coin.tier.dwell_seconds());
             entry.set("position", coin.position);
@@ -1241,37 +1278,50 @@ impl HarborRound {
         }
     }
 
-    pub(super) fn update_coin_wave(&mut self, dt: f32) {
+    pub(super) fn update_map_coins(&mut self, dt: f32) {
         let rules = self.growth_rules.unwrap();
         if rules.coin_count == 0 {
             return;
         }
-        let has_eligible = self.giants.iter().any(|giant| {
-            giant.health_fraction > 0.0 && !giant.grabbed && !self.can_demolish(giant)
-        });
-        self.coins.refresh_in = (self.coins.refresh_in - dt).max(0.0);
-        if !has_eligible {
-            self.coins.refresh_in = 0.0;
-        }
-        if (!has_eligible && self.coins.coins.is_empty())
-            || (has_eligible && self.coins.refresh_in > 0.0)
-        {
-            for coin in &mut self.coins.coins {
-                coin.position = coin.node.get_position();
-            }
-            self.update_hotspots_and_coin_tiers(dt);
-            return;
-        }
-
         let mut root = self.base().get_node_as::<Node3D>("Coins");
-        for mut coin in self.coins.coins.drain(..) {
-            root.remove_child(&coin.node);
-            coin.node.queue_free();
-        }
-        if !has_eligible {
+        self.coins.coins.retain_mut(|coin| {
+            coin.position = coin.node.get_position();
+            if !std::mem::take(&mut coin.collecting) {
+                coin.remaining -= dt;
+            }
+            if coin.remaining <= 0.0 {
+                root.remove_child(&coin.node);
+                coin.node.queue_free();
+                return false;
+            }
+            if coin.remaining <= COIN_WARNING_SECONDS {
+                root.call("set_coin_expiry", &[coin.node.to_variant(), coin.remaining.to_variant()]);
+            }
+            true
+        });
+        self.update_hotspots_and_coin_tiers(dt);
+        let has_humans = self.giants.iter().any(|giant| {
+            giant.human && giant.health_fraction > 0.0 && !giant.progress.ready_to_transform()
+        });
+        let vacancies = rules.coin_count.saturating_sub(self.coins.coins.len());
+        if !has_humans || vacancies == 0 {
             return;
         }
-        self.coins.refresh_in = rules.coin_interval;
+        self.coins.refill_in -= dt;
+        if self.coins.refill_in > 0.0 {
+            return;
+        }
+        self.coins.refill_in = random_range(0.5, 1.8);
+        let initial = !std::mem::replace(&mut self.coins.seeded, true);
+        let count = if initial {
+            vacancies
+        } else {
+            vacancies.min(godot::global::randi_range(1, 3) as usize)
+        };
+        self.spawn_map_coins(root, count, initial, rules.coin_interval);
+    }
+
+    fn spawn_map_coins(&mut self, mut root: Gd<Node3D>, count: usize, initial: bool, interval: f32) {
         let (coin_threats, coin_hotspots) = self.coin_threats();
         let giant_exclusions: Vec<_> = self
             .giants
@@ -1279,7 +1329,7 @@ impl HarborRound {
             .filter(|giant| giant.health_fraction > 0.0)
             .map(|giant| {
                 let (preferred, pickup) =
-                    coin_giant_exclusion(giant.scale, giant.height(self.max_height));
+                    coin_giant_exclusion(self.actor_radius(giant), giant.height(self.max_height));
                 (
                     giant.body.get_global_position(),
                     preferred * preferred,
@@ -1288,7 +1338,7 @@ impl HarborRound {
             })
             .collect();
         let limit = (self.world_limit - MAP_COIN_RADIUS - 0.5).max(1.0);
-        let (side, origin, cell) = coin_grid_layout(rules.coin_count, limit);
+        let (side, origin, cell) = coin_grid_layout(if initial { count } else { 1 }, limit);
         let mut cells: Vec<usize> = (0..side * side).collect();
         let strict_spacing_sq = COIN_MIN_SPACING * COIN_MIN_SPACING;
         let fallback_spacing_sq = (2.0 * MAP_COIN_RADIUS * 1.05).powi(2);
@@ -1323,9 +1373,13 @@ impl HarborRound {
         let mut space = root
             .get_world_3d()
             .and_then(|world| world.get_direct_space_state());
-        for _ in 0..rules.coin_count {
-            let pick = godot::global::randi_range(0, (cells.len() - 1) as i64) as usize;
-            let cell_index = cells.swap_remove(pick);
+        for _ in 0..count {
+            let cell_index = if initial {
+                let pick = godot::global::randi_range(0, (cells.len() - 1) as i64) as usize;
+                cells.swap_remove(pick)
+            } else {
+                0
+            };
             let min_x = origin + (cell_index % side) as f32 * cell;
             let max_x = min_x + cell;
             let min_z = origin + (cell_index / side) as f32 * cell;
@@ -1356,7 +1410,8 @@ impl HarborRound {
                     (0..24).map(|_| sample_map()).find(|&point| {
                         clear_of_buildings(point)
                             && clear_of_giants(point, false)
-                            && spaced_from_coins(&self.coins.coins, point, fallback_spacing_sq)
+                            && spaced_from_coins(&self.coins.coins, point,
+                                if initial { fallback_spacing_sq } else { strict_spacing_sq })
                     })
                 });
             let Some(mut point) = candidate else { continue };
@@ -1374,16 +1429,10 @@ impl HarborRound {
             self.coins.coins.push(Coin::spawn(
                 &mut root,
                 point,
-                CoinReward::Wave,
+                CoinReward::Map,
                 coin_threat_tier(point, &coin_threats, &coin_hotspots),
+                interval.max(1.0 / 60.0) * random_range(0.6, 1.5),
             ));
-        }
-        let attack_scale = rules.attack_height / GIANT_START_HEIGHT;
-        for giant in &mut self.giants {
-            if giant.scale < attack_scale {
-                giant.clear_path();
-                giant.replan_in = 0.03 * (giant.index % 16) as f32;
-            }
         }
     }
 
@@ -1449,8 +1498,7 @@ impl HarborRound {
             })
     }
 
-    /// Removes and banks one coin: progress count, tier-scaled growth reward,
-    /// scene cleanup and the pickup sound.
+    /// Bank the tier's equivalent value for humans and grow giant collectors.
     fn collect_coin_at(&mut self, actor: &mut Giant, index: usize) {
         let wave_rate = self.combat_rules().coin_growth_rate;
         let max_height = self.max_height;
@@ -1458,11 +1506,15 @@ impl HarborRound {
             let coin = &self.coins.coins[index];
             (coin.node.clone(), coin.position, coin.reward, coin.tier)
         };
-        actor.progress.collected += 1;
-        actor.queue_growth(max_height, |base| match reward {
-            CoinReward::Wave => base * (1.0 + wave_rate * tier.value()),
-            CoinReward::Height(meters) => base + meters / GIANT_START_HEIGHT,
-        });
+        if actor.human {
+            actor.progress.record_coin(tier.value());
+        } else {
+            actor.progress.collected += 1;
+            actor.queue_growth(max_height, |base| match reward {
+                CoinReward::Map => base * (1.0 + wave_rate * tier.value()),
+                CoinReward::Height(meters) => base + meters / GIANT_START_HEIGHT,
+            });
+        }
         let mut root = self.base().get_node_as::<Node3D>("Coins");
         root.remove_child(&node);
         node.queue_free();
@@ -1477,8 +1529,13 @@ impl HarborRound {
     }
 
     pub(super) fn check_growth_contacts(&mut self, actor: &mut Giant, start: Vector3, dt: f32) {
-        if self.coins.coins.is_empty() || !self.can_collect_coins(actor) {
+        if self.coins.coins.is_empty() || !self.can_collect_coins(actor)
+            || (actor.human && actor.progress.ready_to_transform())
+        {
             actor.coin_dwell = None;
+            if actor.index == 0 && self.dwell_ring_visible {
+                self.update_player_dwell_feedback(actor, None, dt);
+            }
             return;
         }
         let end = actor.body.get_global_position();
@@ -1503,7 +1560,9 @@ impl HarborRound {
                 instant.push(index);
             } else {
                 let distance = horizontal(point - end).length();
-                if distance < dwell_distance {
+                if distance <= radius + coin.radius + coin_pickup_margin(height)
+                    && distance < dwell_distance
+                {
                     dwell_distance = distance;
                     dwell_id = Some(coin.node.instance_id());
                 }
@@ -1511,6 +1570,11 @@ impl HarborRound {
         }
         for index in instant.into_iter().rev() {
             self.collect_coin_at(actor, index);
+            if actor.human && actor.progress.ready_to_transform() {
+                actor.coin_dwell = None;
+                self.update_player_dwell_feedback(actor, None, dt);
+                return;
+            }
         }
         if actor.coin_dwell.is_some_and(|dwell| {
             !self
@@ -1541,6 +1605,7 @@ impl HarborRound {
                 self.collect_coin_at(actor, index);
                 actor.coin_dwell = None;
             } else {
+                self.coins.coins[index].collecting = true;
                 actor.coin_dwell = Some(CoinDwell {
                     coin: coin_id,
                     tier,
@@ -1606,9 +1671,6 @@ impl HarborRound {
                 root.call("hide_dwell", &[]);
                 self.dwell_ring_visible = false;
             }
-        } else if actor.coin_dwell.is_none() && self.dwell_ring_visible {
-            root.call("hide_dwell", &[]);
-            self.dwell_ring_visible = false;
         }
     }
 
@@ -1622,12 +1684,13 @@ impl HarborRound {
         let reward = CoinReward::Height(height * rules.coin_reward_rate);
         let mut root = self.base().get_node_as::<Node3D>("Coins");
         // Brawl giants collect instantly at any tier, so kills always drop the
-        // baseline coin; the risk-tier system only grades growth-mode waves.
+        // baseline coin; timed expiry and risk tiers apply to map coins.
         self.coins.coins.push(Coin::spawn(
             &mut root,
             position,
             reward,
             CoinTier::Normal,
+            f32::INFINITY,
         ));
         if let Some(mut audio) = self.audio() {
             audio.call(
@@ -1928,7 +1991,7 @@ impl HarborRound {
         threats.extend(self.rivals.iter().filter(|rival| rival.index != actor.index).filter_map(
             |rival| {
                 let rival_height = rival.scale * GIANT_START_HEIGHT;
-                let reach = if self.is_human_stage(rival.scale) {
+                let reach = if rival.human {
                     if rival_height + 0.0001 < height * 2.0 {
                         return None;
                     }
@@ -2162,14 +2225,14 @@ impl HarborRound {
         snapshot.set("human_stage", actor.human);
         snapshot.set("can_attack", can_demolish);
         snapshot.set("can_demolish", can_demolish);
-        snapshot.set("can_crush_buildings", self.can_crush_buildings(actor));
         snapshot.set(
             "building_hits",
             growth_building_hits(actor.height(self.max_height)),
         );
-        snapshot.set("attack_height", rules.attack_height);
         if self.mode == Mode::Growth {
-            snapshot.set("coin_refresh_in", self.coins.refresh_in.max(0.0));
+            snapshot.set("coin_value", actor.progress.coin_value);
+            snapshot.set("coin_transform_target", GROWTH_TRANSFORM_COINS);
+            snapshot.set("transform_height", GROWTH_CRUSH_HEIGHT);
         }
         let player_position = actor.body.get_global_position();
         if self.mode == Mode::Brawl && self.can_collect_coins(actor) {
@@ -2185,7 +2248,7 @@ impl HarborRound {
                 snapshot.set("coin_angle", view.x.atan2(-view.z));
                 snapshot.set("coin_distance", coin.length());
             }
-        } else if self.mode == Mode::Growth && actor.human {
+        } else if self.mode == Mode::Growth && actor.human && actor.health_fraction > 0.0 {
             // Fuzzy coin radar, growth human stage only: a ~40° direction sector
             // toward the best-value coin beyond naked-eye range. No exact metres
             // ever leave this snapshot — only tier colour and a 3-band pulse.
@@ -2352,8 +2415,8 @@ mod tests {
     fn coin_giant_exclusion_stays_outside_pickup_reach_and_clearance() {
         for height in [0.01, 1.0, 25.2, 200.0] {
             let scale = height / GIANT_START_HEIGHT;
-            let (preferred, pickup) = coin_giant_exclusion(scale, height);
             let body = GIANT_RADIUS * scale;
+            let (preferred, pickup) = coin_giant_exclusion(body, height);
             assert!(pickup > body + MAP_COIN_RADIUS + coin_pickup_margin(height));
             assert!(preferred >= body + MAP_COIN_RADIUS + COIN_GIANT_CLEARANCE - 1e-4);
             assert!(preferred > pickup);

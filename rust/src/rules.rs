@@ -11,6 +11,7 @@ pub const GIANT_DEFAULT_MAX_HEIGHT: f32 = 500.0;
 pub const GIANT_GROWTH: f32 = 1.10;
 pub const GROWTH_REFERENCE_HEIGHT: f32 = 0.01;
 pub const GROWTH_CRUSH_HEIGHT: f32 = 40.0;
+pub const GROWTH_TRANSFORM_COINS: f32 = 10.0;
 // Divisible by every hit count from one through nine, including mixed-size hits.
 pub const GROWTH_BUILDING_INTEGRITY: f32 = 2520.0;
 pub const ONE_HIT_BUILDING_THRESHOLD: u32 = 3;
@@ -48,6 +49,14 @@ impl Mode {
 
     pub fn has_growth(self) -> bool {
         matches!(self, Self::Growth | Self::Brawl)
+    }
+
+    pub fn allows_step_demolition(self, scale: f32, destroyed: u32) -> bool {
+        match self {
+            Self::Sandbox | Self::Brawl => true,
+            Self::Growth => scale >= GROWTH_CRUSH_HEIGHT / GIANT_START_HEIGHT,
+            Self::Human => destroyed >= TOUCH_CRUSH_BUILDING_THRESHOLD,
+        }
     }
 
     pub fn key(self) -> &'static str {
@@ -124,6 +133,7 @@ impl RoundState {
 pub struct GiantProgress {
     pub destroyed: u32,
     pub collected: u32,
+    pub coin_value: f32,
     pub growth_count: u32,
 }
 
@@ -136,8 +146,13 @@ impl GiantProgress {
         self.destroyed >= ONE_HIT_BUILDING_THRESHOLD
     }
 
-    pub fn touch_crush_buildings(&self) -> bool {
-        self.destroyed >= TOUCH_CRUSH_BUILDING_THRESHOLD
+    pub fn record_coin(&mut self, value: f32) {
+        self.collected += 1;
+        self.coin_value += value;
+    }
+
+    pub fn ready_to_transform(&self) -> bool {
+        self.coin_value >= GROWTH_TRANSFORM_COINS
     }
 }
 
@@ -279,15 +294,45 @@ mod tests {
         let mut session = GiantProgress::default();
         session.destroyed = 2;
         assert!(!session.one_hit_buildings());
-        assert!(!session.touch_crush_buildings());
+        assert!(!Mode::Human.allows_step_demolition(1.0, session.destroyed));
         session.destroyed = 3;
         assert!(session.one_hit_buildings());
-        assert!(!session.touch_crush_buildings());
+        assert!(!Mode::Human.allows_step_demolition(1.0, session.destroyed));
         session.destroyed = 5;
-        assert!(!session.touch_crush_buildings());
+        assert!(!Mode::Human.allows_step_demolition(1.0, session.destroyed));
         session.destroyed = 6;
         assert!(session.one_hit_buildings());
-        assert!(session.touch_crush_buildings());
+        assert!(Mode::Human.allows_step_demolition(1.0, session.destroyed));
+    }
+
+    #[test]
+    fn sandbox_and_brawl_step_demolition_is_independent_of_height() {
+        for height in [0.01, 1.8, 25.2, 40.0, 500.0] {
+            let scale = height / GIANT_START_HEIGHT;
+            assert!(Mode::Sandbox.allows_step_demolition(scale, 0));
+            assert!(Mode::Brawl.allows_step_demolition(scale, 0));
+            assert_eq!(Mode::Growth.allows_step_demolition(scale, 0), height >= 40.0);
+        }
+    }
+
+    #[test]
+    fn the_transformation_gate_uses_equivalent_value_instead_of_coin_count() {
+        let mut progress = GiantProgress::default();
+        for value in [5.0, 2.5, 1.0, 1.0] {
+            progress.record_coin(value);
+            assert!(!progress.ready_to_transform());
+        }
+        assert_eq!(progress.coin_value, 9.5);
+        progress.record_coin(1.0);
+        assert!(progress.ready_to_transform());
+        assert_eq!(progress.collected, 5);
+
+        let mut exact = GiantProgress::default();
+        for value in [5.0, 2.5, 2.5] {
+            exact.record_coin(value);
+        }
+        assert_eq!(exact.coin_value, 10.0);
+        assert!(exact.ready_to_transform());
     }
 
     #[test]

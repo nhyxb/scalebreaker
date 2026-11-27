@@ -19,7 +19,7 @@ impl HandMove {
         }
     }
 
-    fn size_allows(self, attacker: f32, target: f32) -> bool {
+    pub(super) fn size_allows(self, attacker: f32, target: f32) -> bool {
         let (limit, height) = match self {
             Self::GrabCrush => (3.0 * target, attacker),
             Self::Punch => (2.0 * attacker.min(target), attacker.max(target)),
@@ -145,7 +145,7 @@ impl HarborRound {
             .filter(|rival| rival.index != actor.index)
             .map(|rival| {
                 let height = rival.scale * GIANT_START_HEIGHT;
-                let radius = if self.is_human_stage(rival.scale) {
+                let radius = if rival.human {
                     HUMAN_RADIUS * height / HUMAN_HEIGHT
                 } else {
                     rival.scale * GIANT_RADIUS
@@ -194,15 +194,14 @@ impl HarborRound {
         false
     }
 
-    pub(super) fn start_ai_hand_move(
+    /// Starts a hand attack when planted and aligned, or gives the direction
+    /// to face while settling the current step.
+    pub(super) fn try_ai_hand_move(
         &self,
         actor: &mut Giant,
         target: &CombatTarget,
         footfall_in_reach: bool,
-    ) -> bool {
-        if !Self::ready_for_hand_move(actor) || !self.can_demolish(actor) {
-            return false;
-        }
+    ) -> Option<Vector3> {
         let id = target.body.instance_id();
         let (victim, pose) = if let Some(rival) = self
             .rivals
@@ -227,16 +226,28 @@ impl HarborRound {
         } else {
             &[HandMove::GrabCrush, HandMove::Punch]
         };
+        let origin = actor.body.get_global_position();
+        let heading = horizontal(pose.at - origin).normalized_or_zero();
+        let height = actor.height(self.max_height);
         for &kind in moves {
-            if let Some(point) = self.valid_hand_point(actor, kind, &pose, aim) {
-                if footfall_in_reach && godot::global::randf() >= AI_GRAB_CHANCE_NEAR_LANDING {
-                    return false;
-                }
-                self.begin_hand_move(actor, kind, victim, point);
-                return true;
+            // Close to within a reliable hit range before planting the feet for a swing.
+            let point = pose.point(origin, height, kind);
+            if horizontal(point - origin).length() > height * kind.reach() * 0.8 {
+                continue;
             }
+            let Some(point) = self.valid_hand_point(actor, kind, &pose, heading) else { continue };
+            let ready = Self::ready_for_hand_move(actor) && aim.dot(heading) >= 0.77;
+            if footfall_in_reach && (!ready || godot::global::randf() >= AI_GRAB_CHANCE_NEAR_LANDING) {
+                return None;
+            }
+            if ready {
+                self.begin_hand_move(actor, kind, victim, point);
+                actor.ai_punched = kind == HandMove::Punch;
+                return Some(Vector3::ZERO);
+            }
+            return Some(heading);
         }
-        false
+        None
     }
 
     pub(super) fn start_ai_scenery_hand_move(&self, actor: &mut Giant, index: usize) -> bool {

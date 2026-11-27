@@ -230,15 +230,11 @@ func _check_giant_and_destruction_sfx(game: Node, audio: Node) -> void:
 	audio.call("reset_telemetry")
 	await FootfallFixture.strike_building(current, target)
 	_check(int(audio.call("count_played", &"giant_footfall")) >= 1
-			and int(audio.call("count_played", &"camera_shake")) >= 1
-			and not target.get("_cracked"),
-			"Below touch-crush threshold walking leaves the building intact while playing normal footfall audio")
-	audio.call("reset_telemetry")
-	for strike in 2:
-		await FootfallFixture.sit_building(current, target)
-	_check(int(audio.call("count_played", &"building_crack")) >= 1
-			and int(audio.call("count_played", &"building_collapse")) >= 1,
-			"damaging and demolishing a building via active attack plays building_crack and building_collapse")
+			and int(audio.call("count_played", &"camera_shake")) >= 1,
+			"Walking through a building still plays the footfall and its camera shake")
+	_check(int(audio.call("count_played", &"building_collapse")) >= 1
+			and target.get_node("BlockingBody").collision_layer == 0,
+			"Sandbox walking demolition plays building_collapse")
 
 	# The settings affect screen shake audio without muting the physical footfall.
 	for shake in [{"shake_strength": 0.0, "own_camera_shake": true},
@@ -271,14 +267,17 @@ func _check_growth_sfx(game: Node, audio: Node) -> void:
 	var coins := current.get_node("Coins")
 	audio.call("reset_telemetry")
 
-	if coins.get_child_count() > 0:
-		var coin := coins.get_child(0) as Node3D
-		giant.global_position = coin.global_position
-		await _ticks(25)
-	_check(int(audio.call("count_played", &"coin_pickup")) >= 1,
-			"collecting a coin in Growth mode plays coin_pickup")
-	_check(int(audio.call("count_played", &"transform_giant")) >= 1,
-			"growing across attack_height plays transform_giant")
+	giant.position = Vector3(0.0, 0.02, -34.0)
+	for index in 9:
+		coins.get_child(index).position = giant.position
+	await _ticks(15)
+	_check(int(audio.call("count_played", &"coin_pickup")) >= 1
+			and int(audio.call("count_played", &"transform_giant")) == 0,
+			"Coin pickup plays below the transformation threshold")
+	coins.get_child(0).position = giant.position
+	await _ticks(15)
+	_check(int(audio.call("count_played", &"transform_giant")) == 1,
+			"Banking the tenth equivalent plays transform_giant once")
 
 
 func _check_bedroom_sfx(audio: Node) -> void:

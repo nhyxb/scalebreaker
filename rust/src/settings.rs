@@ -2,7 +2,9 @@ use godot::classes::{ConfigFile, DirAccess};
 use godot::global::Error;
 use godot::prelude::*;
 
-use crate::rules::{GIANT_DEFAULT_MAX_HEIGHT, GIANT_START_HEIGHT, GROWTH_REFERENCE_HEIGHT, Mode};
+use crate::rules::{
+    GIANT_DEFAULT_MAX_HEIGHT, GIANT_START_HEIGHT, GROWTH_REFERENCE_HEIGHT, HUMAN_HEIGHT, Mode,
+};
 
 const DEFAULT_MAP_SIDE: i32 = 1418;
 const DEFAULT_SFX_VOLUME: f32 = 0.85;
@@ -274,7 +276,7 @@ impl GameSettings {
             Self {
                 giant_speed: 4.0,
                 giant_height: if mode == Mode::Growth {
-                    GROWTH_REFERENCE_HEIGHT
+                    HUMAN_HEIGHT
                 } else {
                     GIANT_START_HEIGHT
                 },
@@ -586,13 +588,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn growth_defaults_use_mapwide_coin_wave_and_split_growth_rates() {
+    fn growth_defaults_use_mapwide_coins_and_split_growth_rates() {
         let growth = GrowthSettings::default();
         assert_eq!(growth.coin_count, 200);
         assert_eq!(growth.coin_interval, 60.0);
         assert_eq!(growth.coin_growth_rate, 0.10);
         assert_eq!(growth.building_growth_rate, 0.10);
         let mode = GameSettings::for_mode(Mode::Growth);
+        assert_eq!(mode.giant_height, HUMAN_HEIGHT);
         assert_eq!(mode.growth.coin_count, 200);
         assert_eq!(mode.growth.coin_interval, 60.0);
     }

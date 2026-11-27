@@ -27,6 +27,7 @@ func _run() -> void:
 	await _check_combat()
 	await _check_crowded_respawn()
 	await _check_upward_footfall_damage()
+	await _check_ai_attack_ranges()
 	await _check_giants_pass()
 	DirAccess.remove_absolute(_game.settings_path)
 	print("Brawl gameplay: %d passed, %d failed" % [_checks - _failures, _failures])
@@ -122,18 +123,19 @@ func _check_demolition() -> void:
 			"The harbor menu opens an all-giant round with Growth building durability")
 	var building: Node3D = round.get_node("District/Targets/DockPress1")
 	await FootfallFixture.strike_building(round, building)
-	_check(building.get_node("BlockingBody").collision_layer == 8 and not building.get("_cracked")
-			and round.snapshot().giant_destroyed == 0,
-			"Below touch-crush height walking does not damage a building in Brawl")
-	for hit in 10:
-		await FootfallFixture.sit_building(round, building)
-		if building.get_node("BlockingBody").collision_layer == 0:
-			break
 	state = round.snapshot()
-	_check(building.get_node("BlockingBody").collision_layer == 0
+	var giant: CharacterBody3D = round.get_node("Giant")
+	_check(state.can_crush_buildings and (giant.collision_mask & 24) == 0
+			and building.get_node("BlockingBody").collision_layer == 0
 			and state.giant_destroyed == 1 and state.growth_count == 0
 			and is_equal_approx(state.giant_height, 3.0) and round.get_node("Coins").get_child_count() == 0,
-			"Active demolition awards neither height nor a coin")
+			"A 3 m Brawl giant immediately walks through and demolishes an intact building")
+	var approach := giant.position.z
+	Input.action_press("move_forward")
+	await _ticks(500)
+	Input.action_release("move_forward")
+	_check(giant.position.z < building.position.z - 2.0 and giant.position.z < approach - 4.0,
+			"The low Brawl giant continues through the collapsed footprint")
 	_game.pause()
 	_game.restart()
 	await _ticks(2)
@@ -315,6 +317,45 @@ func _check_upward_footfall_damage() -> void:
 	await _ticks(45)
 	_check(is_equal_approx(round.growth_actors()[1].health, after),
 			"One heavy landing does not damage a taller enemy again while planted")
+
+func _check_ai_attack_ranges() -> void:
+	for ratio: float in [0.075, 0.4, 0.5, 1.0, 2.0]:
+		seed(14373)
+		_save({"giant_count": 2, "giant_height": 40.0, "giant_speed": 2.0,
+				"base_attack": 8.0, "sit_idle_enabled": false, "rival_ignore_ratio": 40.0})
+		_game.start_brawl()
+		var round := _round()
+		var player: CharacterBody3D = round.get_node("Giant")
+		var rival: CharacterBody3D = round.get_node("OtherGiants/Giant2")
+		round.debug_resize_giant(0, ratio * 40.0)
+		player.position = Vector3(0.0, 0.02, -288.0)
+		rival.position = player.position + Vector3.BACK * (16.0 if ratio == 2.0 else 10.0)
+		rival.rotation.y = 0.0
+		var punch := false
+		var sit := false
+		var sit_hit := false
+		var landed := false
+		var hurt := false
+		var last_health := 1.0
+		for frame in 620:
+			await physics_frame
+			var actor := FootfallFixture.actor(round, 1)
+			punch = punch or actor.hand_action == "punch"
+			var sitting := not String(actor.sit).is_empty()
+			sit = sit or sitting
+			landed = landed or actor.footfall_count > 0
+			var health := float(FootfallFixture.actor(round).health)
+			hurt = hurt or health < 1.0
+			sit_hit = sit_hit or (sitting and health < last_health)
+			last_health = health
+			if hurt and (ratio != 1.0 or (punch and sit_hit)):
+				break
+		_check(hurt and (punch or sit or landed),
+				"AI closes the attack against a %.3fx target (punch=%s, sit=%s, step=%s)" % [ratio, punch, sit, landed])
+		if ratio == 1.0:
+			_check(punch and sit_hit, "The peer AI punches and lands a sit-crush in one encounter")
+		_game.show_menu()
+
 
 func _check_giants_pass() -> void:
 	for ignore_ratio in [10.0, 3.0]:

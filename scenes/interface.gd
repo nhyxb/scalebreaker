@@ -467,7 +467,7 @@ func update_hud(state: Dictionary) -> void:
 	if _is_giant and _screen == "playing":
 		var unlocked := false
 		if not _has_growth_hud(_mode):
-			unlocked = (_last_player_destroyed < 3 and player_destroyed >= 3) or (_last_player_destroyed < 6 and player_destroyed >= 6)
+			unlocked = _last_player_destroyed < 3 and player_destroyed >= 3
 		elif can_crush_now and not _last_can_crush and not state.giant_respawning and _last_player_destroyed >= 0 and height_m >= 40.0:
 			# Avoid triggering on initial spawn above 40m (only once the player actually grows across 40m).
 			unlocked = _last_destroyed > 0 or int(state.get("coins_collected", 0)) > 0 or int(state.get("giant_kills", 0)) > 0
@@ -480,15 +480,12 @@ func update_hud(state: Dictionary) -> void:
 	if destroyed >= total:
 		_count_status.text = "全港已夷平  ·  身高 %s" % scale_text
 		_count_status.add_theme_color_override("font_color", CRANE_AMBER)
-	elif _has_growth_hud(_mode) and state.can_crush_buildings:
-		_count_status.text = "触碰碾压已解锁"
+	elif can_crush_now:
+		_count_status.text = "如履平地 · 身高 %s" % scale_text
 		_count_status.add_theme_color_override("font_color", CRANE_AMBER)
 	elif _has_growth_hud(_mode):
 		_count_status.text = "拆楼需 %d 次命中" % state.building_hits
 		_count_status.add_theme_color_override("font_color", WARM_GRAY)
-	elif player_destroyed >= 6:
-		_count_status.text = "触碰碾压已解锁  ·  %s" % scale_text
-		_count_status.add_theme_color_override("font_color", CRANE_AMBER)
 	elif player_destroyed >= 3:
 		_count_status.text = "一击拆楼已解锁  ·  %s" % scale_text
 		_count_status.add_theme_color_override("font_color", PAPER)
@@ -693,8 +690,10 @@ func _update_growth_hud(state: Dictionary) -> void:
 		_growth_status.text = "巨人形态 · 行进落脚、抓取与拆楼"
 		_growth_coins.text = "金币 %d  ·  击倒 %d  ·  存活 %d/%d" % [state.coins_collected, state.giant_kills, state.giants_alive, state.giant_count]
 	else:
-		_growth_status.text = "人类形态 · 长到 %s 后变成巨人" % _format_height(state.attack_height)
-		_growth_coins.text = "金币 %d  ·  击倒 %d  ·  %.1f 秒后刷新" % [state.coins_collected, state.giant_kills, state.coin_refresh_in]
+		_growth_status.text = "人类形态"
+		_growth_coins.text = "金币 %s / %s · 满额变身 %s 米" % [
+			String.num(float(state.coin_value), 1).trim_suffix(".0"), String.num(float(state.coin_transform_target), 0),
+			String.num(float(state.transform_height), 0)]
 	_evac_panel.visible = state.has("coin_distance")
 	if _evac_panel.visible:
 		var distance: float = float(state.coin_distance)
@@ -717,7 +716,7 @@ func _update_growth_hud(state: Dictionary) -> void:
 		_coin_radar.set_reading(float(radar.get("angle", 0.0)), float(radar.get("span", 0.698)),
 				int(radar.get("tier", 0)), int(radar.get("proximity", 0)))
 	else:
-		_coin_radar.set_no_reading()
+		_coin_radar.set_no_reading(not bool(state.human_stage) or bool(state.giant_respawning))
 
 
 # ---------------------------------------------------------------------------
@@ -3062,8 +3061,11 @@ class CoinRadar extends Control:
 		_tier = tier
 		_proximity = proximity
 
-	func set_no_reading() -> void:
+	func set_no_reading(immediate := false) -> void:
 		_active = false
+		if immediate:
+			_fade = 0.0
+			visible = false
 
 	func tick(dt: float) -> void:
 		_fade = move_toward(_fade, 1.0 if _active else 0.0, dt * 2.6)
