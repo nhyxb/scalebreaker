@@ -3206,11 +3206,12 @@ class GiantActionStatus extends Control:
 				_status_lbl.text = "挥拳"
 			"grabbed":
 				_status_lbl.text = "被抓住"
-			"sit_turn":
-				_status_lbl.text = "转身对准"
 			"sit_drop":
 				_status_lbl.text = "坐压落下"
 				ink = Color("#ff8a5b")
+			"sit_cancel":
+				_status_lbl.text = "收起坐姿"
+				ink = Color("#b7c2cc")
 			"sit_hold":
 				_status_lbl.text = "坐压压实"
 			"sit_rise":

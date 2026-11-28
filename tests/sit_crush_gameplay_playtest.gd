@@ -114,9 +114,10 @@ func _crowd_nodes() -> Array:
 	return _round().get_node("Civilians").get_children()
 
 
+## Crowd in the rear landing zone, which is the only place a sit can reach.
 func _hold_civilians_in_front(index: int, count := 2) -> void:
 	var body := _body(index)
-	var forward := Vector3(0.0, 0.0, -1.0).rotated(Vector3.UP, body.rotation.y)
+	var forward := Vector3(0.0, 0.0, 1.0).rotated(Vector3.UP, body.rotation.y)
 	var side := forward.cross(Vector3.UP)
 	var crowd := _crowd_nodes()
 	for i in mini(crowd.size(), count):
@@ -126,9 +127,10 @@ func _hold_civilians_in_front(index: int, count := 2) -> void:
 		npc.velocity = Vector3.ZERO
 
 
+## The seated pelvis drops behind the body (yaw 0 faces -Z), so the crowd stands at +Z.
 func _hold_crowd() -> void:
-	_place(1, OPEN_STREET + Vector3(0.8, 0.0, -3.2))
-	_place(2, OPEN_STREET + Vector3(-0.9, 0.0, -2.4))
+	_place(1, OPEN_STREET + Vector3(0.8, 0.0, 3.0))
+	_place(2, OPEN_STREET + Vector3(-0.9, 0.0, 2.4))
 
 
 func _place(index: int, position: Vector3) -> void:
@@ -197,8 +199,8 @@ func _crush_triggers_on_small_crowd() -> void:
 			"The player giant waits for a sit request instead of dropping on its own")
 	var started := await _request_sit()
 	_check(started, "Two tiny targets inside the seated footprint start the sit-crush on request")
-	_check(String(_actor(0).get("sit", "")) == "turn",
-			"The giant pivots its back toward the crowd before sitting")
+	_check(String(_actor(0).get("sit", "")) == "drop",
+			"The giant drops straight down along its current facing instead of pivoting first")
 	var effects := _round().get_node("Effects")
 	var ring := effects.find_child("SitWarning", true, false) as Node3D
 	_check(ring != null, "The sit-crush shows a yellow landing ring while it winds up")
@@ -209,11 +211,11 @@ func _crush_triggers_on_small_crowd() -> void:
 		_check(Vector2(ring.global_position.x - expected.x,
 				ring.global_position.z - expected.z).length() < 1.5,
 				"The landing ring sits where the pelvis will come down (behind the giant)")
-	# The giant turns around and sits back onto the crowd, so keep them in the trigger zone.
+	# The crowd stands behind the giant, exactly where the seated pelvis lands.
 	var reached_hold := await _wait_phase(0, "hold", 700, true)
-	_check(reached_hold, "The seated hold begins after the pivot")
+	_check(reached_hold, "The seated hold begins after the drop")
 	var turned := absf(angle_difference(0.0, _body(0).rotation.y))
-	_check(turned > 2.4, "The pivot leaves the giant's back to the crowd (%.1f deg)" % rad_to_deg(turned))
+	_check(turned < 0.05, "Sitting keeps the current facing untouched (%.2f deg)" % rad_to_deg(turned))
 	_check(effects.find_child("SitWarning", true, false) == null,
 			"The landing ring clears once the giant is seated")
 	var victim_health := float(_actor(1)["health"])
@@ -273,11 +275,14 @@ func _ai_crush_wins_over_chase_and_footfall() -> void:
 
 
 func _pin_crowd_at_feet() -> void:
-	# 两个 1 m 小目标固定在 AI-1 身体前方 2.4 m，持续满足人数判定。
-	var anchor: Vector3 = _body(1).global_position
-	for pair in [[3, Vector3(0.7, 0.0, -2.4)], [4, Vector3(-0.7, 0.0, -2.4)]]:
+	# 两个 1 m 小目标固定在 AI-1 身体后方 2.4 m：坐压的骨盆只会落在背后。
+	var body := _body(1)
+	var back := Vector3(0.0, 0.0, 1.0).rotated(Vector3.UP, body.rotation.y)
+	var side := back.cross(Vector3.UP)
+	var anchor: Vector3 = body.global_position
+	for pair in [[3, 0.7], [4, -0.7]]:
 		var npc := _body(pair[0])
-		npc.global_position = anchor + pair[1]
+		npc.global_position = anchor + back * 2.4 + side * float(pair[1])
 		npc.velocity = Vector3.ZERO
 
 
@@ -302,11 +307,11 @@ func _crush_can_begin_after_a_footfall() -> void:
 	var frames_to_sit := -1
 	for frame in 16:
 		var giant := _body(1)
-		var forward := -giant.global_basis.z
+		var back := Vector3(0.0, 0.0, 1.0).rotated(Vector3.UP, giant.rotation.y)
 		for index in [3, 4]:
 			var civilian := _body(index)
 			var lateral := 0.8 if index == 3 else -0.8
-			civilian.global_position = giant.global_position + forward * 2.4 + giant.global_basis.x * lateral
+			civilian.global_position = giant.global_position + back * 2.4 + giant.global_basis.x * lateral
 			civilian.velocity = Vector3.ZERO
 		await physics_frame
 		if not String(_actor(1).get("sit", "")).is_empty():
@@ -334,13 +339,13 @@ func _crush_ignores_ignore_ratios() -> void:
 	await _ticks(4)
 	var started := false
 	for frame in 180:
-		var forward: Vector3 = Vector3(0.0, 0.0, -1.0).rotated(Vector3.UP, _body(1).rotation.y)
-		var side: Vector3 = forward.cross(Vector3.UP)
+		var back: Vector3 = Vector3(0.0, 0.0, 1.0).rotated(Vector3.UP, _body(1).rotation.y)
+		var side: Vector3 = back.cross(Vector3.UP)
 		var anchor: Vector3 = _body(1).global_position
-		# Keep both bodies in the seating zone and clear of either shoe's lane.
+		# Keep both bodies in the rear landing zone and clear of either shoe's lane.
 		for pair in [[3, 3.25], [4, -3.25]]:
 			var npc := _body(pair[0])
-			npc.global_position = anchor + forward * 3.1 + side * float(pair[1])
+			npc.global_position = anchor + back * 3.1 + side * float(pair[1])
 			npc.velocity = Vector3.ZERO
 		await physics_frame
 		if String(_actor(1).get("sit", "")) != "":
@@ -469,6 +474,11 @@ func _big_sit_pins_and_drains() -> void:
 	_check(drained > 0.15, "The pinned giant keeps losing a fifth of the attack twice a second (%.2f)" % drained)
 	_check(_body(1).global_position.distance_to(pinned_at) < 0.6,
 			"The pinned giant cannot move while sat on")
+	# The pinned body belongs to the attacker's sit, so it must not start a second sit
+	# state machine on top of the pin (`sit_ready` mirrors the same guard).
+	await _ticks(8)
+	_check(String(_actor(1).get("sit", "")) == "",
+			"A pinned giant does not start a sit of its own")
 	await _press("stand_up")
 	var released := false
 	for frame in 300:

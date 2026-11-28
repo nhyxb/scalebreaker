@@ -268,7 +268,7 @@ var _breath := 0.0
 var _idle_look_time := 0.0
 var _stride := 0.0
 var _foot_stride := 0.0
-var _step_scale := 1.0
+var _upper_body_sway_scale := 1.0
 var _move_drive := 0.0
 var _last_walk_speed := WALK_REF_SPEED
 var _stop_phase := STOP_NONE
@@ -563,7 +563,7 @@ func set_stage(human: bool) -> void:
 	_clear_hit_overlay()
 
 
-func _human_motion(speed: float, delta: float) -> bool:
+func _human_motion(speed: float, delta: float, backward := false) -> bool:
 	if _human_dying:
 		_human_step_segment = -1
 		return false
@@ -575,7 +575,13 @@ func _human_motion(speed: float, delta: float) -> bool:
 		_human_anim.play(clip, 0.12)
 		_human_step_segment = -1
 	var reference := 5.8 * human_pace * maxf(_human_model.scale.y, 0.0000001)
-	_human_anim.speed_scale = clampf(speed / reference, 0.25, 1.8) if clip == &"walk" else 1.0
+	if clip == &"walk":
+		# Backing up keeps the face forward: the walk loop plays in reverse so the
+		# feet travel backwards with the body instead of moonwalking.
+		_human_anim.speed_scale = -clampf(speed / reference, 0.25, 1.8) if backward \
+				else clampf(speed / reference, 0.25, 1.8)
+	else:
+		_human_anim.speed_scale = 1.0
 	if clip == &"idle" or not is_on_floor() or _human_anim.current_animation_length <= 0.0:
 		_human_step_segment = -1
 		return false
@@ -1164,7 +1170,7 @@ func show_motion(speed: float, _legacy_pose: float, delta: float,
 		turn_target: float = NAN, allow_standing_turn: bool = false,
 		backward: bool = false, blocked: bool = false) -> Variant:
 	if _human_stage:
-		return _human_motion(speed, delta)
+		return _human_motion(speed, delta, backward)
 	_init_foot_tracks()
 	_check_teleport()
 	var dt := clampf(delta, 0.0, 0.05)
@@ -1363,8 +1369,8 @@ func _stop_time_scale() -> float:
 static func _size_speed_factor(scale_ratio: float) -> float:
 	if scale_ratio <= 1.0:
 		return scale_ratio
-	var step_sc := clampf(pow(minf(3.5 / scale_ratio, 1.0), 0.62), 0.30, 1.0)
-	return pow(scale_ratio * step_sc, 0.72)
+	var speed_scale := clampf(pow(minf(3.5 / scale_ratio, 1.0), 0.62), 0.30, 1.0)
+	return pow(scale_ratio * speed_scale, 0.72)
 
 
 func _begin_stop_swing(with_carry: bool) -> void:
@@ -1395,7 +1401,7 @@ func _begin_stop_swing(with_carry: bool) -> void:
 	_stop_swing_dur = clampf(STOP_SWING_SECONDS * _stop_time_scale() * rem, 0.08, 1.4)
 
 	var step_mult := BACKWARD_STEP_RATIO if _walk_backward else 1.0
-	var eff_half_world := HALF_STEP * step_mult * _step_scale * _model.scale.z
+	var eff_half_world := HALF_STEP * step_mult * _model.scale.z
 	var swing_travel := 0.0
 	if with_carry:
 		_stop_swing_v0 = clampf(_last_walk_speed, 0.0, WALK_REF_SPEED * pace * _size_speed_factor(maxf(_model.scale.z / _model_base_scale, 0.15)) * 1.15)
@@ -1480,7 +1486,7 @@ func _begin_stop_settle(with_carry: bool) -> void:
 	var time_scale := _stop_time_scale()
 	var base_dur := STANCE_SETTLE_SECONDS * time_scale
 	var step_mult := BACKWARD_STEP_RATIO if _walk_backward else 1.0
-	var eff_half_world := HALF_STEP * step_mult * _step_scale * _model.scale.z
+	var eff_half_world := HALF_STEP * step_mult * _model.scale.z
 	var ref_v := maxf(_stop_swing_v1 if _stop_swing_v1 > 1.0 else _last_walk_speed, WALK_REF_SPEED * pace * 0.65)
 	var speed_dur := (PI * 0.5) * _stop_carry_dist / maxf(ref_v, 1.0)
 	var scaled_base := base_dur * clampf(lead_ahead / maxf(eff_half_world * 0.45, 0.1), 0.62, 1.0)
@@ -1607,13 +1613,12 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		_turn_stride_mult = lerpf(_turn_stride_mult, target_stride_mult, minf(dt * 7.0, 1.0)) if dt > 0.0 else target_stride_mult
 		_turn_cadence_mult = lerpf(_turn_cadence_mult, target_cadence_mult, minf(dt * 7.0, 1.0)) if dt > 0.0 else target_cadence_mult
 
-		# Adapt stride amplitude smoothly once the giant reaches super-colossal height (>88m),
-		# while locking stride_length identically so flat-ground foot slip stays zero.
-		var target_step_scale := clampf(pow(minf(3.5 / scale_ratio, 1.0), 0.62), 0.30, 1.0)
+		# A taller giant sways less through the shoulders and torso as the full stride slows down.
+		var target_sway_scale := clampf(pow(minf(3.5 / scale_ratio, 1.0), 0.62), 0.30, 1.0)
 		if dt > 0.0:
-			_step_scale = lerpf(_step_scale, target_step_scale, minf(dt * 4.5, 1.0))
+			_upper_body_sway_scale = lerpf(_upper_body_sway_scale, target_sway_scale, minf(dt * 4.5, 1.0))
 		else:
-			_step_scale = target_step_scale
+			_upper_body_sway_scale = target_sway_scale
 
 		var back_speed_mult := 0.74 if _walk_backward else 1.0
 		var cycle_speed: float
@@ -1631,7 +1636,7 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 		_foot_stride = move_toward(_foot_stride, target, dt * 5.2)
 		_move_drive = move_toward(_move_drive, target, dt * 5.5)
 
-		var stride_scale := _model_base_scale if fixed_walk_tempo else _step_scale * _model.scale.z
+		var stride_scale := _model_base_scale if fixed_walk_tempo else _model.scale.z
 		var step_len_mult := BACKWARD_STEP_RATIO if _walk_backward else 1.0
 		var base_stride_length := maxf(2.0 * HALF_STEP * step_len_mult * stride_scale / CONTACT_FRACTION, 0.0001)
 		var eff_stride_length := base_stride_length * maxf(_turn_stride_mult, 0.86)
@@ -1675,20 +1680,22 @@ func _advance_walk(speed: float, dt: float, turn_target := NAN,
 			cycle_rate *= 1.80
 
 		_walk_cycle_prev = _cycle
-		_cycle = fposmod(_cycle + minf(cycle_rate * dt, 0.49), 1.0)
+		var cycle_delta := minf(cycle_rate * dt, 0.49)
+		_cycle = fposmod(_cycle + cycle_delta, 1.0)
 		if _walk_init_step and _cycle < _walk_cycle_prev:
 			_walk_init_step = false
 
-		var swing_dur := (1.0 - CONTACT_FRACTION) / maxf(cycle_rate, 0.15)
+		# Use the actual cycle rate for landing prediction, including long strides at low speed.
+		var cycle_seconds := dt / cycle_delta if cycle_delta > 0.0 else 1.0 / maxf(cycle_rate, 0.000001)
 		var hover_bounds := _swing_hover_bounds(body_ratio)
 		_last_swing_hover_frac = hover_bounds.y - hover_bounds.x
-		_last_swing_hover_secs = _last_swing_hover_frac * swing_dur
-		if _update_walk_foot(_foot_l, _left, _foot_r, _right, _cycle, _walk_cycle_prev, swing_dur, dt):
+		_last_swing_hover_secs = _last_swing_hover_frac * (1.0 - CONTACT_FRACTION) * cycle_seconds
+		if _update_walk_foot(_foot_l, _left, _foot_r, _right, _cycle, _walk_cycle_prev, cycle_seconds, dt):
 			if _can_emit_footfall(_foot_l, _left):
 				_walk_just_landed = "L"
 		var r_phase := fposmod(_cycle + 0.5, 1.0)
 		var r_prev := fposmod(_walk_cycle_prev + 0.5, 1.0)
-		if _update_walk_foot(_foot_r, _right, _foot_l, _left, r_phase, r_prev, swing_dur, dt):
+		if _update_walk_foot(_foot_r, _right, _foot_l, _left, r_phase, r_prev, cycle_seconds, dt):
 			if _can_emit_footfall(_foot_r, _right):
 				_walk_just_landed = "R"
 
@@ -1885,7 +1892,7 @@ func _walk_pose(dt: float) -> void:
 		sup_local.y = sup_leg.ankle_rest.y
 		var swg_world := _stop_swing_start_world.lerp(_stop_swing_target_world, smoothstep(0.0, 0.8, u))
 		var swg_local := _skeleton.to_local(swg_world)
-		var arc_boost := SWING_HEIGHT * 0.32 * _stop_swing_rem * lerpf(0.55, 1.0, clampf(_step_scale, 0.30, 1.0))
+		var arc_boost := SWING_HEIGHT * 0.32 * _stop_swing_rem
 		var body_ratio := maxf(_model.scale.z / _model_base_scale, 0.15)
 		var swg_y := _stop_swing_start_y * pow(1.0 - u, 0.70) + _heavy_swing_arc(u, body_ratio) * arc_boost
 		swg_local.y = swg_leg.ankle_rest.y + swg_y
@@ -1936,7 +1943,7 @@ func _walk_pose(dt: float) -> void:
 		var trail_world := _stop_trail_start_world.lerp(_stop_trail_target_world, trail_u)
 		var trail_local := _skeleton.to_local(trail_world)
 		trail_local.y = trail_leg.ankle_rest.y + 0.16 * trail_lift * trail_dist
-		var trail_pitch := -0.22 * trail_lift * trail_dist
+		var trail_pitch := 0.0
 		var trail_yaw := angle_difference(model_world_yaw,
 				lerp_angle(_stop_trail_start_yaw, _stop_trail_target_yaw, trail_u))
 		var lead_yaw := angle_difference(model_world_yaw, _stop_lead_yaw)
@@ -2014,7 +2021,7 @@ func _walk_pose(dt: float) -> void:
 	var elbow_lag := cos(angle - 0.40) * gait_sign
 	var upper_drive := _move_drive
 	var unblock := 1.0 - clampf(_blocked_weight * 0.92, 0.0, 0.92)
-	var step_amp := lerpf(0.62, 1.0, clampf(_step_scale, 0.28, 1.0)) * lerpf(0.76, 1.0, _turn_stride_mult) * unblock
+	var step_amp := lerpf(0.62, 1.0, _upper_body_sway_scale) * lerpf(0.76, 1.0, _turn_stride_mult) * unblock
 
 	# Subtle living idle contrapposto & multi-harmonic breathing (muted while actively turning).
 	var idle_weight := 1.0 - _stride
@@ -2096,7 +2103,7 @@ func _walk_pose(dt: float) -> void:
 	var r_out := clampf(turn_bias, 0.0, 1.0)
 	var r_in := clampf(-turn_bias, 0.0, 1.0)
 
-	var base_arm_amp := upper_drive * lerpf(0.70, 1.05, clampf(_step_scale, 0.28, 1.12))
+	var base_arm_amp := upper_drive * lerpf(0.70, 1.05, _upper_body_sway_scale)
 	var l_amp := base_arm_amp * (1.0 + 0.34 * l_out - 0.34 * l_in)
 	var r_amp := base_arm_amp * (1.0 + 0.34 * r_out - 0.34 * r_in)
 	_last_l_arm_amp = l_amp + (0.18 * (1.0 + 0.55 * l_out - 0.45 * l_in) if (_stand_turning or _stand_step_active) else 0.0)
@@ -2261,7 +2268,7 @@ func _reset_turn_tracks() -> void:
 func _can_emit_footfall(ft: FootTrack, leg: Leg) -> bool:
 	if _blocked_weight >= 0.55:
 		return false
-	var step_ref := maxf(_step_scale * _model.scale.z, 0.01)
+	var step_ref := maxf(_model.scale.z, 0.01)
 	if ft.last_step_length < MIN_EFFECTIVE_STEP_DISP_FRAC * step_ref:
 		return false
 	var sole_center := ft.swing_target_world + (leg.sole_offset * _model.scale.z).rotated(Vector3.UP, ft.world_yaw)
@@ -2595,7 +2602,7 @@ func _start_standing_pivot_step(tempo_scale: float) -> void:
 
 
 func _update_walk_foot(ft: FootTrack, leg: Leg, other_ft: FootTrack, other_leg: Leg,
-		phase: float, prev_phase: float, swing_dur: float, dt: float) -> bool:
+		phase: float, prev_phase: float, cycle_seconds: float, dt: float) -> bool:
 	var S := _model.scale.z
 	var in_swing := phase >= CONTACT_FRACTION
 
@@ -2613,7 +2620,7 @@ func _update_walk_foot(ft: FootTrack, leg: Leg, other_ft: FootTrack, other_leg: 
 			ft.active_pivoting = 0.0
 		var swing_t := clampf(inverse_lerp(ft.swing_start_phase, 1.0, phase), 0.0, 1.0)
 		ft.swing_t = swing_t
-		ft.swing_remaining = (1.0 - swing_t) * swing_dur
+		ft.swing_remaining = (1.0 - phase) * cycle_seconds
 		var target_lock := lerpf(SWING_TARGET_LOCK, 0.68, smoothstep(0.25, 0.75, _turn_sharpness))
 		if swing_t <= target_lock:
 			var t_rem := ft.swing_remaining
@@ -2641,7 +2648,7 @@ func _update_walk_foot(ft: FootTrack, leg: Leg, other_ft: FootTrack, other_leg: 
 
 			var back_mult := BACKWARD_STEP_RATIO if _walk_backward else 1.0
 			var turn_reach_mult := lerpf(1.0, 0.90, _turn_sharpness)
-			var forward_reach := HALF_STEP * back_mult * _step_scale * turn_reach_mult * leg_diff_mult * _walk_dir_sign
+			var forward_reach := HALF_STEP * back_mult * turn_reach_mult * leg_diff_mult * _walk_dir_sign
 			var widen := 0.022 * _turn_sharpness
 			var track_in := -0.006 * _stride * (1.0 - _turn_sharpness)
 			var land_ankle := _rest_ankle_world(leg, pred_pos, pred_yaw, forward_reach, widen + track_in)
@@ -2681,7 +2688,7 @@ func _update_walk_foot(ft: FootTrack, leg: Leg, other_ft: FootTrack, other_leg: 
 
 		var hover_bounds := _swing_hover_bounds(maxf(_model.scale.z / _model_base_scale, 0.15))
 		var lift_env := smoothstep(0.08, hover_bounds.x, swing_t) * (1.0 - smoothstep(hover_bounds.y, 0.98, swing_t))
-		var target_pitch := 0.22 if _walk_backward else -0.54
+		var target_pitch := 0.22 if _walk_backward else 0.0
 		ft.foot_pitch = ft.swing_start_pitch * (1.0 - smoothstep(0.0, 0.24, swing_t)) + target_pitch * lift_env
 		ft.toe_bend = lerpf(ft.swing_start_toe, 0.0, smoothstep(0.0, 0.24, swing_t))
 		return false
@@ -2789,7 +2796,7 @@ func _foot_ankle_world(ft: FootTrack, _leg: Leg) -> Vector3:
 			pos += _yaw_forward(ft.world_yaw) * (v_land.z + HEEL_Z_FROM_ANKLE) * S * land_blend
 			pos.y = base_y + start_lift + (0.105 * sin(PI * pow(t, 0.86)) + (v_land.y - ANKLE_GROUND_Y) * land_blend) * S
 		else:
-			var step_h_scale := lerpf(0.66, 1.0, clampf(_step_scale, 0.28, 1.0)) * lerpf(1.0, 0.78, _turn_sharpness) * (0.86 if _walk_backward else 1.0)
+			var step_h_scale := lerpf(1.0, 0.78, _turn_sharpness) * (0.86 if _walk_backward else 1.0)
 			pos.y = base_y + start_lift + SWING_HEIGHT * step_h_scale * S * _heavy_swing_arc(t, body_ratio)
 		return pos
 

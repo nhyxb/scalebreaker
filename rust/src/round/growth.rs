@@ -12,6 +12,12 @@ const LOCAL_COIN_SEARCH: f32 = 80.0;
 const GIANT_PASS_HEIGHT_RATIO: f32 = 3.0;
 /// Fuzzy coin radar: coins closer than this are visible to the naked eye, so
 /// the compass sector fades out instead of pointing at them.
+/// Opening spacing band for brawl: the 2x giants should meet after a short, readable
+/// approach instead of starting on top of each other or on opposite corners.
+const BRAWL_OPENING_MIN: f32 = 60.0;
+const BRAWL_OPENING_MAX: f32 = 100.0;
+/// A trailing brawl attacker's kill coin is worth up to +60% versus the leader's.
+const BRAWL_CATCH_UP_BONUS: f32 = 0.6;
 const COIN_RADAR_FADE_RANGE: f32 = 110.0;
 /// Fuzzy coin radar distance bands (metres): below/near/far pulse speeds.
 const COIN_RADAR_NEAR: f32 = 250.0;
@@ -64,6 +70,27 @@ impl CoinTier {
     /// circle (requirement: ~25–30 %/s, not an instant reset).
     const DECAY_FRACTION: f32 = 0.27;
 }
+
+/// Seconds of walking needed to reach a coin, plus the tier's collection bar, compared
+/// against the coin's remaining lifetime. A human walking straight there still needs a
+/// small margin for the detour, so the route is inflated by `COIN_ROUTE_DETOUR`.
+fn coin_reachable_before_expiry(
+    distance: f32,
+    tier: CoinTier,
+    remaining: f32,
+    human_speed: f32,
+) -> bool {
+    if !remaining.is_finite() {
+        return true;
+    }
+    let walk = distance * COIN_ROUTE_DETOUR / (HUMAN_WALK * human_speed).max(0.1);
+    walk + tier.dwell_seconds() + COIN_ROUTE_MARGIN <= remaining
+}
+
+/// Inflation applied to the straight-line distance to approximate a walkable route.
+const COIN_ROUTE_DETOUR: f32 = 1.35;
+/// Extra seconds a forager must have left over after arriving and reading the bar.
+const COIN_ROUTE_MARGIN: f32 = 1.0;
 
 /// One step of the dwell collection bar. `inside` accumulates, leaving decays.
 pub(super) fn advance_dwell(progress: f32, tier: CoinTier, inside: bool, dt: f32) -> f32 {
@@ -225,6 +252,25 @@ fn rival_growth(base: f32, attacker: f32, defeated: f32) -> f32 {
 
 fn random_height_scale(lower: f32, upper: f32) -> f32 {
     (random_range(lower.into(), upper.into()) / GIANT_START_HEIGHT).max(f32::MIN_POSITIVE)
+}
+
+/// Random growth-mode opening. The stage is decided first: a human start is a fixed
+/// 1.8 m body, and only a giant start samples a height between the configured opening
+/// height and the cap. With two seats and humans allowed, at least one stays human.
+fn random_growth_scale(giant_height: f32, giant_max_height: f32, force_human: bool) -> f32 {
+    let human = HUMAN_HEIGHT / GIANT_START_HEIGHT;
+    let may_start_human = giant_height < GROWTH_CRUSH_HEIGHT;
+    if may_start_human && (force_human || godot::global::randf() < 0.5) {
+        return human;
+    }
+    // Giant draws start at the configured opening height (never below the human gate) and
+    // climb to the cap, so a random roster really spans the range.
+    let giant_lower = giant_height.max(HUMAN_HEIGHT);
+    let giant_upper = giant_max_height.max(giant_lower);
+    // Sample across orders of magnitude so small giant starts remain possible.
+    let lower = f64::from(giant_lower);
+    let upper = f64::from(giant_upper).max(lower);
+    (lower * (upper / lower).powf(godot::global::randf()) / f64::from(GIANT_START_HEIGHT)) as f32
 }
 
 fn brawl_height_range(first: f32, second: f32) -> (f32, f32) {
@@ -718,17 +764,34 @@ impl HarborRound {
         if self.mode == Mode::Brawl && random {
             return self.random_brawl_start();
         }
-        let mut scale = self.open_spawn_scale(if random {
-            // Random heights stay between the configured starting height and the height cap.
-            let lower = f64::from(self.settings.giant_height);
-            let upper = f64::from(self.settings.giant_max_height).max(lower);
-            // Sample across orders of magnitude so small starts remain possible.
-            (lower * (upper / lower).powf(godot::global::randf()) / f64::from(GIANT_START_HEIGHT)) as f32
+        // Keep at least one human in a multi-seat random opening: once every other seat has
+        // been filled without drawing a human, the last seat is forced onto the human stage.
+        // `random_growth_scale` still decides each earlier seat on its own.
+        let seats = self.settings.giant_count.max(1);
+        let humans = self.giants.iter().filter(|giant| giant.human).count();
+        let force_human = random
+            && seats >= 2
+            && humans == 0
+            && self.settings.giant_height < GROWTH_CRUSH_HEIGHT
+            && self.giants.len() + 2 >= seats;
+        let drawn = if random {
+            random_growth_scale(
+                self.settings.giant_height,
+                self.settings.giant_max_height,
+                force_human,
+            )
         } else {
             self.starting_scale
-        });
-        if random {
-            // Height bands may lower an occupied slot; random heights never leave the range.
+        };
+        // A drawn human stage stays a fixed 1.8 m body: height bands only govern giants.
+        let mut scale = if self.starts_human(drawn) {
+            drawn
+        } else {
+            self.open_spawn_scale(drawn)
+        };
+        if random && !self.starts_human(scale) {
+            // Height bands may lower an occupied giant slot; a drawn human stage keeps its
+            // fixed 1.8 m body instead of being lifted back to the giant opening height.
             scale = scale.max(self.starting_scale);
         }
         self.growth_spawn_position(scale, None)
@@ -743,6 +806,39 @@ impl HarborRound {
             })
     }
 
+    /// Opening spawn for a brawl giant: prefer the 60–100 m band from the giants already
+    /// placed so the first clash arrives after a short, readable approach. A tight map
+    /// widens the band outwards, then falls back to the plain safety rules.
+    fn brawl_opening_position(&self, scale: f32) -> Option<Vector3> {
+        let living: Vec<_> = self
+            .giants
+            .iter()
+            .filter(|giant| giant.health_fraction > 0.0)
+            .map(|giant| giant.body.get_global_position())
+            .collect();
+        if living.is_empty() {
+            return self.growth_spawn_position(scale, None);
+        }
+        let clear = self.giant_spawn_safety(scale);
+        let candidates: Vec<_> = self
+            .spawn_points
+            .iter()
+            .copied()
+            .chain(self.open_ground_points(12.0))
+            .filter(|point| clear(*point, true))
+            .filter(|&point| {
+                let distance = nearest_giant_distance_sq(point, &living).sqrt();
+                (BRAWL_OPENING_MIN..=BRAWL_OPENING_MAX).contains(&distance)
+            })
+            .collect();
+        let roll = godot::global::randf();
+        if !candidates.is_empty() {
+            let index = ((roll * candidates.len() as f64) as usize).min(candidates.len() - 1);
+            return Some(candidates[index]);
+        }
+        self.growth_spawn_position(scale, None)
+    }
+
     fn random_brawl_start(&self) -> Option<(Vector3, f32)> {
         let settings = self.settings.brawl;
         let (lower, upper) = brawl_height_range(settings.start_min_height, settings.start_max_height);
@@ -753,7 +849,7 @@ impl HarborRound {
         let mut minimum_fits = false;
         while minimum <= maximum {
             let scale = random_range(minimum.into(), maximum.into());
-            if let Some(point) = self.growth_spawn_position(scale, None) {
+            if let Some(point) = self.brawl_opening_position(scale) {
                 return Some((point, scale));
             }
             if !minimum_fits {
@@ -1052,7 +1148,8 @@ impl HarborRound {
 
     fn respawn_scale(&self) -> f32 {
         if self.mode == Mode::Brawl {
-            let (lower, upper) = brawl_height_range(0.0, self.settings.brawl.respawn_max_height);
+            let rules = self.settings.brawl;
+            let (lower, upper) = brawl_height_range(rules.respawn_min_height, rules.respawn_max_height);
             random_height_scale(lower, upper)
         } else {
             self.open_spawn_scale(self.starting_scale)
@@ -1674,13 +1771,16 @@ impl HarborRound {
         }
     }
 
-    fn drop_brawl_coin(&mut self, attacker: &Giant) {
+    fn drop_brawl_coin(&mut self, attacker: &Giant, victim_position: Vector3) {
         let rules = self.settings.brawl;
         if attacker.scale < rules.coin_height / GIANT_START_HEIGHT {
             return;
         }
-        let position = attacker.body.get_global_position();
+        let position = self.brawl_drop_position(victim_position, attacker.scale);
         let height = attacker.height(self.max_height);
+        // The payout leans toward whoever is behind: a giant that is already the biggest
+        // still drops a coin, but a smaller attacker collects more per kill.
+        let height = height * self.brawl_catch_up_multiplier(attacker);
         let reward = CoinReward::Height(height * rules.coin_reward_rate);
         let mut root = self.base().get_node_as::<Node3D>("Coins");
         // Brawl giants collect instantly at any tier, so kills always drop the
@@ -1698,6 +1798,50 @@ impl HarborRound {
                 &[position.to_variant(), height.to_variant()],
             );
         }
+    }
+
+    /// Nearest walkable, non-blocked point around a defeat so the coin lands where the
+    /// fight actually happened and someone can still pick it up.
+    fn brawl_drop_position(&self, center: Vector3, scale: f32) -> Vector3 {
+        let clearance = GIANT_RADIUS * scale + 0.6;
+        let open = |point: Vector3| point.x.abs().max(point.z.abs()) + clearance < self.world_limit;
+        let blocked = |point: Vector3| {
+            self.target_grid
+                .near(point, clearance)
+                .any(|index| self.targets[index].footprint.touches(point, clearance))
+        };
+        if open(center) && !blocked(center) {
+            return center;
+        }
+        // Ring search outwards; the first clear sample keeps the drop visually attached
+        // to the body while never sitting inside a wall.
+        for step in 1..=8_u32 {
+            let distance = clearance * 0.9 + step as f32 * (clearance * 0.7).max(1.5);
+            for index in 0..8 {
+                let angle = std::f32::consts::TAU * index as f32 / 8.0;
+                let point = center + Vector3::new(angle.cos(), 0.0, angle.sin()) * distance;
+                if open(point) && !blocked(point) {
+                    return point;
+                }
+            }
+        }
+        center
+    }
+
+    /// Brawl catch-up: an attacker sitting below the leader's height scales the kill coin
+    /// up (bounded), while the leader keeps the baseline payout.
+    fn brawl_catch_up_multiplier(&self, attacker: &Giant) -> f32 {
+        let leader = self
+            .giants
+            .iter()
+            .filter(|giant| giant.index != attacker.index && giant.health_fraction > 0.0)
+            .map(|giant| giant.scale)
+            .fold(attacker.scale, f32::max);
+        if leader <= attacker.scale {
+            return 1.0;
+        }
+        let deficit = 1.0 - attacker.scale / leader;
+        (1.0 + deficit * BRAWL_CATCH_UP_BONUS).clamp(1.0, 1.0 + BRAWL_CATCH_UP_BONUS)
     }
 
     pub(super) fn hurt_giant(&mut self, actor: &mut Giant, damage: f32) -> bool {
@@ -1827,7 +1971,9 @@ impl HarborRound {
                     rival_growth(base, attacker_scale, rival.scale)
                 });
                 if self.mode == Mode::Brawl {
-                    self.drop_brawl_coin(attacker);
+                    // The drop belongs to the kill's location, not to whoever landed the
+                    // final blow across the map.
+                    self.drop_brawl_coin(attacker, victim_pos);
                 }
             }
         }
@@ -2061,6 +2207,18 @@ impl HarborRound {
             let dx = point.x - position.x;
             let dz = point.z - position.z;
             let dist_sq = dx * dx + dz * dz;
+            // Growth humans only: skip coins whose lifetime cannot cover the walk and the
+            // dwell bar, so the forager never commits to a guaranteed miss.
+            if actor.human
+                && !coin_reachable_before_expiry(
+                    dist_sq.sqrt(),
+                    coin.tier,
+                    coin.remaining,
+                    self.settings.human_speed,
+                )
+            {
+                continue;
+            }
             // Value-weighted utility: rare guarded coins attract growth-hungry,
             // risk-tolerant foragers instead of only the nearest coin winning.
             let utility = coin_forage_score(
@@ -2259,6 +2417,16 @@ impl HarborRound {
                 if distance <= COIN_RADAR_FADE_RANGE {
                     continue;
                 }
+                // A coin that will expire before the player can walk to it and read the
+                // bar is noise, not guidance.
+                if !coin_reachable_before_expiry(
+                    distance,
+                    coin.tier,
+                    coin.remaining,
+                    self.settings.human_speed,
+                ) {
+                    continue;
+                }
                 let better = best.is_none_or(|(tier, best_distance, _)| {
                     coin.tier > tier || (coin.tier == tier && distance < best_distance)
                 });
@@ -2289,6 +2457,58 @@ impl HarborRound {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_coin_is_only_worth_chasing_when_its_lifetime_covers_the_walk() {
+        // 5.8 m/s walk, 1.35 route inflation, 1 s margin, 0 s dwell for normal coins.
+        let speed = 1.0;
+        let reach_at = |distance: f32, ttl: f32| {
+            coin_reachable_before_expiry(distance, CoinTier::Normal, ttl, speed)
+        };
+        assert!(reach_at(50.0, 60.0));
+        assert!(!reach_at(50.0, 10.0));
+        // A tier with a 3.75 s reading bar needs those extra seconds on top of the walk.
+        let extreme_ttl = 50.0 * COIN_ROUTE_DETOUR / HUMAN_WALK + COIN_ROUTE_MARGIN + 3.0;
+        assert!(!coin_reachable_before_expiry(
+            50.0,
+            CoinTier::Extreme,
+            extreme_ttl,
+            speed
+        ));
+        assert!(coin_reachable_before_expiry(
+            50.0,
+            CoinTier::Extreme,
+            extreme_ttl + 1.0,
+            speed
+        ));
+        // Brawl kill coins never expire, so they always stay worth chasing.
+        assert!(reach_at(2000.0, f32::INFINITY));
+        // A slower human setting costs proportionally more time.
+        assert!(!coin_reachable_before_expiry(
+            50.0,
+            CoinTier::Normal,
+            20.0,
+            0.5
+        ));
+    }
+
+    #[test]
+    fn brawl_catch_up_only_helps_the_trailing_giant() {
+        // The multiplier is pure arithmetic: an attacker matching the leader gains nothing,
+        // a smaller one gains up to the configured cap.
+        let bonus = |attacker: f32, leader: f32| {
+            if leader <= attacker {
+                1.0
+            } else {
+                (1.0 + (1.0 - attacker / leader) * BRAWL_CATCH_UP_BONUS).clamp(1.0, 1.0 + BRAWL_CATCH_UP_BONUS)
+            }
+        };
+        assert_eq!(bonus(40.0, 40.0), 1.0);
+        assert_eq!(bonus(45.0, 40.0), 1.0);
+        assert!(bonus(20.0, 40.0) > 1.0);
+        assert!(bonus(20.0, 40.0) < 1.0 + BRAWL_CATCH_UP_BONUS);
+        assert!(bonus(1.0, 1000.0) <= 1.0 + BRAWL_CATCH_UP_BONUS);
+    }
 
     #[test]
     fn spread_spawn_maximizes_distance_to_the_nearest_giant() {

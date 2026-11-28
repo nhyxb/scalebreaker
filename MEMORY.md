@@ -1,5 +1,23 @@
 # 项目记忆
 
+## 移动/坐压/开局规则（2026-11-28 实施，长期生效）
+
+- **坐压不再转身。** `SitPhase::Turn`、`TURN_TIMEOUT`、`TURN_ENTER` 已删除；`begin_sit` 直接进 `Drop`。落区判定只有 `rear_landing_targets`（只看骨盆实际落点 `sit_center()`，即身体后方）与 `Giant::lands_on`，`seat_targets`（前方判定圈）已不存在——**不要再把目标放到巨人正前方去测坐压**。预警圈、AI 目标检查、`sit_impact` 三者共用同一个 `sit_center()`。
+- **战斗坐压是短承诺**：`SitAction.combat` 为真时 `COMBAT_HOLD_CAP = 2.2 s` 封顶；落座前（`elapsed < IMPACT_SECONDS`）若后方落区已无目标，进入 `SitPhase::Cancel`（`CANCEL_SECONDS = 0.55 s`）倒放回站姿且**不结算伤害**。玩家按键起身、待机坐仍是原语义。
+- **AI 只在后方落区覆盖目标时才坐**：`round.rs` 的 `seat_opportunity` 先检查 `actor.lands_on(predicted, target_radius)`，正面遭遇改用挥拳/抓捏/重步。
+- **成长人类与巨人共用一套移动语义**：`backpedal` 不再排除人类阶段；纯后退保朝向 + 行走循环负 `speed_scale` 倒放，侧向/斜向沿弧线起步。人类阶段 `animate()` 现在也传 `turn_target/backward/blocked`。
+- **手部时长与巨人速度解耦**：`HandMove::duration(scale)` 只有体型参数（25.2 m 基准挥拳 2.4 s／抓捏 4.5 s），改 `giant_speed` 不会再改变动作节奏。成长/大乱斗默认 `giant_speed = 2.0`。
+- **成长随机开局**：`random_growth_scale(giant_height, giant_max_height, force_human)` 先定形态再抽身高；抽到人类就是固定 1.8 m，**不要让它再走 `open_spawn_scale`/`HeightBands`**（会把人类抬成 40 m）。多座位随机开局在最后一席仍未抽到人类时会强制一名人类；显式全巨人配置不受影响。
+- **成长天灾门槛**：`desk_hazards_enabled()` 在成长模式要求场上已有非人类巨人（`growth_hazards_unlocked`），人类阶段不触发。
+- **临期币过滤**：`coin_reachable_before_expiry` 用「距离 × 1.35 ÷ 人类步速 + 档位读条 + 1 s」对比剩余寿命；玩家雷达与 AI 寻币都调用它，隔楼不做视线过滤。
+- **大乱斗**：开局第二座位走 `brawl_opening_position`（距第一名 60–100 m，紧凑地图回退）；复活窗口 `respawn_min_height = 15`～`respawn_max_height = 30`；击倒币落在被击倒者附近（`brawl_drop_position`），落后方最多 +60 %（`BRAWL_CATCH_UP_BONUS`）。
+- **成长阶段默认收益**：`coin_growth_rate = 0.01`、`building_growth_rate = 0.03`。**成长模式地图币只在还有未变身的人类时补刷**（`update_map_coins` 的 `has_humans` 门），巨人开局不会自动铺币——写测试时别再假设巨人开局场上有币。
+
+## 待实施计划（2026-11-28）
+
+- [PLAN.md 的「大体型步态与模式平衡」](PLAN.md) 一~四节已实施并通过全部回归，见 CHANGELOG 顶部条目。剩余是首轮试调数值的实机手感与安卓真机复测（遵守隔离显示规则，不要用 llvmpipe 跑帧率）。
+- 巴掌尺度沙盒已确认，待实施。核心城区按约 10 厘米宽设计，外围以同一缩尺扩到原桌面占地，全图先按约 2,500 栋可破坏建筑做预算。布局、性能验收和建议实施顺序见 [PLAN.md 的「巴掌尺度的巨人沙盒」](PLAN.md#巴掌尺度的巨人沙盒2026-11-28)。
+
 ## 项目名称（2026-11-26 确认）
 
 - 项目已更名为 **Scalebreaker**（中文名待定）。改名范围：`project.godot` 的 `config/name`（窗口标题同源）、主菜单大标题与首页入口、港区分页标题、`export_presets.cfg` 的 Android `package/name`；**README.md 与 CHANGELOG.md 头部也已改为 Scalebreaker 门面**（README 开头注明原名《港区警报》，2026-11-26 公开 GitHub 仓库时更新）。PLAN.md 仍是历史设计文档、保留旧名不改；CHANGELOG 历史条目里的旧名属历史记录，不改。
@@ -18,7 +36,7 @@
   - `turn_giant_smooth()` 对非人类巨人施加赛车式转向限速（`0.90 * scale^-0.28`，约 `30–45°/步` 并随体型沉稳），`scenes/giant_visual.gd` 配合 `PIVOT_STEP_MAX_YAW = 0.72 rad` 与 `stance_turn_target()`（单脚撑地期骨盆扭转上限 `±STANCE_PELVIS_TWIST_MAX = 0.52 rad`）保持撑地零打滑与局部防跨中线约束。
   - `_advance_walk()` 严格由真实水平位移速度（`has_real_travel`）驱动重步循环，无水平位移时严禁播放原地踏步；`_step_standing_turn_live()` 仅由坐压 `step_turn_in_place()` 显式开启，常规 `show_motion()` 一律不触发。`STOP_SETTLE` 过渡期间跟随步伐标记 `trail_ft.planted`，确保收步零锚点跳变。
   - `can_crush_buildings()` 解锁后从 `collision_mask` 排除 `BUILDING_LAYER(8)` 与 `RUBBLE_LAYER(16)` 并由 `crush_touched_buildings()` 直接穿楼碾压；未解锁时 `DefeatMethod::Step` 不伤建筑，改用 `E` 挥拳 / `Q` 抓碎 / `X` 坐压（AI 走 `start_ai_scenery_hand_move()`）。`idle_sit` 因重步期间多数帧存在 pending `footfall` 且此时视野无目标，只需检查地面状态而不必等待 `footfall.is_none()`（人群 sit-crush 仍保留等当前落地后再判断）。
-  - `giant_size_speed_factor(scale)` 与 `_swing_hover_bounds(body_ratio)` 让高体型移速不发闷、改为抬脚最高点悬停滞空更久；玩家按 `S` 后退用 `GIANT_BACKWARD_MULT(0.74)` / `BACKWARD_STEP_RATIO(0.82)` 保持正面朝前做真实倒退步。
+  - 大体型直行的步幅和抬脚幅度按模型尺寸同比放大，体型造成的衰减只保留在躯干和手臂摆动。地速继续由 `giant_size_speed_factor(scale)` 独立计算。步态的实际周期同时决定峰值悬停和 `heavy_step_preview().eta`，避免低步频被原来的 `0.15` 保底缩短。回归入口为 `growth_playtest.gd::_full_stride_scales_with_size()`，用同皮肤 100／200／500 米的实际帧数检查悬停。玩家按 `S` 后退用 `GIANT_BACKWARD_MULT(0.74)` / `BACKWARD_STEP_RATIO(0.82)` 保持正面朝前做真实倒退步。
 
 ## 全局合批、建筑三态与相机（2026-11-26 确认）
 
@@ -26,6 +44,9 @@
 - **道路是"换几何、保贴图"**：原瓦片 353–4,562 面，七成是坡化人行道顶面的碎面，任何裁剪阈值都保不住形状（0.05 m² 会把人行道打成筛子）。最终 `_road_tile_mesh()` 用**扁平板块**替换沥青（12×12 m 两块三角，y=-0.01 压在标线下，UV `xz/3`），并用 `_append_pavement()` 把原瓦片朝上三角面**按 1 m 栅格重建**人行道（格心在三角内才发格子、取格内最高点，y≈0.15）；贴图仍是原 `MAT_Road_Asphalt` / `MAT_Formed_Concrete`，斑马线/车道虚线/黄漆/排水沟/井盖沿用原几何。878 万面 → **209 万面**、850 个 MultiMesh → 4 个。
 - **人行道已知偏差（2026-11-26 接受）**：1 m 栅格重建后连续性/带宽/颜色已与基准持平，剩三件小事：路口四角是 90° 直角（原瓦片 1–2 m 圆弧）、转角黄漆块只剩 1–2 px、路缘亮线偏弱（+7~16，基准 +16~20）并有 1 px 暗缝。后续可降到 0.5 m 栅格 + 单独补圆弧/黄漆/亮条。
 - **安卓工具链（2026-11-26 装好）**：`~/Android/Sdk`（cmdline-tools/latest、platform-tools、build-tools;35.0.0、platforms;android-35、ndk/29.0.14206865）、`rustup 1.29.3` + toolchain `1.94.0` + `aarch64-linux-android`、Godot 设置 `export/android/java_sdk_path=/usr/lib64/jvm/java-25-openjdk`。构建 APK：`ANDROID_SDK_ROOT=~/Android/Sdk PATH=~/.cargo/bin:$PATH ./scripts/build_android.sh` → `build/harbor-alert-debug.apk`（约 154 MB，含 lib/arm64-v8a 三个 .so）。改 Rust 后必须重跑该脚本，否则 APK 里还是旧的 `native/libharbor_android.so`。
+- **Linux ARM64（aarch64）构建（2026-11-28 打通）**：`./scripts/build_linux_arm64.sh` → `build/linux-arm64/{harbor-alert.arm64, harbor-alert.pck, libharbor_linux_arm64.so}`，预设名 `Linux ARM64`（`export_presets.cfg` preset.2），`.gdextension` 新增 `linux.debug/release.arm64` → `native/libharbor_linux_arm64.so`（不覆盖 x86_64 的 `native/libharbor.so`）。**链接器用 zig 而不是发行版 cross-gcc**：`pip install --user ziglang` 装到 `~/.local/bin/zig`，脚本内部经 `build/zig-aarch64-linux-gnu-cc` 包装成 `zig cc -target aarch64-linux-gnu.2.28`，自带 sysroot 所以不需 root/`sudo`/`cross-aarch64-*` 包；`ZIG_GLOBAL_CACHE_DIR` 指向 `build/zig-cache`（默认 `~/.cache/zig` 在受限环境不可写会直接失败）。`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER` 是唯一必须的 cargo 环境变量；`rustup target add --toolchain 1.94.0 aarch64-unknown-linux-gnu` 预先装好。产物 `GLIBC_2.28` 上限、`DT_NEEDED` 仅 libm/libc/libpthread/libdl。
+- **本机没有 root**：`sudo` 需要密码，`zypper install` 不可用。装工具链一律走用户级（`pip --user`、解包到 `~/.local/opt`、`rustup target add`）；需要 root 的动作要单独交给用户执行。系统无 `dpkg-deb`，解 `.deb` 用 Python `ar`+`tarfile`。
+- **aarch64 运行时验证（qemu 用户态）**：`qemu-aarch64` 已装但**没有 aarch64 glibc**，需自备 sysroot：从 Debian 拉 `libc6`/`libgcc-s1`/`libstdc++6` 的 `_arm64.deb` 解包（本次落在 `~/tmp-build/armroot/rootfs`，可重建），运行 `qemu-aarch64 -L <rootfs> -E LD_LIBRARY_PATH=<产物目录>:<rootfs>/lib/aarch64-linux-gnu ./harbor-alert.arm64 --headless`。**注意 `--path` 在导出模板二进制里被编译关闭**（报 “compiled without support for path overrides”），只能 `cd` 到产物目录直接跑 `<exe> --headless`，同目录同名 `.pck` 自动加载。日志里的 fontconfig 报错是 sysroot 缺 fontconfig 所致、不影响逻辑。验证类注册要建独立探针工程导出后跑，因为 `--script` 同样受 `--path` 限制。
 - **判断面朝向必须用顶点法线，不能用几何叉积**：这套 GLB 的绕序与叉积方向相反，用叉积会把可见路面当背面删掉（曾导致道路整片消失，只有视觉复核能发现——headless 数字反而"更好看"）。任何"按法线裁剪几何"的改动都要在真 GPU 截图上确认。
 - **建筑三态渲染**（`scenes/district_batches.gd` + `damageable.gd::batched`）：近层每种 kit 型号一个 MultiMesh（`NEAR_RADIUS = 280 m`，相机移动 `REFILL_STEP = 40 m` 才重排；远层实例只写一次，跨界只做置零/还原）；远景层用 `commercial/low-detail-building-*` 与同主色盒代理（`cast_shadow` 关闭）；废墟层是共享瓦砾堆。实例隐藏靠零变换退化。`damageable` 只在 `batched == false`（中心 12 栋、灯塔、雷达）时才建 `IntactModel` 节点；被抓进手里时临时实例化、松开恢复；远处建筑倒塌只更新碰撞与废墟层（`is_near()`），近处才播 3.5 s 倒塌。
 - **`batch_spec()` 不包含 `kit_scale`**：实例变换自带各自 `_kit_fit`，写进 key 会让每个地标放大率都拆出一个新 MultiMesh（曾导致 162 个近层节点）。
@@ -82,7 +103,8 @@
 ## 巨人剪影与镜头震动
 - 150 米及以上的远处活巨人使用当前皮肤网格的淡色材质叠加，保留深度遮挡。渲染剪影时可以延长相机远裁剪面，`district_draw_distance` 仍决定城市区块和海雾。
 - `own_camera_shake` 由巨人沙盒、成长模式和大乱斗各自保存，旧存档默认开启。自身与附近震动各自保持衰减状态，关闭当局的自身震动时只清除自身的状态。
-- 重步和坐压使用不同的震动强度与随距离衰减的范围。成长和大乱斗的外来震动按身高差计算，沙盒、撤离和自身震动按体型平方根缩放。
+- 重步和坐压各有震动基准强度。自身冲击按基准强度的 60% 注入镜头与震动音效，忽略震源距离，仍受自身震动开关、全局强度和成长解锁限制。沙盒第三人称的自身震动平移量随相机臂长补偿，第一人称、成长和大乱斗沿用角度反馈。`tests/playtest.gd::_tall_own_camera_shake()` 用 500 米巨人覆盖三个机位。
+- 外来震动随距离衰减。沙盒和撤离的范围按体型平方根缩放（倍率 0.7～4.4）。成长和大乱斗的强度按身高差计算，范围基值上限为 440 米。两套计算的最终半径上限均为重步 585.2 米、坐压 704 米。
 
 ## 被动接触伤害
 - 重步使用 `DefeatMethod::Step`。建筑与鞋底凸多边形求交，角色用脚下接地高度与水平碰撞半径和同一轮廓求交，因此敌方巨人可因真正被踩中受伤。

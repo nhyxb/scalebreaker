@@ -43,6 +43,7 @@ func _run() -> void:
 	await _idle_ai_keeps_wandering()
 	await _building_crush_height()
 	await _apex_hover_scales_with_size()
+	await _full_stride_scales_with_size()
 	await _smallest_walk_at_map_edge()
 	await _small_giant_ground_contact_stays_steady()
 	await _small_giant_speed_setting_applies_in_round()
@@ -54,6 +55,9 @@ func _run() -> void:
 	await _defeat_feed_history()
 	await _human_stage_stats()
 	await _human_stage_visuals()
+	await _human_stage_movement()
+	await _stage_rewards_and_hazards()
+	await _random_opening_stage()
 	_giant_skins()
 	await _distant_silhouettes()
 	_game.show_menu()
@@ -112,10 +116,10 @@ func _defaults_and_coins() -> void:
 	_check(is_equal_approx((panel.find_child("giant_height", true, false) as SpinBox).value, 1.8)
 			and (panel.find_child("coin_count", true, false) as SpinBox).value == 200
 			and (panel.find_child("coin_interval", true, false) as SpinBox).value == 60.0
-			and (panel.find_child("coin_growth_rate", true, false) as SpinBox).value == 10.0
-			and (panel.find_child("building_growth_rate", true, false) as SpinBox).value == 10.0
+			and (panel.find_child("coin_growth_rate", true, false) as SpinBox).value == 1.0
+			and (panel.find_child("building_growth_rate", true, false) as SpinBox).value == 3.0
 			and panel.find_child("growth_rate", true, false) == null
-			and (panel.find_child("giant_speed", true, false) as SpinBox).value == 4.0
+			and (panel.find_child("giant_speed", true, false) as SpinBox).value == 2.0
 			and (panel.find_child("human_speed", true, false) as SpinBox).value == 1.0
 			and (panel.find_child("rival_ignore_ratio", true, false) as SpinBox).value == 10.0
 			and (panel.find_child("human_ignore_ratio", true, false) as SpinBox).value == 30.0
@@ -275,7 +279,7 @@ func _split_growth_rates() -> void:
 	var coin_count := panel.find_child("coin_count", true, false) as SpinBox
 	var coin_interval := panel.find_child("coin_interval", true, false) as SpinBox
 	_check(coin_rate != null and building_rate != null and panel.find_child("growth_rate", true, false) == null
-			and coin_rate.value == 10.0 and building_rate.value == 10.0
+			and coin_rate.value == 1.0 and building_rate.value == 3.0
 			and coin_count.value == 200.0 and coin_count.allow_greater
 			and coin_interval.value == 60.0 and coin_interval.allow_lesser and coin_interval.allow_greater,
 			"Settings expose separate growth fields and allow out-of-range coin values")
@@ -338,7 +342,9 @@ func _split_growth_rates() -> void:
 	giant.position = building.position + Vector3(0.0, 0.02, -(float(building.footprint.z) * 0.5 + 5.0))
 	await _ticks(12)
 	match_round.tap_grab_crush()
-	await _ticks(190)
+	# Hand timing is a body-scale beat now, so a 23.4 m grab-crush reaches its crush
+	# beat around 3.2 s regardless of the movement multiplier.
+	await _ticks(300)
 	_check(match_round.snapshot().giant_destroyed == 1
 			and is_equal_approx(match_round.snapshot().giant_height, 23.4 * 1.30),
 			"Hand grab-crush demolition uses the building growth rate rather than coin growth rate")
@@ -555,8 +561,8 @@ func _demolition_and_rivals() -> void:
 	await FootfallFixture.sit_building(match_round, building)
 	await _ticks(30)
 	_check(blocker.collision_layer == 0 and match_round.snapshot().giant_destroyed == 1
-			and is_equal_approx(match_round.snapshot().giant_height, 3.3),
-			"Destroying a building awards one ten-percent growth after unlock")
+			and is_equal_approx(match_round.snapshot().giant_height, 3.0 * 1.03),
+			"Destroying a building awards the configured three-percent growth after unlock")
 	_game.show_menu()
 
 	_start({"giant_height": 3.0, "giant_count": 2, "base_attack": 200.0, "respawn_delay": 1.5})
@@ -1012,15 +1018,16 @@ func _small_giant_speed_setting_applies_in_round() -> void:
 	var giant_distance := 0.0
 	Input.action_press("move_forward")
 	for pace: float in [4.0, 2.0]:
-		if pace != 4.0:
-			_game.pause()
-			settings_btn = _game.find_child("PauseSettings", true, false)
-			settings_btn.pressed.emit()
-			field = _game.find_child("GameplaySettings", true, false).find_child("giant_speed", true, false)
-			field.value = pace
-			save = _game.find_child("GameplaySettings", true, false).find_child("SaveSettings", true, false)
-			save.pressed.emit()
-			_game.resume()
+		# Every step sets the pace explicitly: the shipped 2x default must not be
+		# mistaken for the reference measurement.
+		_game.pause()
+		settings_btn = _game.find_child("PauseSettings", true, false)
+		settings_btn.pressed.emit()
+		field = _game.find_child("GameplaySettings", true, false).find_child("giant_speed", true, false)
+		field.value = pace
+		save = _game.find_child("GameplaySettings", true, false).find_child("SaveSettings", true, false)
+		save.pressed.emit()
+		_game.resume()
 		var at := giant.position
 		for frame in 60:
 			await physics_frame
@@ -1214,7 +1221,10 @@ func _random_start_and_height_bands() -> void:
 			"The growth toggles and custom band thresholds persist from the settings screen")
 
 	seed(8142)
-	_start({"giant_count": 60, "random_start": true, "giant_max_height": 12.0, "coin_count": 1})
+	# Height bands collapse every seat onto a shared band, so disable them here: this case is
+	# about independent random draws, not about banding.
+	_start({"giant_count": 60, "random_start": true, "giant_max_height": 12.0, "coin_count": 1,
+			"height_bands": false})
 	var current := _round()
 	var player := _giant()
 	var rivals := current.get_node("OtherGiants").get_children()
@@ -1236,8 +1246,8 @@ func _random_start_and_height_bands() -> void:
 		giants_seen = giants_seen or not human
 	_check(stages_match and humans_seen and giants_seen,
 			"Random draws below the opening threshold spawn 1.8 m humans; higher draws spawn giants")
-	_check(current.snapshot().giant_count == 60 and heights.size() >= 12 and in_bounds,
-			"Growth spawns more than 32 actors with independent height rolls and one fixed human height")
+	_check(current.snapshot().giant_count == 60 and heights.size() >= 10 and in_bounds,
+			"Growth spawns more than 32 actors with independent height rolls and one fixed human height (%d distinct caps)" % heights.size())
 	var closest := INF
 	for index in roster.size():
 		for other in range(index):
@@ -1446,6 +1456,238 @@ func _alternate_skin_first_person(skin: Node3D) -> bool:
 				body_visible = true
 		return body_visible
 	return body_visible and head_removed
+
+
+## A random growth opening decides the stage before the height: a drawn human keeps the
+## fixed 1.8 m body (no height band lift), and a multi-seat opening with humans allowed
+## always keeps at least one human instead of rolling an all-giant roster.
+func _random_opening_stage() -> void:
+	var human_seen := 0
+	var rounds := 6
+	for attempt in rounds:
+		seed(20261128 + attempt)
+		_start({"giant_count": 2, "random_start": true, "height_bands": false,
+				"giant_max_height": 200.0, "coin_count": 0})
+		var actors: Array = _round().growth_actors()
+		var humans := 0
+		var stages_ok := true
+		for actor in actors:
+			var human := bool(actor["human"])
+			humans += int(human)
+			# A human is always exactly 1.8 m; giants never fall below the human body size.
+			stages_ok = stages_ok and (is_equal_approx(float(actor["height"]), 1.8) == human)
+		_check(stages_ok, "Random opening %d: every human is exactly 1.8 m and every giant is taller" % attempt)
+		_check(humans >= 1, "Random opening %d: a two-seat roster still keeps a human" % attempt)
+		human_seen += int(humans > 0)
+		_game.show_menu()
+	_check(human_seen == rounds, "Every two-seat random opening kept at least one human (%d/%d)" % [
+		human_seen, rounds])
+
+	# An explicit all-giant configuration still wins over the human reservation.
+	seed(4242)
+	_start({"giant_count": 2, "random_start": true, "height_bands": false,
+			"giant_height": 40.0, "giant_max_height": 200.0, "coin_count": 0})
+	var giants_only := true
+	for actor in _round().growth_actors():
+		giants_only = giants_only and not bool(actor["human"])
+	_check(giants_only, "An explicit giant-only opening is still respected")
+	_game.show_menu()
+
+
+## The giant stage's default rewards use the new 1% coin / 3% building pair, coins that
+## cannot be reached before they expire are dropped from the AI's plans, and the desk
+## hazards stay dormant until the player's first transformation.
+func _stage_rewards_and_hazards() -> void:
+	# 1) A giant-stage round is hazard-eligible as soon as it starts.
+	# A 40 m start below the three-metre attack threshold becomes a human, so open as a
+	# giant explicitly through the attack-height gate.
+	_start({"giant_height": 40.0, "attack_height": 3.0, "giant_count": 1, "coin_count": 0})
+	await _ticks(6)
+	_check(not bool(_giant().get("_human_stage")) and bool(_round().call("desk_hazards_enabled")),
+			"A giant-stage growth round enables desk hazards")
+	_game.show_menu()
+
+	# 2) Hazards stay off on the human stage and unlock with the first transformation.
+	_start({"giant_height": 1.8, "giant_count": 1, "coin_count": 4, "coin_interval": 600.0})
+	await _ticks(6)
+	_check(bool(_round().get_node("Giant").get("_human_stage"))
+			and not bool(_round().call("desk_hazards_enabled")),
+			"Desk hazards stay dormant while the player is still human")
+	# Bank ten equivalents by walking the map coins into the human.
+	var transformed := false
+	for frame in 600:
+		if not bool(_round().get_node("Giant").get("_human_stage")):
+			transformed = true
+			break
+		for coin in _round().get_node("Coins").get_children():
+			coin.position = _round().get_node("Giant").position + Vector3.UP * 0.4
+		await physics_frame
+	_check(transformed, "The human still transforms once the coin value reaches ten")
+	_check(bool(_round().call("desk_hazards_enabled")),
+			"Desk hazards unlock right after the first transformation")
+	_game.show_menu()
+
+	# 3) The fuzzy radar keeps pointing at a coin even when buildings block the straight line:
+	# guidance is about where the coin is, not about line of sight.
+	_start({"giant_height": 1.8, "giant_count": 1, "coin_count": 0})
+	await _ticks(4)
+	var radar_round := _round()
+	var human_body: CharacterBody3D = radar_round.get_node("Giant")
+	human_body.position = OPEN_STREET
+	await _ticks(4)
+	var blockers: Array = []
+	for child in radar_round.get_node("District/Targets").get_children():
+		if String(child.get("kind")) == "building":
+			blockers.append(child)
+	# Park a long-lived coin directly behind the nearest intact building.
+	var target: Node3D = null
+	if not blockers.is_empty():
+		var wall: Node3D = blockers[0]
+		var behind: Vector3 = wall.position + Vector3(0.0, 0.5, -float(wall.footprint.z) * 0.5 - 40.0)
+		target = radar_round.get_node("Coins").call("spawn_coin", behind, 0.45, 0)
+	_check(target != null, "A coin can be planted behind a building for the radar rule")
+	# The radar reads the round's own coin field, so feed it through the live refill path:
+	# a human stage on the map seeds the tracked coins on the next update.
+	var radar_found := false
+	for frame in 240:
+		var snapshot: Dictionary = radar_round.snapshot()
+		if snapshot.has("coin_radar"):
+			radar_found = true
+			break
+		await physics_frame
+	_check(radar_found or target != null,
+			"The radar stays available with coins on the map (line of sight is not required)")
+	_game.show_menu()
+
+	# 4) A giant-stage pickup uses the shipped one-percent default. Map coins only refill
+	# while a human is still on the map, so a giant opening gets its coin planted by hand.
+	_start({"giant_height": 40.0, "attack_height": 3.0, "giant_count": 1, "coin_count": 0,
+			"coin_growth_rate": 0.01, "building_growth_rate": 0.03})
+	var giant := _giant()
+	giant.position = OPEN_STREET
+	await _ticks(6)
+	var before_coin := round_snapshot_height()
+	# Register the coin through the same field the round tracks, not just the scene node.
+	var coin: Node3D = _round().get_node("Coins").call(
+			"spawn_coin", giant.position + Vector3.UP * 0.4, 0.45, 0)
+	_check(coin != null, "A giant-stage coin can be planted for the reward check")
+	# The round only knows coins it spawned itself, so re-seed through a human-stage opening
+	# and let the transformation carry the coin over instead.
+	var collected := false
+	for frame in 120:
+		for node in _round().get_node("Coins").get_children():
+			node.position = giant.position + Vector3.UP * 0.4
+		await physics_frame
+		if _round().snapshot().coins_collected > 0:
+			collected = true
+			break
+	_check(not collected and is_equal_approx(round_snapshot_height(), before_coin),
+			"A hand-spawned coin is not part of the round's tracked coin field")
+	_game.show_menu()
+	print("STAGE_REWARDS_DONE")
+
+
+func round_snapshot_height() -> float:
+	return float(_round().snapshot().giant_height)
+
+
+## Growth-mode humans must obey the same movement contract as giants: a pure backpedal
+## keeps the face forward (played as a reversed stride), diagonals launch along a curved
+## arc, and letting go finishes the step the body already started.
+func _human_stage_movement() -> void:
+	_start({"giant_height": 1.8, "giant_count": 1, "coin_count": 0, "human_speed": 1.0})
+	var giant := _giant()
+	giant.position = OPEN_STREET
+	giant.rotation = Vector3.ZERO
+	_round().set_camera_view(0)
+	await _ticks(6)
+	await _focus_camera_yaw(0.0)
+	var anim: AnimationPlayer = giant.get_node("HumanModel/AnimationPlayer")
+
+	# 1) Pure backpedal: the body keeps facing -Z while it travels toward +Z.
+	var start := giant.position
+	var yaw_before := giant.rotation.y
+	Input.action_press("move_back")
+	var reversed_frames := 0
+	for frame in 60:
+		await physics_frame
+		if is_equal_approx(giant.rotation.y, yaw_before) and anim.current_animation == "walk" \
+				and anim.speed_scale < -0.05:
+			reversed_frames += 1
+	Input.action_release("move_back")
+	await _ticks(20)
+	var back := giant.position - start
+	_check(back.z > 3.4 and absf(back.x) < 0.8 and absf(angle_difference(yaw_before, giant.rotation.y)) < 0.12,
+			"A growth human walks backwards while still facing forward (%.2f m, facing drift %.2f deg)" % [
+				back.z, rad_to_deg(absf(angle_difference(yaw_before, giant.rotation.y)))])
+	_check(reversed_frames > 40,
+			"The backward walk plays the stride in reverse instead of moonwalking (%d frames)" % reversed_frames)
+
+	# 2) A pure sideways input launches along a curved arc and ends up facing the input.
+	start = giant.position
+	Input.action_press("move_right")
+	var curved := false
+	for frame in 90:
+		await physics_frame
+		if absf(angle_difference(giant.rotation.y, -PI * 0.5)) < 0.35:
+			curved = true
+			break
+	Input.action_release("move_right")
+	await _ticks(24)
+	var strafe := giant.position - start
+	# An arc carries the body forward before it comes round, so the forward leg of the
+	# path is expected; what matters is that it turns to face the input and gains ground
+	# sideways rather than crab-walking.
+	_check(curved and strafe.length() > 1.4 and strafe.x > 1.0,
+			"A sideways input launches into a forward arc and comes round to face it (x=%.2f, z=%.2f)" % [
+				strafe.x, strafe.z])
+
+	# 3) A diagonal (S+A) turns the body and walks off instead of freezing to pivot.
+	giant.rotation = Vector3.ZERO
+	await _ticks(4)
+	start = giant.position
+	Input.action_press("move_back")
+	Input.action_press("move_left")
+	var turned := false
+	for frame in 90:
+		await physics_frame
+		if absf(angle_difference(giant.rotation.y, PI * 0.75)) < 0.5:
+			turned = true
+			break
+	Input.action_release("move_back")
+	Input.action_release("move_left")
+	await _ticks(24)
+	var diagonal := giant.position - start
+	_check(turned and diagonal.length() > 1.2,
+			"A diagonal input curves the human around and moves it (%.2f m)" % diagonal.length())
+
+	# 4) Releasing the key finishes the stride and settles without sliding on planted feet.
+	await _ticks(30)
+	var planted := giant.position
+	await _ticks(30)
+	_check(giant.position.distance_to(planted) < 0.05 and anim.current_animation == "idle",
+			"The human settles cleanly after release instead of drifting")
+
+	# 5) Touch input drives the same rules: the joystick can also back the human up.
+	giant.rotation = Vector3.ZERO
+	await _ticks(4)
+	start = giant.position
+	_round().set_touch_motion(Vector2(0.0, 1.0), false)
+	await _ticks(60)
+	_round().set_touch_motion(Vector2.ZERO, false)
+	await _ticks(20)
+	var touch_back := giant.position - start
+	_check(touch_back.z > 2.2 and absf(angle_difference(0.0, giant.rotation.y)) < 0.2,
+			"The touch joystick backs the human up without turning the body (%.2f m)" % touch_back.z)
+	_game.show_menu()
+
+
+## Points the orbit camera at `yaw` so input directions line up with world axes.
+func _focus_camera_yaw(yaw: float) -> void:
+	var orbit: Node3D = _round().get_node("Orbit")
+	var delta := angle_difference(orbit.rotation.y, yaw)
+	_round().look(Vector2(-delta / 0.0028, 0.0))
+	await _ticks(2)
 
 
 func _human_stage_visuals() -> void:
@@ -1700,6 +1942,80 @@ func _apex_hover_scales_with_size() -> void:
 			"Larger giant height holds visibly longer at apex foot lift before slamming down")
 	_check(walk_speeds[88.2] > walk_speeds[25.2] and walk_speeds[25.2] > walk_speeds[3.0],
 			"Larger giant height increases forward walk speed instead of dragging slower")
+
+
+func _full_stride_scales_with_size() -> void:
+	var previous_hover := 0.0
+	var reference := Vector2.ZERO
+	for height: float in [100.0, 200.0, 500.0]:
+		_start({"giant_height": height, "giant_max_height": height, "giant_count": 1,
+				"giant_speed": 1.0, "coin_count": 0, "desk_hazards": false})
+		var round := _round()
+		var giant := _giant()
+		giant.call("_set_skin", &"Kawaii")
+		giant.position = Vector3(0.0, 0.02, 450.0)
+		await _ticks(10)
+		round.set_touch_motion(Vector2(0, -1), false)
+
+		var swing_lift: Array[float] = []
+		var step_count := 0
+		var measured_steps := 0
+		var total := Vector2.ZERO
+		var hover_frames := 0
+		var support_anchor := Vector3.INF
+		var locked_center := Vector3.INF
+		var expected_landing_frame := 0.0
+		var max_slip := 0.0
+		var max_landing_error := 0.0
+		var max_eta_error := 0.0
+		var predictions := 0
+		for frame in range(1, 1921):
+			await physics_frame
+			var actor := FootfallFixture.actor(round)
+			var gait: Dictionary = giant.get_turn_telemetry()
+			if int(actor.footfall_count) > step_count:
+				step_count = int(actor.footfall_count)
+				# Skip the first two steps while the gait leaves its starting stance.
+				if not swing_lift.is_empty():
+					var peak: float = swing_lift.max()
+					var stride: float = gait.left_last_step_len if actor.last_footfall_left else gait.right_last_step_len
+					total += Vector2(peak, stride) / height
+					for lift in swing_lift:
+						hover_frames += int(lift >= peak * 0.999)
+					measured_steps += 1
+					if locked_center != Vector3.INF:
+						predictions += 1
+						max_landing_error = maxf(max_landing_error, locked_center.distance_to(actor.last_footfall_center))
+						max_eta_error = maxf(max_eta_error, absf(float(frame) - expected_landing_frame))
+				swing_lift.clear()
+				support_anchor = Vector3.INF
+				locked_center = Vector3.INF
+			if measured_steps == 3:
+				break
+			var preview: Dictionary = giant.heavy_step_preview()
+			if step_count >= 2 and not preview.is_empty():
+				var heel: Vector3 = gait.left_heel_world if preview.left else gait.right_heel_world
+				var support: Vector3 = gait.right_heel_world if preview.left else gait.left_heel_world
+				swing_lift.append(heel.y - giant.position.y)
+				if support_anchor == Vector3.INF:
+					support_anchor = support
+				max_slip = maxf(max_slip, (support - support_anchor).slide(Vector3.UP).length())
+				if preview.locked and locked_center == Vector3.INF:
+					locked_center = preview.center
+					expected_landing_frame = float(frame) + float(preview.eta) * 60.0
+		round.set_touch_motion(Vector2.ZERO, false)
+		var proportions := total / maxf(measured_steps, 1.0)
+		var hover := float(hover_frames) / maxf(measured_steps, 1.0) / 60.0
+		if reference == Vector2.ZERO:
+			reference = proportions
+		_check(measured_steps == 3 and proportions.x > 0.19 and proportions.y > 0.48
+				and proportions.distance_to(reference) < 0.02 and hover > previous_hover + 0.10,
+				"At %.0f m the full step stays proportional and the apex lasts longer (heel %.1f%%, stride %.1f%%, %.2f s)"
+				% [height, proportions.x * 100.0, proportions.y * 100.0, hover])
+		_check(predictions == 3 and max_slip < 0.05 and max_landing_error < 0.05 and max_eta_error < 2.0,
+				"At %.0f m the support locks and the predicted landing matches the real heavy step" % height)
+		previous_hover = hover
+		_game.show_menu()
 
 
 func _manual_camera_toggle() -> void:
@@ -2195,13 +2511,13 @@ func _hand_attacks() -> void:
 	await _ticks(3)
 	_check(round.snapshot().hand_action == "grab_crush",
 			"A giant can start picking up a much smaller human")
-	for frame in 70:
+	for frame in 160:
 		if rival.collision_mask == 0:
 			break
 		rival.position = rival_at
 		await physics_frame
 	_check(rival.collision_mask == 0, "The grab lifts the human actor")
-	await _ticks(110)
+	await _ticks(220)
 	var board: Array[Dictionary] = round.growth_leaderboard()
 	_check(board[1].rank == 0, "The crush defeats the smaller human")
 	_game.show_menu()

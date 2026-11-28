@@ -6,9 +6,15 @@
 //!   the idle sit at the growth cap, and the pinned-victim damage over time.
 //!
 //! Phases map one-to-one onto the procedural clip:
-//!   drop  = visual progress 0.00 .. 0.67 (includes the 0.375 impact beat)
-//!   hold  = seamless `show_sit_idle` loop, length scales with body size
-//!   rise  = visual progress 0.67 .. 1.00
+//!   drop   = visual progress 0.00 .. 0.67 (includes the 0.375 impact beat)
+//!   hold   = seamless `show_sit_idle` loop, length scales with body size
+//!   rise   = visual progress 0.67 .. 1.00
+//!   cancel = a combat sit that lost its target before impact: the pose rewinds from the
+//!            drop position back to standing and no damage is dealt.
+//!
+//! Every sit starts from the *current* facing: the pelvis always lands behind the body, so
+//! there is no pivot phase and the warning ring, the AI target check and the impact area all
+//! share `sit_center()`.
 
 use super::*;
 use crate::rules::{GIANT_START_HEIGHT, HUMAN_HEIGHT};
@@ -24,19 +30,20 @@ const DROP_SECONDS: f32 = VISUAL_SECONDS * VISUAL_RISE_START; // 3.216
 const IMPACT_SECONDS: f32 = VISUAL_SECONDS * VISUAL_IMPACT; // 1.800
 const RISE_SECONDS: f32 = VISUAL_SECONDS * (1.0 - VISUAL_RISE_START); // 1.584
 const SIT_COOLDOWN: f32 = 2.6;
-/// Seconds the in-place pivot may take before sitting regardless of alignment.
-const TURN_TIMEOUT: f32 = 7.0;
-/// Below this yaw error the giant just sits instead of shuffling around first.
-const TURN_ENTER: f32 = 0.25;
 const MIN_HOLD: f32 = 0.45;
+/// A combat sit is a short commitment, not a rest: cap the seated hold.
+const COMBAT_HOLD_CAP: f32 = 2.2;
+/// Seconds the rewound pose takes to get back to standing when a combat sit is cancelled.
+const CANCEL_SECONDS: f32 = 0.55;
 /// A pinned victim loses a fifth of the attacker's attack every tick.
 const PIN_DAMAGE_DIVISOR: f32 = 5.0;
 
 #[derive(Clone, Copy)]
 pub(super) enum SitPhase {
-    /// Ship-like in-place pivot that puts the back (the seated pelvis) toward the crowd.
-    Turn { elapsed: f32, aim: f32 },
     Drop { elapsed: f32 },
+    /// A combat sit whose target stepped out of the rear landing zone before the
+    /// impact: the pose rewinds to standing without dealing any damage.
+    Cancel { elapsed: f32, from: f32 },
     Hold { left: f32 },
     Rise { elapsed: f32 },
 }
@@ -51,6 +58,9 @@ pub(super) struct SitAction {
     hold: f32,
     /// Timed holds stand up on their own; the player stays seated until pressing X.
     pub(super) timed: bool,
+    /// True for a sit aimed at a live target: it keeps a short hold and may be
+    /// cancelled while the target walks out of the landing zone before impact.
+    pub(super) combat: bool,
 }
 
 /// Seated seconds for a body of `scale` (1.0 = the 25.2 m reference giant).
@@ -63,8 +73,8 @@ pub(super) fn crush_hold_seconds(base: f32, per_scale: f32, scale: f32) -> f32 {
 impl SitAction {
     pub(super) fn phase_key(&self) -> &'static str {
         match self.phase {
-            SitPhase::Turn { .. } => "turn",
             SitPhase::Drop { .. } => "drop",
+            SitPhase::Cancel { .. } => "cancel",
             SitPhase::Hold { .. } => "hold",
             SitPhase::Rise { .. } => "rise",
         }
@@ -74,8 +84,10 @@ impl SitAction {
     pub(super) fn progress(&self) -> f32 {
         let drop = VISUAL_RISE_START;
         match self.phase {
-            SitPhase::Turn { .. } => 0.0,
             SitPhase::Drop { elapsed } => (elapsed / DROP_SECONDS * drop).clamp(0.0, 1.0),
+            SitPhase::Cancel { elapsed, from } => {
+                (from * (1.0 - (elapsed / CANCEL_SECONDS).clamp(0.0, 1.0))).clamp(0.0, drop)
+            }
             SitPhase::Hold { left } => {
                 let span = self.hold.max(MIN_HOLD);
                 let fraction = if self.timed {
@@ -97,19 +109,9 @@ impl Giant {
         self.sit.is_some()
     }
 
-    /// Where the giant looks for a crowd to sit on (in front of the body).
-    fn sit_zone_center(&self) -> Vector3 {
-        let yaw = self.body.get_rotation().y;
-        let forward = Vector3::FORWARD.rotated(Vector3::UP, yaw);
-        let position = self.body.get_global_position();
-        let mut center = position + forward * (SEAT_FORWARD * self.scale);
-        center.y = position.y + 0.05;
-        center
-    }
-
-    /// Where the pelvis actually lands: the sit animation drops the butt behind the body,
-    /// so a giant turns its back to the crowd before sitting. Measured from the rig at
-    /// yaw 0 (pelvis +2.85 m on Z while forward is -Z).
+    /// Where the pelvis actually lands: the sit animation drops the butt behind the body.
+    /// Measured from the rig at yaw 0 (pelvis +2.85 m on Z while forward is -Z), so the
+    /// warning ring, the AI's target check and the impact all share this one centre.
     fn sit_center(&self) -> Vector3 {
         let yaw = self.body.get_rotation().y;
         let forward = Vector3::FORWARD.rotated(Vector3::UP, yaw);
@@ -119,26 +121,26 @@ impl Giant {
         center
     }
 
-    /// Yaw whose *back* faces `point`, so the seated pelvis lands on it.
-    fn back_to(&self, point: Vector3) -> Option<f32> {
-        let offset = horizontal(point - self.body.get_global_position());
-        (offset.length_squared() > 0.0001).then(|| offset.x.atan2(offset.z))
+    /// True when `point` (with its own radius) sits inside the rear landing zone, which is
+    /// the only place a sit can actually crush something. The reach shares the impact test's
+    /// full radius so a target that would be hit is never cancelled as a whiff.
+    pub(super) fn lands_on(&self, point: Vector3, target_radius: f32) -> bool {
+        let reach = self.sit_radius() + target_radius;
+        horizontal(point - self.sit_center()).length() <= reach
     }
 
     pub(super) fn sit_radius(&self) -> f32 {
         SEAT_RADIUS * self.scale
     }
 
-    /// The live drop zone while a sit is telegraphed (turn/drop phases): where
-    /// the pelvis will land and how wide the crush area is. Snapshot into
-    /// `Rival` per frame so other actors can dodge the warning circle.
+    /// The live drop zone while a sit is telegraphed (the drop phase): where the pelvis
+    /// will land and how wide the crush area is. Snapshotted into `Rival` per frame so
+    /// other actors can dodge the warning circle.
     pub(super) fn sit_drop_zone(&self) -> Option<(Vector3, f32)> {
         let sit = self.sit.as_ref()?;
         match sit.phase {
-            SitPhase::Turn { .. } | SitPhase::Drop { .. } => {
-                Some((self.sit_center(), self.sit_radius()))
-            }
-            SitPhase::Hold { .. } | SitPhase::Rise { .. } => None,
+            SitPhase::Drop { .. } => Some((self.sit_center(), self.sit_radius())),
+            SitPhase::Cancel { .. } | SitPhase::Hold { .. } | SitPhase::Rise { .. } => None,
         }
     }
 }
@@ -154,7 +156,13 @@ impl HarborRound {
         requested: bool,
         dt: f32,
     ) -> bool {
-        if actor.human || actor.health_fraction <= 0.0 || actor.grabbed {
+        // A pinned victim is already held down by someone else's sit: its own body must
+        // not run a second sit state machine on top (keyboard X used to bypass the pin).
+        if actor.human
+            || actor.health_fraction <= 0.0
+            || actor.grabbed
+            || actor.pinned_by.is_some()
+        {
             return false;
         }
         if actor.sit.is_some() || actor.hand_attack.is_some() {
@@ -162,14 +170,13 @@ impl HarborRound {
         }
         let settings = self.settings.sit;
 
-        // The player only has to be a giant: press X and sit, crowd or not.
+        // The player only has to be a giant: press X and sit, crowd or not. The body
+        // does not pivot first — the pelvis lands behind the current facing.
         if player {
             if requested {
                 let hold =
                     crush_hold_seconds(settings.hold_base, settings.hold_per_scale, actor.scale);
-                let (count, centroid) = self.seat_targets(actor, None);
-                let aim = if count > 0 { actor.back_to(centroid) } else { None };
-                self.begin_sit(actor, false, hold, aim, false);
+                self.begin_sit(actor, false, hold, false, false);
                 return true;
             }
             return false;
@@ -181,17 +188,19 @@ impl HarborRound {
             return false;
         }
 
-        // 1. AI giants sit on a small crowd: at least `crush_targets` bodies <= 1/5 the height.
-        // A swing already in motion finishes before the next AI crowd decision; at the first
-        // planted frame the crowd check runs before pursuit.
+        // 1. AI giants sit on a small crowd: at least `crush_targets` bodies <= 1/5 the height
+        // that the rear landing zone can actually reach from the current facing. A swing already
+        // in motion finishes before the next AI crowd decision.
         if actor.footfall.is_none() && settings.crush_enabled {
             let height = actor.height(self.max_height);
             let max_target = height / settings.crush_ratio.max(1.0);
-            let (count, centroid) = self.seat_targets(actor, Some(max_target));
-            if count >= settings.crush_targets as usize {
+            if self.rear_landing_targets(actor, Some(max_target)) >= settings.crush_targets as usize
+            {
                 let hold =
                     crush_hold_seconds(settings.hold_base, settings.hold_per_scale, actor.scale);
-                self.begin_sit(actor, false, hold, actor.back_to(centroid), true);
+                // A crowd crush targets live bodies, so it gets the same short hold and
+                // safe cancel as any other combat sit.
+                self.begin_sit(actor, false, hold, true, true);
                 return true;
             }
         }
@@ -203,34 +212,35 @@ impl HarborRound {
             && !self.any_target_in_sight(actor)
             && godot::global::randf() < f64::from(settings.idle_chance * dt)
         {
-            self.begin_sit(actor, true, settings.idle_timeout, None, true);
+            self.begin_sit(actor, true, settings.idle_timeout, true, false);
             return true;
         }
         false
     }
 
+    /// Player, AI and touch input all sit down along the *current* facing: the seated
+    /// pelvis drops straight behind the body, so the landing zone is always the exact
+    /// mirrored footprint used by the warning ring and the impact test.
     fn begin_sit(
         &mut self,
         actor: &mut Giant,
         idle: bool,
         hold: f32,
-        aim: Option<f32>,
         timed: bool,
+        combat: bool,
     ) {
-        let yaw = actor.body.get_rotation().y;
-        let turn_to = aim.filter(|aim| {
-            godot::global::angle_difference(yaw as f64, *aim as f64).abs() > f64::from(TURN_ENTER)
-        });
-        let phase = match turn_to {
-            Some(aim) => SitPhase::Turn { elapsed: 0.0, aim },
-            None => SitPhase::Drop { elapsed: 0.0 },
+        let hold = if combat {
+            hold.min(COMBAT_HOLD_CAP)
+        } else {
+            hold
         };
         actor.sit = Some(SitAction {
-            phase,
+            phase: SitPhase::Drop { elapsed: 0.0 },
             idle,
             struck: false,
             hold: hold.max(MIN_HOLD),
             timed,
+            combat,
         });
         actor.footfall = None;
         actor.pending_hand = None;
@@ -253,35 +263,41 @@ impl HarborRound {
         let mut visual_idle = false;
 
         match sit.phase {
-            SitPhase::Turn { elapsed, aim } => {
-                let elapsed = elapsed + dt;
-                let done = actor
-                    .body
-                    .call("step_turn_in_place", &[aim.to_variant(), dt.to_variant()])
-                    .try_to::<VarDictionary>()
-                    .ok()
-                    .and_then(|dict| dict.get("done"))
-                    .and_then(|value| value.try_to::<bool>().ok())
-                    .unwrap_or(false);
-                if done || elapsed >= TURN_TIMEOUT {
-                    sit.phase = SitPhase::Drop { elapsed: 0.0 };
-                    visual_progress = Some(0.0);
-                } else {
-                    sit.phase = SitPhase::Turn { elapsed, aim };
-                }
-            }
             SitPhase::Drop { elapsed } => {
                 let elapsed = elapsed + dt;
-                if !sit.struck && elapsed >= IMPACT_SECONDS {
-                    sit.struck = true;
-                    struck_now = true;
-                }
-                if elapsed >= DROP_SECONDS {
-                    sit.phase = SitPhase::Hold { left: sit.hold };
-                    visual_idle = true;
+                // A combat sit is a bet on the landing zone: if the target walks out
+                // before the impact, the body rewinds to standing instead of whiffing.
+                let whiffed = sit.combat
+                    && !sit.struck
+                    && elapsed < IMPACT_SECONDS
+                    && self.rear_landing_targets(&*actor, None) == 0;
+                if whiffed {
+                    sit.phase = SitPhase::Cancel {
+                        elapsed: 0.0,
+                        from: elapsed / DROP_SECONDS * VISUAL_RISE_START,
+                    };
                 } else {
-                    sit.phase = SitPhase::Drop { elapsed };
-                    visual_progress = Some(elapsed / DROP_SECONDS * VISUAL_RISE_START);
+                    if !sit.struck && elapsed >= IMPACT_SECONDS {
+                        sit.struck = true;
+                        struck_now = true;
+                    }
+                    if elapsed >= DROP_SECONDS {
+                        sit.phase = SitPhase::Hold { left: sit.hold };
+                        visual_idle = true;
+                    } else {
+                        sit.phase = SitPhase::Drop { elapsed };
+                        visual_progress = Some(elapsed / DROP_SECONDS * VISUAL_RISE_START);
+                    }
+                }
+            }
+            SitPhase::Cancel { elapsed, from } => {
+                let elapsed = elapsed + dt;
+                if elapsed >= CANCEL_SECONDS {
+                    finished = true;
+                    visual_progress = Some(0.0);
+                } else {
+                    sit.phase = SitPhase::Cancel { elapsed, from };
+                    visual_progress = Some(from * (1.0 - elapsed / CANCEL_SECONDS));
                 }
             }
             SitPhase::Hold { left } => {
@@ -326,9 +342,7 @@ impl HarborRound {
                 &[progress.clamp(0.0, 1.0).to_variant(), dt.to_variant()],
             );
         }
-        let landing_ring = !struck_now
-            && !finished
-            && matches!(sit.phase, SitPhase::Turn { .. } | SitPhase::Drop { .. });
+        let landing_ring = !struck_now && !finished && matches!(sit.phase, SitPhase::Drop { .. });
         if landing_ring {
             let effects = self.effects.as_mut().unwrap();
             effects.call(
@@ -354,21 +368,31 @@ impl HarborRound {
         actor.sit.is_some()
     }
 
-    pub(super) fn maybe_start_ai_building_sit(&mut self, actor: &mut Giant, target: Vector3) -> bool {
+    /// Sitting on a building only makes sense when the rear landing zone reaches the wall:
+    /// the pelvis always drops behind the body, so a front-facing sit would grind through a
+    /// full drop/hold/rise cycle without ever damaging the facade.
+    pub(super) fn maybe_start_ai_building_sit(
+        &mut self,
+        actor: &mut Giant,
+        target: Vector3,
+        target_radius: f32,
+    ) -> bool {
         if actor.human
             || actor.health_fraction <= 0.0
             || actor.grabbed
+            || actor.pinned_by.is_some()
             || actor.sit.is_some()
             || actor.hand_attack.is_some()
             || actor.sit_in > 0.0
             || actor.footfall.is_some()
             || !actor.body.is_on_floor()
+            || !actor.lands_on(target, target_radius)
         {
             return false;
         }
         let settings = self.settings.sit;
         let hold = crush_hold_seconds(settings.hold_base, settings.hold_per_scale, actor.scale);
-        self.begin_sit(actor, false, hold, actor.back_to(target), true);
+        self.begin_sit(actor, false, hold, true, true);
         true
     }
 
@@ -384,19 +408,17 @@ impl HarborRound {
         {
             return false;
         }
-        let position = actor.body.get_global_position();
-        let offset = target - position;
-        let distance = horizontal(offset).length();
-        // Use the landing circle after turning, with a margin for the victim's movement.
-        let reach = actor.sit_radius() + target_radius * 0.5;
-        if (distance - SEAT_FORWARD * actor.scale).abs() > reach
-            || offset.y.abs() > (0.12 * actor.height(self.max_height)).max(0.25)
+        let offset = target - actor.body.get_global_position();
+        // Only sit when the rear landing zone the body already faces can reach the
+        // target: a front-facing sit would drop on empty ground and whiff.
+        if offset.y.abs() > (0.12 * actor.height(self.max_height)).max(0.25)
+            || !actor.lands_on(target, target_radius)
         {
             return false;
         }
         let settings = self.settings.sit;
         let hold = crush_hold_seconds(settings.hold_base, settings.hold_per_scale, actor.scale);
-        self.begin_sit(actor, false, hold, actor.back_to(target), true);
+        self.begin_sit(actor, false, hold, true, true);
         actor.ai_punched = false;
         true
     }
@@ -418,42 +440,42 @@ impl HarborRound {
         !actor.human
             && actor.sit.is_none()
             && actor.hand_attack.is_none()
+            && actor.pinned_by.is_none()
     }
 
-    /// Living bodies inside the front trigger zone plus their centroid. `max_height == None`
-    /// means the player's manual sit, which accepts any size.
-    fn seat_targets(&self, actor: &Giant, max_height: Option<f32>) -> (usize, Vector3) {
-        let center = actor.sit_zone_center();
-        let radius = actor.sit_radius();
+    /// Living bodies the rear landing zone can actually crush, filtered by an optional
+    /// maximum height. The seated pelvis always drops behind the body, so counting
+    /// anyone in *front* would promise a hit the sit cannot deliver.
+    fn rear_landing_targets(&self, actor: &Giant, max_height: Option<f32>) -> usize {
         let mut count = 0;
-        let mut sum = Vector3::ZERO;
-        let mut accept = |position: Vector3, height: f32| {
-            if max_height.is_none_or(|limit| height <= limit)
-                && horizontal(position - center).length() <= radius
-            {
+        let mut accept = |position: Vector3, radius: f32, height: f32| {
+            if max_height.is_none_or(|limit| height <= limit) && actor.lands_on(position, radius) {
                 count += 1;
-                sum += position;
             }
         };
         for rival in &self.rivals {
             if rival.index == actor.index || rival.health_fraction <= 0.0 {
                 continue;
             }
-            accept(rival.position, GIANT_START_HEIGHT * rival.scale);
+            accept(
+                rival.position,
+                GIANT_RADIUS * rival.scale,
+                GIANT_START_HEIGHT * rival.scale,
+            );
         }
         for npc in &self.civilians {
             if npc.remove_in.is_some() || npc.grabbed {
                 continue;
             }
-            accept(npc.position, npc.size.height);
+            accept(npc.position, HUMAN_RADIUS, npc.size.height);
         }
         if let Some(body) = self.evacuating_human() {
             let position = self
                 .evacuee_position
                 .unwrap_or_else(|| body.get_global_position());
-            accept(position, HUMAN_HEIGHT);
+            accept(position, HUMAN_RADIUS, HUMAN_HEIGHT);
         }
-        (count, sum / count.max(1) as f32)
+        count
     }
 
     fn any_target_in_sight(&self, actor: &Giant) -> bool {
@@ -549,7 +571,7 @@ mod tests {
     use super::*;
 
     fn action(phase: SitPhase) -> SitAction {
-        SitAction { phase, idle: false, struck: false, hold: 1.2, timed: true }
+        SitAction { phase, idle: false, struck: false, hold: 1.2, timed: true, combat: false }
     }
 
     #[test]
@@ -578,5 +600,23 @@ mod tests {
         assert_eq!(action(SitPhase::Drop { elapsed: 0.0 }).phase_key(), "drop");
         assert_eq!(action(SitPhase::Hold { left: 1.0 }).phase_key(), "hold");
         assert_eq!(action(SitPhase::Rise { elapsed: 0.0 }).phase_key(), "rise");
+        assert_eq!(
+            action(SitPhase::Cancel { elapsed: 0.0, from: 0.4 }).phase_key(),
+            "cancel"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_combat_sit_rewinds_the_pose_and_deals_no_damage() {
+        let cancel = action(SitPhase::Cancel { elapsed: CANCEL_SECONDS * 0.5, from: 0.4 }).progress();
+        assert!(cancel > 0.0 && cancel < 0.4);
+        let done = action(SitPhase::Cancel { elapsed: CANCEL_SECONDS, from: 0.4 }).progress();
+        assert!(done < 1e-6);
+    }
+
+    #[test]
+    fn combat_sits_hold_briefly_and_idle_sits_keep_their_configured_hold() {
+        assert!(COMBAT_HOLD_CAP < crush_hold_seconds(1.2, 1.0, 6.0));
+        assert!(COMBAT_HOLD_CAP >= MIN_HOLD);
     }
 }

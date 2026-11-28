@@ -32,12 +32,14 @@ impl HandMove {
         }
     }
 
-    fn duration(self, pace: f32, scale: f32) -> f32 {
+    /// Hand timing is a body-scale beat, deliberately independent of the movement
+    /// multiplier: doubling giant speed must not make the swing look twice as frantic.
+    fn duration(self, scale: f32) -> f32 {
         let seconds = match self {
             Self::GrabCrush => 4.5,
             Self::Punch => 2.4,
         };
-        seconds * scale.sqrt().clamp(0.8, 3.0) / pace.sqrt()
+        seconds * scale.sqrt().clamp(0.8, 3.0)
     }
 
     fn contact(self) -> f32 {
@@ -302,7 +304,7 @@ impl HarborRound {
             target,
             point,
             progress: 0.0,
-            duration: kind.duration(self.settings.giant_speed, actor.scale),
+            duration: kind.duration(actor.scale),
             held: None,
         });
         if let Some(mut audio) = self.audio() {

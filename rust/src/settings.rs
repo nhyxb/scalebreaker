@@ -136,8 +136,11 @@ impl Default for GrowthSettings {
             band_step: 50,
             coin_count: 200,
             coin_interval: 60.0,
-            coin_growth_rate: 0.10,
-            building_growth_rate: 0.10,
+            // The giant stage is the long haul: coin pickups nudge the body up by
+            // about 1% and a demolished block by about 3%, so growth comes from
+            // playing the map rather than from one lucky coin.
+            coin_growth_rate: 0.01,
+            building_growth_rate: 0.03,
             base_health: 100.0,
             base_attack: 10.0,
             attack_height: 3.0,
@@ -150,6 +153,9 @@ impl Default for GrowthSettings {
 pub struct BrawlSettings {
     pub start_min_height: f32,
     pub start_max_height: f32,
+    /// Brawl respawns land inside `respawn_min_height .. respawn_max_height` so a
+    /// knocked-out giant always comes back in a size that can actually fight.
+    pub respawn_min_height: f32,
     pub respawn_max_height: f32,
     pub coin_height: f32,
     pub coin_reward_rate: f32,
@@ -160,6 +166,7 @@ impl Default for BrawlSettings {
         Self {
             start_min_height: GROWTH_REFERENCE_HEIGHT,
             start_max_height: 30.0,
+            respawn_min_height: 15.0,
             respawn_max_height: 30.0,
             coin_height: 50.0,
             coin_reward_rate: 0.01,
@@ -274,7 +281,9 @@ impl GameSettings {
     pub fn for_mode(mode: Mode) -> Self {
         if mode.has_growth() {
             Self {
-                giant_speed: 4.0,
+                // Growth and brawl ship at 2x so a body that size reads as fast,
+                // and any saved custom value keeps winning on reload.
+                giant_speed: 2.0,
                 giant_height: if mode == Mode::Growth {
                     HUMAN_HEIGHT
                 } else {
@@ -403,6 +412,11 @@ impl GameSettings {
                     as f32,
                 start_max_height: read("start_max_height", brawl.start_max_height.into(), finite)
                     as f32,
+                respawn_min_height: read(
+                    "respawn_min_height",
+                    brawl.respawn_min_height.into(),
+                    finite,
+                ) as f32,
                 respawn_max_height: read(
                     "respawn_max_height",
                     brawl.respawn_max_height.into(),
@@ -493,6 +507,10 @@ impl GameSettings {
             values.set(
                 "start_max_height",
                 setting_value(self.brawl.start_max_height),
+            );
+            values.set(
+                "respawn_min_height",
+                setting_value(self.brawl.respawn_min_height),
             );
             values.set(
                 "respawn_max_height",
@@ -592,8 +610,8 @@ mod tests {
         let growth = GrowthSettings::default();
         assert_eq!(growth.coin_count, 200);
         assert_eq!(growth.coin_interval, 60.0);
-        assert_eq!(growth.coin_growth_rate, 0.10);
-        assert_eq!(growth.building_growth_rate, 0.10);
+        assert_eq!(growth.coin_growth_rate, 0.01);
+        assert_eq!(growth.building_growth_rate, 0.03);
         let mode = GameSettings::for_mode(Mode::Growth);
         assert_eq!(mode.giant_height, HUMAN_HEIGHT);
         assert_eq!(mode.growth.coin_count, 200);

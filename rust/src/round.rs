@@ -313,7 +313,7 @@ impl GroundImpact {
 
     fn shake(self, distance: f32, scale: f32) -> f32 {
         let (strength, reach) = self.strength_and_reach();
-        let reach = reach * scale.sqrt().clamp(0.7, 2.2);
+        let reach = reach * scale.sqrt().clamp(0.7, 4.4);
         strength * (1.0 - distance / reach).max(0.0).powi(2)
     }
 
@@ -322,7 +322,7 @@ impl GroundImpact {
             return 0.0;
         }
         let (strength, legacy_reach) = self.strength_and_reach();
-        let reach = (2.5 + 8.0 * source_height).min(220.0) * (legacy_reach / 100.0);
+        let reach = (2.5 + 8.0 * source_height).min(440.0) * (legacy_reach / 100.0);
         let height_gap = (source_height / viewer_height).log2();
         strength * (height_gap / (height_gap + 3.0)) * (1.0 - distance / reach).max(0.0).powi(2)
     }
@@ -745,9 +745,19 @@ impl Giant {
         let delta = std::mem::take(&mut self.visual_dt);
         self.visual_wait = stride.max(1) - 1;
         let contact = if self.human {
+            // The growth-mode human shares the giant's movement rules, so it needs the
+            // same backward/blocked hints to play a reversed stride while backing up.
             self.body.call(
                 "show_motion",
-                &[speed.to_variant(), (-1.0_f32).to_variant(), delta.to_variant()],
+                &[
+                    speed.to_variant(),
+                    (-1.0_f32).to_variant(),
+                    delta.to_variant(),
+                    turn_target.to_variant(),
+                    allow_standing_turn.to_variant(),
+                    backward.to_variant(),
+                    blocked.to_variant(),
+                ],
             )
         } else {
             self.body.call(
@@ -1514,7 +1524,11 @@ impl HarborRound {
         dt: f32,
     ) {
         if self.state.outcome != Outcome::Active {
-            actor.animate(0.0, dt, 1, f32::NAN, false, false, false);
+            // `animate` drives the walk/idle pose and would paint over a seated or pinned
+            // body, so a finished round only freezes the gait of a free-standing actor.
+            if actor.sit.is_none() && actor.pinned_by.is_none() {
+                actor.animate(0.0, dt, 1, f32::NAN, false, false, false);
+            }
             actor.footfall = None;
             return;
         }
@@ -1615,7 +1629,11 @@ impl HarborRound {
                         ai_hold_heading = Some(to_surface);
                     } else if actor.sit_in <= 0.0
                         && dist <= sit_range
-                        && self.maybe_start_ai_building_sit(actor, surface)
+                        && self.maybe_start_ai_building_sit(
+                            actor,
+                            surface,
+                            target_fp.size.x.max(target_fp.size.z) * 0.5,
+                        )
                     {
                         actor.standing_pivot_active = false;
                         actor.was_walking = false;
@@ -1697,8 +1715,9 @@ impl HarborRound {
             None
         };
         let camera_fwd = Vector3::FORWARD.rotated(Vector3::UP, self.yaw);
+        // Pure backpedal keeps the body facing forward for giants and for the growth-mode
+        // human stage; diagonal S+A/S+D turns into an ordinary curved arc instead.
         let backpedal = player
-            && !actor.human
             && backward_input
             && actor.pending_hand.is_none()
             && ai_hold_heading.is_none();
@@ -1741,26 +1760,37 @@ impl HarborRound {
             Vector3::ZERO
         };
         let desired_velocity = if move_dir.length_squared() > 0.0001 {
-            if !actor.human {
-                let body_forward = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
-                if backpedal {
-                    let back_dir = move_dir.normalized_or_zero();
-                    let align = body_forward.dot(-back_dir).clamp(0.0, 1.0);
-                    let turn_speed_mult = 0.55 + 0.45 * align;
-                    back_dir * (giant_speed * GIANT_BACKWARD_MULT * turn_speed_mult)
-                } else {
-                    // Always launch immediately along body forward so off-heading inputs curve
-                    // smoothly along a car-like arc instead of freezing to spin in place.
-                    let align = body_forward.dot(move_dir.normalized_or_zero()).clamp(-1.0, 1.0);
-                    let turn_speed_mult = if align >= 0.0 {
-                        0.62 + 0.38 * align
-                    } else {
-                        0.48 + 0.14 * (1.0 + align)
-                    };
-                    body_forward * (giant_speed * turn_speed_mult)
-                }
+            let body_forward = Vector3::FORWARD.rotated(Vector3::UP, giant.get_rotation().y);
+            let backward_mult = if actor.human {
+                HUMAN_BACKWARD_MULT
             } else {
-                move_dir * giant_speed
+                GIANT_BACKWARD_MULT
+            };
+            if backpedal {
+                let back_dir = move_dir.normalized_or_zero();
+                let align = body_forward.dot(-back_dir).clamp(0.0, 1.0);
+                let turn_speed_mult = 0.55 + 0.45 * align;
+                back_dir * (giant_speed * backward_mult * turn_speed_mult)
+            } else if actor.human {
+                // A human also launches along its facing and curves into the input, so
+                // strafing reads as a real step instead of a sideways body slide.
+                let align = body_forward.dot(move_dir.normalized_or_zero()).clamp(-1.0, 1.0);
+                let turn_speed_mult = if align >= 0.0 {
+                    0.78 + 0.22 * align
+                } else {
+                    0.55 + 0.20 * (1.0 + align)
+                };
+                body_forward * (giant_speed * turn_speed_mult)
+            } else {
+                // Always launch immediately along body forward so off-heading inputs curve
+                // smoothly along a car-like arc instead of freezing to spin in place.
+                let align = body_forward.dot(move_dir.normalized_or_zero()).clamp(-1.0, 1.0);
+                let turn_speed_mult = if align >= 0.0 {
+                    0.62 + 0.38 * align
+                } else {
+                    0.48 + 0.14 * (1.0 + align)
+                };
+                body_forward * (giant_speed * turn_speed_mult)
             }
         } else {
             carry_vel
@@ -2017,9 +2047,21 @@ impl HarborRound {
 
     /// Whether periodic/manual tabletop desk hazards are allowed in this round.
     /// Legacy Human Evacuation mode never triggers desk hazards regardless of setting.
+    /// In growth the hazards stay dormant until the player's first transformation, so a
+    /// human on foot is never killed by something it cannot even see arrive.
     #[func]
     fn desk_hazards_enabled(&self) -> bool {
-        self.mode != Mode::Human && self.settings.desk_hazards
+        self.mode != Mode::Human
+            && self.settings.desk_hazards
+            && (self.mode != Mode::Growth || self.growth_hazards_unlocked())
+    }
+
+    /// Hazards need a giant on the board: either the player already transformed, or the
+    /// round opened straight in the giant stage. A human on foot never sees one arrive.
+    fn growth_hazards_unlocked(&self) -> bool {
+        self.giants
+            .iter()
+            .any(|giant| !giant.human && giant.health_fraction > 0.0)
     }
 
     #[func]
@@ -2841,7 +2883,10 @@ impl HarborRound {
             let source_height = event
                 .giant
                 .map_or(HUMAN_HEIGHT, |(_, scale)| GIANT_START_HEIGHT * scale);
-            let strength = if !growth || own {
+            let strength = if own {
+                // Keep self feedback near the usual close-range strength as the camera pulls back.
+                event.kind.strength_and_reach().0 * 0.6
+            } else if !growth {
                 let scale = event.giant.map_or(1.0, |(_, scale)| scale);
                 event.kind.shake(distance, scale)
             } else {
@@ -2939,8 +2984,16 @@ impl HarborRound {
                 camera.set_v_offset(y * translation);
                 return;
             }
-            camera.set_h_offset(shoulder + x);
-            camera.set_v_offset(y);
+            // Keep the apparent size of a self shake when the third-person arm grows.
+            // The normal-height sandbox camera is the reference for the offset in meters.
+            let translation = if self.own_shake.strength > self.nearby_shake.strength {
+                let normal_arm = GIANT_START_HEIGHT * GIANT_CAMERA_LENGTH_RATIO;
+                (camera.get_position().z / normal_arm).max(1.0)
+            } else {
+                1.0
+            };
+            camera.set_h_offset(shoulder + x * translation);
+            camera.set_v_offset(y * translation);
         }
     }
 
@@ -3833,8 +3886,15 @@ impl HarborRound {
             let close_peer = fits_punch && offset.length() <= close_combat_range(my_height, target_radius);
             let attacking = actor.intent == Intent::Attack || (visible && close_peer);
             if visible && self.mode != Mode::Human && attacking {
-                let seat_opportunity = (fits_punch && actor.ai_punched)
-                    || (!fits_punch && !fits_grab && target.size.height < my_height);
+                // A sit always drops the pelvis *behind* the body, so the only useful moment
+                // to sit on a target is when it is already in the rear landing zone. That is
+                // also what `maybe_start_ai_combat_sit` checks; asking first keeps the AI from
+                // burning its attack window on a guaranteed whiff.
+                let rear_ready = actor.lands_on(predicted, target_radius);
+                let seat_opportunity = rear_ready
+                    && ((fits_punch && actor.ai_punched)
+                        || (!fits_punch && !fits_grab && target.size.height < my_height)
+                        || (fits_punch && close_peer));
                 if seat_opportunity && !approaching
                     && self.maybe_start_ai_combat_sit(actor, predicted, target_radius)
                 {
@@ -5005,6 +5065,21 @@ mod tests {
         assert_eq!(giant.relative_shake(1.0, 1.8, 2.0), 0.0);
         assert!(giant.relative_shake(2.0, 2.0, 0.5) > giant.relative_shake(2.0, 1.0, 0.5));
         assert_eq!(giant.relative_shake(18.0, 1.0, 0.5), 0.0);
+    }
+
+    #[test]
+    fn large_giant_shake_reaches_twice_the_previous_limit() {
+        let height = 500.0;
+        let scale = height / GIANT_START_HEIGHT;
+        for (impact, reach) in [(GroundImpact::Footfall, 585.2), (GroundImpact::Sit, 704.0)] {
+            assert!(impact.shake(reach - 5.0, scale) > 0.0);
+            assert_eq!(impact.shake(reach + 1.0, scale), 0.0);
+            assert!(impact.relative_shake(reach - 5.0, height, GIANT_START_HEIGHT) > 0.0);
+            assert_eq!(
+                impact.relative_shake(reach + 1.0, height, GIANT_START_HEIGHT),
+                0.0
+            );
+        }
     }
 
     #[test]

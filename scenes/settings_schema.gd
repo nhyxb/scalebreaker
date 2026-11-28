@@ -112,7 +112,8 @@ const OPTIONS := [
 		"requires": {"key": "random_start", "equals": true},
 	},
 	{
-		"key": "giant_max_height", "label": "身高上限", "hint": "本局巨人能长到多高，也是坐压停留时长换算的基准。",
+		"key": "giant_max_height", "label": "身高上限",
+		"hint": "本局巨人的最高身高；撞上它会自动停下成长，也是坐压停留时长换算的基准。",
 		"kind": "number", "step": 0.1, "suffix": " 米",
 		"page": PAGE_GAMEPLAY, "group": "map", "apply": APPLY_NEXT,
 	},
@@ -125,13 +126,14 @@ const OPTIONS := [
 
 	# --- 巨人 ---------------------------------------------------------------
 	{
-		"key": "giant_speed", "label": "巨人速度", "hint": "巨人的移动与转身倍率，含 AI。",
+		"key": "giant_speed", "label": "巨人速度",
+		"hint": "巨人的移动与转身倍率，含 AI；挥拳和抓捏的动作时长只按体型计算，不受这项影响。",
 		"kind": "number", "step": 0.1, "suffix": " 倍",
 		"page": PAGE_GAMEPLAY, "group": "giant", "apply": APPLY_LIVE,
 	},
 	{
 		"key": "sit_crush_enabled", "label": "AI 自动坐压",
-		"hint": "AI 巨人在坐压范围内有两个比自己小很多的活物时自动坐下压扁；玩家只要是巨人，按 X 随时可坐。",
+		"hint": "AI 巨人在身后落区里凑够小目标时直接坐下压扁，不再转身；玩家只要是巨人，按 X 随时可坐。",
 		"kind": "toggle", "page": PAGE_GAMEPLAY, "group": "giant", "apply": APPLY_LIVE,
 	},
 	{
@@ -178,7 +180,7 @@ const OPTIONS := [
 		"page": PAGE_GAMEPLAY, "group": "giant", "apply": APPLY_LIVE,
 	},
 	{
-		"key": "sit_crush_targets", "label": "坐压目标数", "hint": "坐压范围内至少要有几个小目标才触发。",
+		"key": "sit_crush_targets", "label": "坐压目标数", "hint": "身后落区里至少要有几个小目标，AI 才会坐下。",
 		"kind": "number", "step": 1.0, "suffix": " 个", "integer": true, "advanced": true,
 		"page": PAGE_GAMEPLAY, "group": "giant", "apply": APPLY_LIVE,
 	},
@@ -214,23 +216,26 @@ const OPTIONS := [
 
 	# --- 人类与行人 ---------------------------------------------------------
 	{
-		"key": "human_speed", "label": "人类速度", "hint": "人类与行人整体的移动倍率。",
+		"key": "human_speed", "label": "人类速度",
+		"hint": "撤离玩家、行人和成长模式人类阶段共用的移动倍率；巨人阶段不受影响。",
 		"kind": "number", "step": 0.1, "suffix": " 倍",
 		"page": PAGE_GAMEPLAY, "group": "humans", "apply": APPLY_LIVE,
 	},
+	# Growth and Brawl only field the named giants, so the pedestrian rows stay in the
+	# two modes that actually spawn them. The save keys are untouched either way.
 	{
 		"key": "npc_initial", "label": "开局行人", "hint": "开局刷出多少普通行人。",
-		"kind": "number", "step": 1.0, "suffix": " 名", "integer": true, "modes": [0, 1, 2],
+		"kind": "number", "step": 1.0, "suffix": " 名", "integer": true, "modes": [0, 1],
 		"page": PAGE_GAMEPLAY, "group": "humans", "apply": APPLY_NEXT,
 	},
 	{
 		"key": "npc_respawn", "node": "NpcRespawn", "label": "持续刷新", "hint": "行人会不会持续补充。",
-		"kind": "toggle", "modes": [0, 1, 2],
+		"kind": "toggle", "modes": [0, 1],
 		"page": PAGE_GAMEPLAY, "group": "humans", "apply": APPLY_LIVE,
 	},
 	{
 		"key": "npc_interval", "label": "刷新间隔", "hint": "平均多久补一个行人。",
-		"kind": "number", "step": 0.5, "suffix": " 秒", "modes": [0, 1, 2],
+		"kind": "number", "step": 0.5, "suffix": " 秒", "modes": [0, 1],
 		"page": PAGE_GAMEPLAY, "group": "humans", "apply": APPLY_LIVE,
 		"requires": {"key": "npc_respawn", "equals": true},
 	},
@@ -263,12 +268,14 @@ const OPTIONS := [
 		"page": PAGE_GAMEPLAY, "group": "growth", "apply": APPLY_NEXT,
 	},
 	{
-		"key": "coin_growth_rate", "label": "金币成长", "hint": "巨人捡到金币时获得的身高增幅。",
+		"key": "coin_growth_rate", "label": "金币成长",
+		"hint": "巨人阶段每捡一枚普通金币的身高增幅；高危、极危币按 2.5 / 5 倍折算。",
 		"kind": "number", "step": 1.0, "suffix": " %", "percent": true, "modes": [2], "advanced": true,
 		"page": PAGE_GAMEPLAY, "group": "growth", "apply": APPLY_NEXT,
 	},
 	{
-		"key": "building_growth_rate", "label": "拆楼成长", "hint": "拆一栋楼能长多少。",
+		"key": "building_growth_rate", "label": "拆楼成长",
+		"hint": "巨人阶段每拆一栋楼的身高增幅；随机开局与身高分档仍会限制实际能长到的高度。",
 		"kind": "number", "step": 1.0, "suffix": " %", "percent": true, "modes": [2], "advanced": true,
 		"page": PAGE_GAMEPLAY, "group": "growth", "apply": APPLY_NEXT,
 	},
@@ -306,6 +313,12 @@ const OPTIONS := [
 		"key": "respawn_delay", "label": "复活等待", "hint": "巨人倒下后多久复活。",
 		"kind": "number", "step": 0.5, "suffix": " 秒", "modes": [2, 3],
 		"page": PAGE_GAMEPLAY, "group": "revive", "apply": APPLY_DEATH,
+	},
+	{
+		"key": "respawn_min_height", "label": "复活身高下限",
+		"hint": "复活时随机身高的下限，保证回来就能接战。",
+		"kind": "number", "step": 1.0, "suffix": " 米", "modes": [3], "advanced": true,
+		"page": PAGE_GAMEPLAY, "group": "revive", "apply": APPLY_RESPAWN,
 	},
 	{
 		"key": "respawn_max_height", "label": "复活身高上限", "hint": "复活时随机身高的上限。",

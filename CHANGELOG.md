@@ -4,6 +4,108 @@
 
 ---
 
+## 2026-11-28 — 计划「大体型步态与模式平衡」一~四节实施
+
+开发前快照：`backups/20261128_025624_plan_phase1_4_start/`（含 `rust_src`、`scenes`、`tests`、`scripts`、配置、`PREEXISTING.patch` 与 `BASE_COMMIT`）。基准提交 `88b82c1`，回滚可直接从该快照恢复源码。
+
+### 一、人类与巨人移动、近战
+
+- **成长人类移动（`rust/src/round.rs`、`scenes/giant_visual.gd`）**：`backpedal` 判定不再排除人类阶段，纯 `S`／摇杆正后方输入保持正面朝前做真实后退，行走循环用负 `speed_scale` 倒放；侧向与斜向输入和巨人一样沿当前朝向起步、走弧线转正，不再横向滑移。人类阶段的 `animate()` 现在也收到 `turn_target/backward/blocked`，与巨人共用同一套输入语义。
+- **巨人速度默认 2×（`rust/src/settings.rs`）**：`GameSettings::for_mode` 的成长与大乱斗默认 `giant_speed` 由 4.0 改为 2.0，已保存的自定义值继续按存档读取。
+- **手部动作时长与移动倍率解耦（`rust/src/round/hands.rs`）**：`HandMove::duration` 去掉 `pace` 参数，只按体型缩放。25.2 米基准仍是挥拳 2.4 秒／抓捏 4.5 秒，但把巨人速度调到 2× 后动作时长不再缩短一半。
+- **坐压改按当前朝向直接落座（`rust/src/round/sit.rs`）**：删除 `SitPhase::Turn` 与 `TURN_TIMEOUT/TURN_ENTER`，`begin_sit` 直接进入 `Drop`；玩家、触屏与 AI 共用这一行为。落区判定 `seat_targets`（身体前方）换成 `rear_landing_targets` + `Giant::lands_on`（骨盆实际落点后方），预警圈与 `sit_impact` 用的是同一个 `sit_center()`。AI 交战坐压要求目标已落在后方落区；战斗坐压新增 `COMBAT_HOLD_CAP = 2.2 s` 的短停留，并在落座前目标走出落区时进入新的 `SitPhase::Cancel` 倒放回站姿、不结算伤害。玩家按键起身与待机坐不受影响。
+
+### 二、开局、复活与成长收益
+
+- **大乱斗开局分隔（`rust/src/round/growth.rs`）**：新增 `brawl_opening_position` 与 `BRAWL_OPENING_MIN/MAX = 60/100 m`，第二座位优先在距第一名 60–100 米的可行点上随机落点；紧凑地图自动退回原安全规则。实测三次开局分别 99／76／80 米。
+- **大乱斗复活与击倒金币**：新增 `BrawlSettings.respawn_min_height`（默认 15 米，与 `respawn_max_height = 30` 组成 15–30 米窗口，存档键与设置页同步）；`drop_brawl_coin` 改为落在被击倒者附近的可拾取点（`brawl_drop_position` 做环形净空搜索），不再是攻击者脚下；新增 `BRAWL_CATCH_UP_BONUS = 0.6`，落后巨人的击倒金币最多 +60 %。
+- **成长巨人阶段收益**：默认 `coin_growth_rate` 10 % → 1 %、`building_growth_rate` 10 % → 3 %（计划区间 0–2 % 与 2–4 % 的中间值），三档倍率仍是 1×／2.5×／5×。
+- **寻币与雷达（`rust/src/round/growth.rs`）**：新增 `coin_reachable_before_expiry`（直线距离 × `COIN_ROUTE_DETOUR = 1.35` ÷ 人类步速 + 档位读条 + `COIN_ROUTE_MARGIN = 1 s`），玩家模糊雷达与 AI 寻币都跳过预期会过期的币；隔楼仍按方向指引，不做视线过滤。
+- **桌面天灾**：`desk_hazards_enabled()` 在成长模式要求场上已经有非人类巨人，人类阶段不再触发致死区；沙盒与大乱斗节奏不变。
+
+### 三、选项与画面
+
+- **成长模式行人选项**：`scenes/settings_schema.gd` 里 `npc_initial/npc_respawn/npc_interval` 的 `modes` 收窄为 `[0, 1]`（成长与大乱斗不刷行人），存档键不变。
+- **文案校正**：矮化「人类速度」（含成长人类阶段、不含巨人阶段）、「身高上限」（撞上即停长）、「巨人速度」（手部时长不受影响）、「AI 自动坐压」与「坐压目标数」（后方落区）、金币/拆楼成长（三档倍率与分档限制）。
+- **随机开局先定形态**：新增 `random_growth_scale(giant_height, giant_max_height, force_human)`，先决定人类/巨人形态再抽身高；人类阶段固定 1.8 米且不再被 `HeightBands` 抬成 40 米，巨人档从配置开局身高抽到上限。多座位随机开局在最后一个座位仍未抽到人类时强制一名人类，显式全巨人配置继续尊重。
+- **海雾平滑过渡（`rust/src/game.rs`）**：`view_fog_density` 由硬切换改成阈值下方 60 米带的 smoothstep 淡出，默认点仍为 0，阈值下方斜率连续。
+
+### 审查修复（子代理只读审查后补）
+
+- **压制期间不能自坐**：`maybe_start_sit` 与 `sit_ready` 都加上 `pinned_by.is_none()`。此前被坐压的玩家按键盘 `X` 会启动第二个坐压状态机，出现「HUD 显示被压制但模型在播坐压」的矛盾状态（触屏按钮本来就禁用，属键盘专属漏洞）。新增回归 `A pinned giant does not start a sit of its own`。
+- **取消判定用真实命中半径**：`Giant::lands_on` 的 reach 由 `sit_radius + 0.5 × 半径` 改为 `sit_radius + 半径`，与 `ImpactArea` 的命中判定一致。旧系数让 25.2 米同级对手存在约 1.45 米宽的误判环带——本该命中的坐压会被当成空挥取消。
+- **AI 建筑坐压不再空转**：`maybe_start_ai_building_sit` 新增 `lands_on(surface, 建筑半径)` 门槛并改为战斗坐压语义。此前 AI 面朝建筑坐下，骨盆落在背离建筑一侧，完整跑完 drop/hold/rise 却零伤害，然后冷却再坐——无限空转。
+- **人群坐压纳入战斗语义**：`crush_targets` 触发的坐压也标记 `combat`，获得 2.2 秒短停留与落空安全取消。
+- **结算期间不覆盖坐姿**：`update_giant` 的 `Outcome != Active` 早退只在 `sit.is_none() && pinned_by.is_none()` 时调用 `animate`，避免行走/待机姿态盖掉坐姿。
+- **HUD 阶段映射**：`interface.gd` 删掉已不存在的 `sit_turn` 分支，补 `sit_cancel`（“收起坐姿”），不再出现空标签状态框。
+- **测试清理**：`brawl_playtest` 的同体型分支删掉已不可能发生的 `sit_hit` 等待条件（此前固定多跑 620 帧）。
+
+### 四、验收
+
+- Rust 锁定构建通过，`cargo test --locked` **63/63**；Godot 启动校验退出码 0。
+- 全部 8 套 `--headless` 回归 **774/774**：`playtest` 251、`growth_playtest` 233、`brawl_playtest` 64、`touch_playtest` 43、`mode_menu_playtest` 45、`sit_crush_gameplay_playtest` 45、`sit_crush_playtest` 58、`audio_playtest` 35。
+- 同皮肤同速度 100／200／500 米直行复测：脚跟峰值占身高 20.6 %／20.6 %／20.6 %，单脚摆动距离 51.5 %／51.7 %／51.6 %，峰值悬停 0.69／1.13／2.22 秒；支撑脚锁定、落脚预警与真实命中误差均 < 0.05。
+- 成长人类 1.8 米：纯后退 45 帧位移 +2.55 米且 `rotation.y` 保持 0，`speed_scale = -0.60` 倒放；侧向输入转至 −84.1° 并沿弧线位移 2.83 米。
+- 视觉核验在隔离 `Xvfb` 显示中完成（未占用真实桌面）：坐压落座全程朝向 0° 不变、琥珀落区圈在身体后方；成长巨人 40 米在 2× 下 60 帧前进 19.53 米，挥拳实测 179 帧（2.98 s，理论 3.02 s）。
+- `git ls-files assets/characters/yumeka/` 为空。源码包已按项目流程同步到 `gdrive:gba-sync/gba_code_latest.tar.gz`。
+
+---
+
+## 2026-11-28 — Android ARM64 调试 APK 重建
+
+- `ANDROID_SDK_ROOT=~/Android/Sdk PATH=~/.cargo/bin:$PATH ./scripts/build_android.sh` 一次通过，产物 `build/harbor-alert-debug.apk`（171 MB）。
+- 重新交叉编译了 `native/libharbor_android.so`（6.2 MB，NDK r29 / Android 24，aarch64），APK 内嵌副本与工程内文件 SHA-256 一致，确认不是旧扩展。
+- APK 校验：`org.gba.harboralert`、`Scalebreaker`、versionCode 1 / 0.1.0、minSdk 24、targetSdk 36、`native-code: arm64-v8a`、`lib/arm64-v8a/{libgodot_android.so, libharbor_android.so, libc++_shared.so}`；`apksigner verify` 通过（Godot debug 证书）。
+- 回归：x86_64 启动检查正常，`touch_playtest` 通过。
+
+---
+
+## 2026-11-28 — Linux ARM64（aarch64）构建
+
+- 新增 `Linux ARM64` 导出预设（`binary_format/architecture="arm64"`，产物落到 `build/linux-arm64/`）。
+- `native/harbor.gdextension` 补 `linux.debug.arm64` / `linux.release.arm64`，指向新文件 `native/libharbor_linux_arm64.so`；x86_64 两条保持原样，不覆盖 `native/libharbor.so`。
+- 新增 `scripts/build_linux_arm64.sh`：用 zig（`zig cc -target aarch64-linux-gnu.2.28`）当 `aarch64-unknown-linux-gnu` 的链接器交叉编译 Rust 扩展，再导入资源并导出。全部用户级安装，不需要 root / `sudo` / 发行版 `cross-aarch64-gcc`。
+- `.so` 的 `DT_NEEDED` 仅 `libm/libc/libpthread/libdl`，最高符号版本 `GLIBC_2.28`，导出 `gdext_rust_init`。
+- 验证：`scripts/build_linux_arm64.sh` 一次跑通；产物在 qemu-aarch64 + Debian 12 arm64 根文件系统里 `--headless` 启动无扩展加载错误，独立探针工程确认 ARM64 引擎下 `HarborGame`/`HarborRound` 均注册且可实例化（`arch=arm64`）。
+- 回归：x86_64 启动检查 + `playtest`、`growth_playtest`、`touch_playtest`、`brawl_playtest`、`sit_crush_gameplay_playtest` 全部通过。
+- 渲染器未改，仍是 Vulkan `mobile`；纯 OpenGL 的 aarch64 设备需 `--rendering-driver opengl3`。真机 aarch64 硬件未测试，只在 qemu 用户态模拟下验证加载与启动。
+
+---
+
+## 2026-11-28 — 外来重步和坐压震动的半径上限翻倍
+
+- 沙盒与撤离的范围倍率上限由 2.2 提至 4.4，成长与大乱斗的范围基值上限由 220 米提至 440 米。重步的最终半径上限为 585.2 米，坐压为 704 米。落脚命中与镜头震动分别结算。
+- 单测覆盖两套公式的新范围边界。500 米沙盒的全身机位继续验证范围外的实际自身落脚反馈，同时检查跟脚和第一人称机位。
+
+Rust 锁定构建和 59 项单测通过，Godot 启动及 8 套无界面回归共 735 项通过。Yumeka 资产跟踪列表为空。视觉未验证。
+
+开发前快照位于 `backups/20261128_015301_double_shake_reach/`，含开工前已有的改动。
+
+---
+
+## 2026-11-28 — 恢复大体型巨人的自身落地震动
+
+- 自己的重步和坐压直接产生镜头震动与对应低频音效，继续受自身震动开关和全局强度控制。沙盒第三人称按相机臂长补偿震动位移，避免拉远后画面反馈太小。外来震动保留原来的距离衰减。
+- 修复前，500 米沙盒巨人实际落脚时，三个机位到鞋底的距离均超过 292.6 米的重步震动半径上限，镜头反馈为零。新增回归逐一检查全身、跟脚、第一人称三种视角的实际落脚反馈。
+
+Rust 锁定构建和 58 项单测通过，Godot 启动及 8 套无界面回归共 735 项通过。Yumeka 资产跟踪列表为空。视觉未验证。
+
+开发前快照位于 `backups/20261128_013838_tall_own_shake/`，含开工前已有的改动。
+
+---
+
+## 2026-11-28 — 大体型巨人完整步幅与更长的抬脚悬停
+
+开发前快照为 `backups/20261128_012211_full_stride_hover/`。快照基于 `88b82c1`，同时保存了开工前已有的文件改动。
+
+- 直行时，起步、前摆目标、抬脚高度与收步都以身体尺寸为基准。大体型延长步态周期和实际悬停时间，地速仍走同一条体型曲线。
+- 落脚预告从实际推进的步态相位计算剩余时间。平地支撑鞋保持世界锚定，锁定的鞋底落点继续驱动重步命中。保留开工前的前摆平脚修正。
+- Godot `--headless` 在固定 60 Hz、Kawaii、沙盒 1× 直行条件下逐身高量取 3 个稳定步。100／200／500 米的脚跟峰值均约占身高 20.6%，前摆距离约占 51.5%／51.7%／51.6%，峰值附近的悬停分别为 0.69／1.13／2.22 秒。
+
+Rust 锁定构建和 58 项单测通过。Godot 启动校验及 8 套 `--headless` 回归共 732 项全部通过。另测 500 米巨人的 90° 弧线转向、支撑脚锚定和松键收步，静止后无额外落脚。Yumeka 资产跟踪列表为空。视觉未验证。
+
+---
+
 ## 2026-11-28 — 成长金币质变、错峰补刷与巨人近战
 
 改动前快照在 `backups/20261127_235236_growth_coin_combat/`，基准提交为 `b32dc10`。提交后可用 `git revert <本次提交>` 回滚整组改动，也可从快照恢复源码和原移动端字体。

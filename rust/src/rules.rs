@@ -5,6 +5,8 @@ pub const HUMAN_RADIUS: f32 = 0.42;
 pub const GIANT_WALK: f32 = 7.0;
 pub const AI_WALK: f32 = 6.5;
 pub const GIANT_BACKWARD_MULT: f32 = 0.74;
+/// A growth-mode human backs up slower than it walks forward.
+pub const HUMAN_BACKWARD_MULT: f32 = 0.60;
 pub const GIANT_RADIUS: f32 = 2.9;
 pub const GIANT_START_HEIGHT: f32 = 25.2;
 pub const GIANT_DEFAULT_MAX_HEIGHT: f32 = 500.0;
@@ -24,10 +26,10 @@ pub fn giant_size_speed_factor(scale: f32) -> f32 {
     if scale <= 1.0 {
         scale
     } else {
-        // Match visual stride compression above 3.5x height while scaling ground speed upward
-        // with stride length so colossal giants never feel sluggish.
-        let step_scale = (3.5 / scale).min(1.0).powf(0.62).clamp(0.30, 1.0);
-        (scale * step_scale).powf(0.72)
+        // Ground speed increases with size. The slower increase above 3.5x
+        // lets full-length colossal steps spend longer in the air.
+        let speed_scale = (3.5 / scale).min(1.0).powf(0.62).clamp(0.30, 1.0);
+        (scale * speed_scale).powf(0.72)
     }
 }
 

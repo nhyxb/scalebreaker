@@ -59,6 +59,7 @@ func _run() -> void:
 	await _smallest_map()
 	await _own_camera_shake_toggle()
 	await _desk_hazards_finger_poke()
+	await _tall_own_camera_shake()
 	_check(_game.get_screen() == "menu", "both modes returned to the title")
 	if FileAccess.file_exists(settings_path):
 		DirAccess.remove_absolute(settings_path)
@@ -921,12 +922,17 @@ func _finish_walking_step() -> void:
 	var planned: Dictionary = {}
 	var peak_lift := 0.0
 	var max_support_slip := 0.0
+	var min_swing_pitch := 9.0
+	var max_swing_pitch := -9.0
 	var support_start := Vector3.INF
 	var airborne := ""
 	var support := ""
 	Input.action_press("move_forward")
 	for frame in 90:
 		await physics_frame
+		var tel_w: Dictionary = giant.get_turn_telemetry()
+		min_swing_pitch = minf(min_swing_pitch, minf(float(tel_w["left_foot_pitch"]), float(tel_w["right_foot_pitch"])))
+		max_swing_pitch = maxf(max_swing_pitch, maxf(float(tel_w["left_foot_pitch"]), float(tel_w["right_foot_pitch"])))
 		var gait := FootfallFixture.actor(current)
 		if not gait.get("footfall_pending", false):
 			continue
@@ -949,6 +955,8 @@ func _finish_walking_step() -> void:
 	var actual: Vector3 = landed.get("last_footfall_center", Vector3.INF)
 	_check(peak_lift > 2.0 and max_support_slip < 0.06 and target != Vector3.INF,
 			"The loaded support shoe remains fixed in world space during a high swing")
+	_check(min_swing_pitch >= -0.02 and max_swing_pitch <= 0.02,
+			"Walking heavy-step lift keeps the shoe level without pitching the toe upward (min=%.3f max=%.3f)" % [min_swing_pitch, max_swing_pitch])
 	_check(int(landed.footfall_count) == before + 1
 			and target.slide(Vector3.UP).distance_to(actual.slide(Vector3.UP)) < 0.1,
 			"Releasing movement finishes the committed touchdown on its projected mark")
@@ -1928,6 +1936,31 @@ func _camera_shake() -> void:
 	await _ticks(140)
 	_check(absf(camera.v_offset) < 0.01, "the footstep shake settles once the giant stops")
 	_game.show_menu()
+
+
+func _tall_own_camera_shake() -> void:
+	var options: Dictionary = _game.default_mode_settings(1)
+	options.merge({"giant_height": 500.0, "giant_max_height": 500.0, "npc_initial": 0,
+			"npc_respawn": false, "desk_hazards": false}, true)
+	_game.save_settings(_game.get_settings(false), options)
+	for view: int in [0, 1, 2]:
+		_game.start_mode(true)
+		var current := _round()
+		var giant := _actor(1)
+		FootfallFixture.face(current, giant, 0.0)
+		giant.position = Vector3(0.0, 0.02, 410.0)
+		current.set_camera_view(view)
+		await _ticks(8)
+		var landed := await FootfallFixture.land(current, Callable(), 600)
+		var camera := root.get_camera_3d()
+		var distance := camera.global_position.distance_to(landed.get("last_footfall_center", Vector3.INF))
+		var shake := absf(camera.rotation.x) if view == 2 else absf(camera.v_offset) / camera.position.z
+		# The full-body camera has to prove self feedback beyond the external falloff.
+		_check(not landed.is_empty() and is_equal_approx(current.snapshot().giant_height, 500.0)
+				and (view != 0 or distance > 585.2) and shake > 0.005,
+				"500 m giant feels its own step in view %d (%.1f m, %.4f)"
+				% [view, distance, shake])
+		_game.show_menu()
 
 
 func _own_camera_shake_toggle() -> void:

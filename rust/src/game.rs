@@ -33,15 +33,24 @@ const FOG_MAP_END: f32 = 1.12;
 const FOG_ALTITUDE_BEGIN_SLACK: f32 = 0.45;
 const FOG_ALTITUDE_END_SLACK: f32 = 0.85;
 
+/// Fog density eases out over a band below the shipped view distance instead of snapping
+/// off at the threshold, so dragging the slider never pops the sea haze.
 fn view_fog_density(draw_distance: f32) -> f32 {
     // At or above the shipped view distance the whole city sits inside a tabletop diorama frame
     // on the bedroom desk, so zero fog density removes the pale glow along the wood rim while
     // lowered view-distance settings still keep their distance-veiling haze.
-    if draw_distance >= DEFAULT_VIEW_DISTANCE {
-        0.0
-    } else {
-        0.85
+    const FULL_FOG: f32 = 0.85;
+    const FADE_BAND: f32 = 60.0;
+    let edge = DEFAULT_VIEW_DISTANCE;
+    if draw_distance >= edge {
+        return 0.0;
     }
+    if draw_distance <= edge - FADE_BAND {
+        return FULL_FOG;
+    }
+    let t = ((draw_distance - (edge - FADE_BAND)) / FADE_BAND).clamp(0.0, 1.0);
+    // Smoothstep keeps both ends tangent-free, which matters most right at the threshold.
+    FULL_FOG * (1.0 - t * t * (3.0 - 2.0 * t))
 }
 
 fn view_fog_bounds(draw_distance: f32, camera_height: f32, map_side: f32) -> (f32, f32) {
@@ -619,6 +628,19 @@ mod tests {
         // has no white edge glow, while lowered view distances restore boundary fog.
         assert_eq!(view_fog_density(DEFAULT_VIEW_DISTANCE), 0.0);
         assert_eq!(view_fog_density(460.0), 0.0);
-        assert!(view_fog_density(DEFAULT_VIEW_DISTANCE - 40.0) > 0.5);
+        // The band below the shipped distance eases the haze instead of popping it: the
+        // value shrinks monotonically as the slider approaches the threshold.
+        let band = (0..=6)
+            .map(|step| {
+                let offset = 60.0 * (1.0 - step as f32 / 6.0);
+                view_fog_density(DEFAULT_VIEW_DISTANCE - offset)
+            })
+            .collect::<Vec<_>>();
+        assert!(band[0] > 0.80 && band[0] < 0.86);
+        assert!(band[band.len() - 1] < 1e-5);
+        assert!(band.windows(2).all(|pair| pair[1] <= pair[0] + 1e-6));
+        assert!(view_fog_density(DEFAULT_VIEW_DISTANCE - 30.0) > 0.2);
+        assert!(view_fog_density(DEFAULT_VIEW_DISTANCE - 30.0) < 0.7);
+        assert!(view_fog_density(DEFAULT_VIEW_DISTANCE - 61.0) > 0.84);
     }
 }

@@ -47,8 +47,8 @@ func _run() -> void:
 	await process_frame
 	_check((panel.find_child("coin_count", true, false) as SpinBox).value == 200.0
 			and (panel.find_child("coin_interval", true, false) as SpinBox).value == 60.0
-			and (panel.find_child("coin_growth_rate", true, false) as SpinBox).value == 10.0
-			and (panel.find_child("building_growth_rate", true, false) as SpinBox).value == 10.0,
+			and (panel.find_child("coin_growth_rate", true, false) as SpinBox).value == 1.0
+			and (panel.find_child("building_growth_rate", true, false) as SpinBox).value == 3.0,
 			"touch growth settings expose the map-wide coin defaults and split growth rates")
 	_game.notification(Node.NOTIFICATION_WM_GO_BACK_REQUEST)
 	_check(not panel.visible and _game.get_screen() == "menu", "Back dismisses settings first")

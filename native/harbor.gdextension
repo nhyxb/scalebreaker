@@ -5,4 +5,6 @@ compatibility_minimum = "4.7"
 [libraries]
 linux.debug.x86_64 = "res://rust/target/debug/libharbor.so"
 linux.release.x86_64 = "res://rust/target/release/libharbor.so"
+linux.debug.arm64 = "res://native/libharbor_linux_arm64.so"
+linux.release.arm64 = "res://native/libharbor_linux_arm64.so"
 android.arm64 = "res://native/libharbor_android.so"
