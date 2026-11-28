@@ -10,9 +10,8 @@ extends Node3D
 ##          per proxy for every building outside `NEAR_RADIUS`, shadows off
 ##   ruin   one shared rubble mound for every collapsed building, shadows off
 ##
-## A building is hidden by clearing its instance transform (`Transform3D()` collapses the
-## triangle to a point), so `scenes/damageable.gd` can keep driving the collapse animation
-## and the walkable rubble on the original node while the batch owns the intact/ruin looks.
+## Hidden slots use zero scale to collapse the mesh to a point. The original building
+## node still drives the collapse animation and the walkable rubble.
 ## `cracked` buildings are tinted through the per-instance colour instead of a material
 ## overlay, which costs nothing.
 
@@ -28,6 +27,7 @@ const LOW_DETAIL_PROXIES: PackedStringArray = [
 ]
 const BOX_PROXY := "proxy/box"
 const CRACK_TINT := Color(0.52, 0.42, 0.36)
+const HIDDEN_TRANSFORM := Transform3D(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
 
 ## node -> entry index
 var _index_of: Dictionary = {}
@@ -93,7 +93,7 @@ func prepare(targets: Node3D) -> void:
 		entry["far_zeroed"] = false
 	for proxy: String in proxy_raw:
 		var node := _make_layer("Far_%s" % String(proxy).get_slice("/", -1), proxy_raw[proxy], true)
-		node.multimesh.instance_count = maxi(1, far_counts.get(proxy, 0))
+		node.multimesh.instance_count = far_counts.get(proxy, 0)
 		_far_nodes[proxy] = node
 	for i in _entries.size():
 		var entry: Dictionary = _entries[i]
@@ -108,8 +108,6 @@ func _make_layer(node_name: String, mesh: Mesh, colors: bool) -> MultiMeshInstan
 	batch.transform_format = MultiMesh.TRANSFORM_3D
 	batch.use_colors = colors
 	batch.mesh = mesh
-	batch.instance_count = 1
-	batch.set_instance_transform(0, Transform3D())
 	var instance := MultiMeshInstance3D.new()
 	instance.name = node_name
 	instance.multimesh = batch
@@ -161,10 +159,6 @@ func _refill(flat: Vector2, force: bool) -> void:
 func _fill_near(node: MultiMeshInstance3D, indices: Array) -> void:
 	var mm := node.multimesh
 	node.set_meta(&"live", indices.size())
-	if indices.is_empty():
-		mm.instance_count = 1
-		mm.set_instance_transform(0, Transform3D())
-		return
 	mm.instance_count = indices.size()
 	for slot in indices.size():
 		var entry: Dictionary = _entries[indices[slot]]
@@ -181,7 +175,7 @@ func _write_far(entry: Dictionary, zeroed: bool) -> void:
 	if slot >= node.multimesh.instance_count:
 		return
 	if zeroed:
-		node.multimesh.set_instance_transform(slot, Transform3D())
+		node.multimesh.set_instance_transform(slot, HIDDEN_TRANSFORM)
 		return
 	node.multimesh.set_instance_transform(slot, _instance_transform(entry, true))
 	node.multimesh.set_instance_color(slot, CRACK_TINT if entry["cracked"] else entry["color"])
@@ -250,10 +244,6 @@ func clear_ruin(node: Node3D) -> void:
 
 func _refill_ruins() -> void:
 	var mm := _ruin_node.multimesh
-	if _ruins.is_empty():
-		mm.instance_count = 1
-		mm.set_instance_transform(0, Transform3D())
-		return
 	mm.instance_count = _ruins.size()
 	for slot in _ruins.size():
 		var entry: Dictionary = _entries[_ruins[slot]]
@@ -277,7 +267,7 @@ func _clear_slot(entry: Dictionary, key: String) -> void:
 	var node: MultiMeshInstance3D = _near_nodes[entry["spec"]] if key == "near_slot" \
 			else _far_nodes[entry["proxy"]]
 	if slot < node.multimesh.instance_count:
-		node.multimesh.set_instance_transform(slot, Transform3D())
+		node.multimesh.set_instance_transform(slot, HIDDEN_TRANSFORM)
 	entry[key] = -1
 
 

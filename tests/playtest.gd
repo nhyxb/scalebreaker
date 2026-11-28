@@ -4,6 +4,7 @@ extends SceneTree
 const MAP := "MapSlot/Round"
 const PLAYERS := ["Human", "Giant"]
 const FootfallFixture = preload("res://tests/footfall_fixture.gd")
+const DistrictBatches = preload("res://scenes/district_batches.gd")
 const GROWTH_PER_BUILDING := 1.10
 const CORE_SPAWN := Vector3(0.0, 0.02, -34.0)
 const BUILDING_LAYER := 8
@@ -1810,6 +1811,18 @@ func _expanded_harbor() -> void:
 	_check(cheap, "the three historic blocks now use the low-face Kenney kit models")
 	_check(district.get_node("Lots").get_child_count() < 500,
 			"district lot pads are batched into fewer render nodes")
+	var batches := district.get_node("BuildingBatches")
+	var ruins := batches.get_node("Ruins") as MultiMeshInstance3D
+	_check(DistrictBatches.HIDDEN_TRANSFORM.basis.get_scale() == Vector3.ZERO
+			and ruins.multimesh.instance_count == 0,
+			"hidden building slots collapse to zero scale and an empty ruin layer has no instance")
+	batches.update_for_camera(Vector3(gsize.x, 0.0, gsize.z))
+	var detail_layers := batches.find_children("Near_*", "MultiMeshInstance3D", false, false)
+	_check(not detail_layers.is_empty() and detail_layers.all(
+			func(layer: MultiMeshInstance3D) -> bool: return layer.multimesh.instance_count == 0),
+			"detail layers have no placeholder instances when the camera moves out of range")
+	batches.update_for_camera(root.get_camera_3d().global_position)
+	_check(batches.stats().near_live > 0, "detail layers refill when the camera returns")
 	# Every building is visible across the whole map now, so a far demolition still updates
 	# collision and the ruin layer but skips the hand-built collapse model nobody can see.
 	var far_target: Node3D = null
