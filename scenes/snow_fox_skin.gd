@@ -1,22 +1,14 @@
-extends "res://scenes/giant_skin.gd"
+extends "res://scenes/vrm_skin.gd"
 ## Snow fox (VRoid/VRM humanoid) giant skin: retargets J_Bip_* bones onto the Kawaii
 ## driver, re-shades the MToon/unlit materials, and swings hair + fox tail from the
 ## giant's existing two-layer springs (no physics bodies, no skirt drive).
 
 const MODEL := preload("res://assets/characters/snow_fox.glb")
 
-# 1.4398 m tall VRM -> 1.7047 m Kawaii, so the 25.2 m giant capsule is filled exactly.
-const FIT_SCALE := 1.1840
-
-# Keep the body clear of the ground; tuned against the sit / sit-idle poses.
-const FLOOR_OFFSET := 0.0
-
 # Unlit MToon base color clips into flat chalky white under sunlight (especially with
 # DIFFUSE_TOON's hard step). Use soft Burley matte PBR (roughness ~0.89, specular ~0.16)
 # and restrain bright whites into the 0.84-0.90 range so facial features, bangs, and white
 # maid-dress folds stay readable under AGX daylight and react naturally to dusk/night light.
-const SHADE_ROUGHNESS := 0.89
-const SHADE_SPECULAR := 0.16
 # Warm peach-ivory skin tint so the face reads softly against the white hair and outfit.
 const TINT_SKIN := Color(0.88, 0.83, 0.81)
 # Everything not skin/hair/eye: white maid dress, apron, sleeve frills and stockings.
@@ -41,6 +33,9 @@ class SecondaryChain:
 	var phase := 0.0
 
 
+static var _sole_calibration: Array[Sole] = []
+static var _shaded_meshes: Dictionary = {}
+
 var diffuse_mode := BaseMaterial3D.DIFFUSE_BURLEY
 
 var _chains: Array[SecondaryChain] = []
@@ -54,86 +49,37 @@ var _sec_rot := 0.0
 var _sec_tip_rot := 0.0
 var _sec_head_tilt := 0.0
 
-# VRM humanoid joint -> Kawaii driver joint.
-const DRIVER_BONES := {
-	"J_Bip_C_Hips": "spine",
-	"J_Bip_C_Spine": "spine.001",
-	"J_Bip_C_Chest": "spine.002",
-	"J_Bip_C_UpperChest": "spine.003",
-	"J_Bip_C_Neck": "Neck",
-	"J_Bip_C_Head": "Head",
-	"J_Bip_L_Shoulder": "shoulder.L",
-	"J_Bip_L_UpperArm": "upper_arm.L",
-	"J_Bip_L_LowerArm": "forearm.L",
-	"J_Bip_L_Hand": "hand.L",
-	"J_Bip_R_Shoulder": "shoulder.R",
-	"J_Bip_R_UpperArm": "upper_arm.R",
-	"J_Bip_R_LowerArm": "forearm.R",
-	"J_Bip_R_Hand": "hand.R",
-	"J_Bip_L_UpperLeg": "thigh.L",
-	"J_Bip_L_LowerLeg": "shin.L",
-	"J_Bip_L_Foot": "foot.L",
-	"J_Bip_L_ToeBase": "toe.L",
-	"J_Bip_R_UpperLeg": "thigh.R",
-	"J_Bip_R_LowerLeg": "shin.R",
-	"J_Bip_R_Foot": "foot.R",
-	"J_Bip_R_ToeBase": "toe.R",
-}
-
-# The VRM binds in a T-pose while the Kawaii driver rests in an A-pose. Aligning each
-# segment's rest direction to the driver's removes that bind-pose difference.
-const ALIGN_TOWARD := {
-	"J_Bip_C_Hips": "J_Bip_C_Spine",
-	"J_Bip_C_Spine": "J_Bip_C_Chest",
-	"J_Bip_C_Chest": "J_Bip_C_UpperChest",
-	"J_Bip_C_UpperChest": "J_Bip_C_Neck",
-	"J_Bip_C_Neck": "J_Bip_C_Head",
-	"J_Bip_L_Shoulder": "J_Bip_L_UpperArm",
-	"J_Bip_L_UpperArm": "J_Bip_L_LowerArm",
-	"J_Bip_L_LowerArm": "J_Bip_L_Hand",
-	"J_Bip_R_Shoulder": "J_Bip_R_UpperArm",
-	"J_Bip_R_UpperArm": "J_Bip_R_LowerArm",
-	"J_Bip_R_LowerArm": "J_Bip_R_Hand",
-	"J_Bip_L_UpperLeg": "J_Bip_L_LowerLeg",
-	"J_Bip_L_LowerLeg": "J_Bip_L_Foot",
-	"J_Bip_R_UpperLeg": "J_Bip_R_LowerLeg",
-	"J_Bip_R_LowerLeg": "J_Bip_R_Foot",
-}
-# Keep the shoes level instead of inheriting Kawaii's heeled ankle pitch.
-const ALIGN_YAW := {
-	"J_Bip_L_Foot": "J_Bip_L_ToeBase",
-	"J_Bip_R_Foot": "J_Bip_R_ToeBase",
-}
-
-const FINGERS := {
-	"Index": "f_index",
-	"Middle": "f_middle",
-	"Ring": "f_ring",
-	"Little": "f_pinky",
-	"Thumb": "thumb",
+const VRM_BONES := {
+	"hips": "J_Bip_C_Hips", "spine": "J_Bip_C_Spine", "chest": "J_Bip_C_Chest",
+	"upperChest": "J_Bip_C_UpperChest", "neck": "J_Bip_C_Neck", "head": "J_Bip_C_Head",
 }
 
 
 func configure(driver: Skeleton3D) -> void:
 	_load_model(MODEL)
-	# The face and hair (which carries the fox ears) are separate skins, so first person
-	# hides those; the body mesh is cropped at the neck instead, because the scalp skin and
-	# the blue-grey HairBack lock live in that mesh and would hang in view from above.
+	# The body contains a scalp and the back hair, so it also needs a first-person crop.
 	_configure_visibility(&"J_Bip_C_Head", [&"Face", &"Hair"], [&"Body"])
-	scale = Vector3.ONE * FIT_SCALE
-	position.y = FLOOR_OFFSET
+	_fit_height()
+	var bones := VRM_BONES.duplicate()
+	for side in ["left", "right"]:
+		var prefix := "J_Bip_L_" if side == "left" else "J_Bip_R_"
+		for limb: String in LIMBS:
+			bones[side + limb] = prefix + ("ToeBase" if limb == "Toes" else limb)
+		for digit: String in FINGERS:
+			var segments := ["Proximal", "Intermediate", "Distal"]
+			if digit == "Thumb":
+				segments = ["Metacarpal", "Proximal", "Distal"]
+			for index in segments.size():
+				bones[side + digit + segments[index]] = prefix + digit + str(index + 1)
 
-	var mapping := DRIVER_BONES.duplicate()
-	for side in ["L", "R"]:
-		for prefix in FINGERS:
-			for segment in [1, 2, 3]:
-				var vrm := "J_Bip_%s_%s%d" % [side, prefix, segment]
-				if skeleton.find_bone(vrm) < 0:
-					continue
-				mapping[vrm] = "%s.%02d.%s" % [FINGERS[prefix], segment, side]
-
-	_shade_unlit_materials()
-	_configure_pose(driver, mapping, ALIGN_TOWARD, ALIGN_YAW)
+	_shade_vrm_materials(material_tint, diffuse_mode, true, _shaded_meshes)
+	_retarget(driver, bones)
+	if _sole_calibration.is_empty():
+		follow_pose()
+		_measure_soles(bones)
+		_sole_calibration = soles
+	else:
+		soles = _sole_calibration
 	_init_secondary_chains()
 
 
@@ -155,12 +101,6 @@ func follow_pose(pelvis_scale := 1.0) -> void:
 	super.follow_pose(pelvis_scale)
 	if _sec_ready:
 		_apply_secondary_motion()
-
-
-# MToon arrives as KHR_materials_unlit, which shades nothing. Re-shade to soft matte PBR
-# so facial features and white garment folds read clearly under AGX sunlight and night light.
-func _shade_unlit_materials() -> void:
-	shade_anime_materials(meshes, material_tint, diffuse_mode, SHADE_ROUGHNESS, SHADE_SPECULAR)
 
 
 ## Tint for one imported material. Every family except the eyes is dimmed so nothing turns

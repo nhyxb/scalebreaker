@@ -45,6 +45,8 @@ const FIRST_PERSON_EYE_UP := 0.055
 const FIRST_PERSON_EYE_FORWARD := 0.045
 const FIRST_PERSON_EYE_FALLBACK := 0.90
 const GiantSkin := preload("res://scenes/giant_skin.gd")
+const VrmSkin := preload("res://scenes/vrm_skin.gd")
+const VrmLibrary := preload("res://scenes/vrm_library.gd")
 const SKINS := {
 	&"Kawaii": null,
 	&"Hina": preload("res://scenes/hina_skin.gd"),
@@ -113,14 +115,6 @@ const CHIBI_SOLE: Array[Vector2] = [
 	Vector2(0.0, 1.0), Vector2(-0.43, 0.91), Vector2(-0.73, 0.70),
 	Vector2(-0.93, 0.37),
 ]
-const SNOW_FOX_SOLE: Array[Vector2] = [
-	Vector2(-1.0, -0.22), Vector2(-0.94, -0.50), Vector2(-0.76, -0.77),
-	Vector2(-0.24, -0.94), Vector2(0.35, -1.0), Vector2(0.75, -0.86),
-	Vector2(0.90, -0.75), Vector2(1.0, -0.35), Vector2(0.75, 0.67),
-	Vector2(0.67, 0.90), Vector2(0.21, 1.0), Vector2(-0.37, 0.87),
-	Vector2(-0.54, 0.63),
-]
-
 const HAIR_FRONT := 0
 const HAIR_SIDE_L := 1
 const HAIR_SIDE_R := 2
@@ -237,6 +231,7 @@ static var _headless_body_meshes := {}
 static var _skin_rng := RandomNumberGenerator.new()
 
 var skin_name: StringName = &"Kawaii"
+var _use_player_vrm := false
 var _active_skin: GiantSkin
 var _kawaii_meshes: Array[MeshInstance3D] = []
 var _first_person_enabled := false
@@ -593,10 +588,15 @@ func _human_motion(speed: float, delta: float, backward := false) -> bool:
 
 
 func _roll_skin() -> void:
-	_set_skin(SKINS.keys()[_skin_rng.randi_range(0, SKINS.size() - 1)])
+	var rolled: StringName = SKINS.keys()[_skin_rng.randi_range(0, SKINS.size() - 1)]
+	var avatar := VrmLibrary.active_avatar() if _use_player_vrm else null
+	if avatar != null:
+		_set_skin(&"Custom VRM", avatar)
+	else:
+		_set_skin(rolled)
 
 
-func _set_skin(next: StringName) -> void:
+func _set_skin(next: StringName, avatar: VrmSkin.Loader.Avatar = null) -> void:
 	if next == skin_name:
 		return
 	_clear_hit_overlay()
@@ -604,9 +604,11 @@ func _set_skin(next: StringName) -> void:
 		_active_skin.free()
 		_active_skin = null
 	skin_name = next
-	var skin_script: Script = SKINS[next]
+	var skin_script: Script = VrmSkin if avatar != null else SKINS.get(next)
 	if skin_script != null:
 		_active_skin = skin_script.new()
+		if avatar != null:
+			_active_skin.avatar = avatar
 		_active_skin.name = next
 		_model.add_child(_active_skin)
 		_active_skin.configure(_skeleton)
@@ -741,7 +743,9 @@ func set_first_person(enabled: bool) -> void:
 	if _human_stage:
 		_set_head_part_hidden(_human_head, enabled)
 		return
-	if _active_skin != null:
+	if _active_skin is VrmSkin:
+		_active_skin.set_first_person(enabled)
+	elif _active_skin != null:
 		for body in _active_skin.body_meshes:
 			_apply_body_visibility(body, _active_skin.body_meshes[body], _active_skin.head_bone, enabled)
 		for attachment in _active_skin.head_parts:
@@ -4320,6 +4324,11 @@ func _make_leg(side: String) -> Leg:
 
 
 func _configure_soles() -> void:
+	var vrm := _active_skin as VrmSkin
+	if vrm != null and vrm.soles.size() == 2 and vrm.soles[0] != null and vrm.soles[1] != null:
+		_set_vrm_sole(_left, vrm.soles[0])
+		_set_vrm_sole(_right, vrm.soles[1])
+		return
 	match skin_name:
 		&"Hina":
 			_set_sole(_left, Vector2(-0.00439, -0.05249), Vector2(0.04299, 0.11174),
@@ -4331,14 +4340,13 @@ func _configure_soles() -> void:
 					CHIBI_SOLE, Vector3(0.053673, 0.252530, 0.155612))
 			_set_sole(_right, Vector2(-0.00112, -0.05898), Vector2(0.06962, 0.10730),
 					_mirror_sole(CHIBI_SOLE), Vector3(-0.047441, 0.246573, 0.151885))
-		&"Snow Fox":
-			_set_sole(_left, Vector2(-0.00345, -0.06277), Vector2(0.03903, 0.10355),
-					SNOW_FOX_SOLE, Vector3(0.002914, -0.076119, 0.053432))
-			_set_sole(_right, Vector2(0.00345, -0.06270), Vector2(0.03903, 0.10362),
-					_mirror_sole(SNOW_FOX_SOLE), Vector3(-0.002914, -0.076119, 0.053372))
 		_:
 			_set_sole(_left, Vector2(0.01038, -0.06827), Vector2(0.04747, 0.09271), KAWAII_SOLE)
 			_set_sole(_right, Vector2(-0.01038, -0.06826), Vector2(0.04747, 0.09272), _mirror_sole(KAWAII_SOLE))
+
+
+func _set_vrm_sole(leg: Leg, sole: VrmSkin.Sole) -> void:
+	_set_sole(leg, sole.offset, sole.half_extents, sole.outline, sole.bone_center)
 
 
 func _set_sole(leg: Leg, offset: Vector2, half_extents: Vector2, outline: Array[Vector2],
@@ -4362,6 +4370,9 @@ func _source_sole_world(leg: Leg, source_pose: Transform3D) -> Vector3:
 
 
 func _pin_skin_feet() -> void:
+	var vrm := _active_skin as VrmSkin
+	if vrm != null and (vrm.soles.size() != 2 or vrm.soles[0] == null or vrm.soles[1] == null):
+		return
 	_active_skin.pin_soles(_left.foot, _left.skin_sole_center,
 			_source_sole_world(_left, _skeleton.get_bone_global_pose(_left.foot)),
 			_right.foot, _right.skin_sole_center,

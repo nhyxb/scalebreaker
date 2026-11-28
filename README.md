@@ -123,6 +123,12 @@ done | tee build/harbor-memory.log
 - 巨人行走时平滑转向。松开方向后，已经抬起的鞋会完成落地，身体随后收步。原地小碎步转身用于调整朝向。
 - 四种模式都用 **WASD** 移动，鼠标或方向键环视。按住左右键转动视角，按住上下键抬头或低头。按 **Esc** 暂停或继续。暂停和结算界面可重开本模式或返回港区菜单。
 
+## 自定义巨人皮肤
+
+在主菜单打开 **角色皮肤 → 导入 VRM**。游戏将模型复制到 `user://vrm_skins/` 并选用，下次开局时应用到你操控的巨人。可以切回「随机内置皮肤」、重新选用已导入的模型，或从游戏目录删除副本。Android 通过系统文件选择器选取模型。
+
+支持内嵌网格与贴图的 VRM 0.x / 1.0 人形模型，单个文件上限为 96 MiB。身体沿用游戏的动作和鞋底落点系统，MToon 在游戏中以哑光材质呈现。自定义模型目前使用默认表情与附属骨骼姿态。
+
 ## 玩法设置
 
 主菜单和暂停页都可打开「玩法设置」。每种模式分别保存，重启游戏后会载入上次保存的值。数值可以直接输入。地图边长使用正整数，数量使用整数，人类/巨人速度、初始身高、成长身高上限、基础生命和分档参数须大于零，两个忽略倍率须为非负数。巨人数量至少为一名。
@@ -172,6 +178,7 @@ XDG_DATA_HOME="$PWD/build/xdg" godot --headless --path . --fixed-fps 60 --script
 XDG_DATA_HOME="$PWD/build/xdg" godot --headless --path . --fixed-fps 60 --script res://tests/brawl_playtest.gd
 XDG_DATA_HOME="$PWD/build/xdg" godot --headless --path . --fixed-fps 60 --script res://tests/touch_playtest.gd
 XDG_DATA_HOME="$PWD/build/xdg" godot --headless --path . --fixed-fps 60 --script res://tests/audio_playtest.gd
+XDG_DATA_HOME="$(mktemp -d "$PWD/build/vrm-test.XXXXXX")" godot --headless --path . --fixed-fps 60 --script res://tests/vrm_playtest.gd
 ```
 
 多角色性能用手动探针 `tests/perf_probe.gd` 对比 20 与 60 名角色的物理帧时间。它只打印均值、P50、P95 和最长帧，不作为通过/失败用例。debug 扩展会放大脚本和 Rust 的耗时，先换 release 扩展再运行，测完重新构建调试扩展：

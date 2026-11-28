@@ -197,19 +197,15 @@
 - 节点名兼容契约：`GameplaySettings`、`SaveSettings/CancelSettings/ResetSettings`、`HumanSettingsTab/GiantSettingsTab/GrowthSettingsTab/BrawlSettingsTab`、`SettingsPageGraphics/SettingsPageGameplay`、`NpcRespawn/AudioMuted`，数字项节点名＝存档键。
 - `_save_settings()` 会同时抓取玩法页、音频与显示项（即使用户停在玩法页），避免隐藏页的改动丢失；`_capture_settings_fields()` 只收当前模式适用的键，其余从 `default_mode_settings()` 兜底。
 
-## 雪狐巨人皮肤（2026-11-25 正式接入）
+## VRM 运行时皮肤与内置雪狐（2026-11-28）
 
-- Godot 4.7 仍不认 `.vrm`（`PackedScene` 只认 tscn/res/scn，`.vrm` 在 `--import` 时被静默忽略）；VRM 1.0 就是 glTF 2.0 容器，正式资产是 `~/Documents/AvatarSample_D.vrm`（VRoid 2.16，已按新许可重新打包）复制成的 `assets/characters/snow_fox.glb`。旧的 `assets/characters/_vrm_probe/` 与 `tests/vrm_avatar_skin.gd` 已删除。
-- 皮肤 `scenes/snow_fox_skin.gd`，注册为 `giant_visual.gd` 的 `SKINS` 键 `&"Snow Fox"`（随机皮肤池 4 选 1；`tests/sit_crush_preview.gd` 按 4 切换）。`J_Bip_*` → Kawaii 驱动骨，T-pose 用 `ALIGN_TOWARD` 拉成 A-pose，`FIT_SCALE=1.184`（模型 1.4398 m → Kawaii 1.7047 m）；`FLOOR_OFFSET=0`，实测站立脚底 0.03–0.04 m；`pelvis_height_ratio()` 自动约 1.073，坐压 0.55 进度骨盆落在地面（hips_y≈0.37 m）、不悬空。
-- 材质：MToon 到达时是 `KHR_materials_unlit`；`_shade_unlit_materials()` 复制成 PBR：`DIFFUSE_TOON`、`roughness=1.0`、`metallic=0`、`metallic_specular=0`、`SPECULAR_DISABLED`、`emission_enabled=false`。**按材质名分档 tint**（`material_tint()`）：`SKIN`/`FACE`（含眉睫唇线）`Color(0.80,0.73,0.70)`；`HAIR`/`FoxTail` `Color(0.75,0.78,0.84)`；其余（白女仆装 `Tops_CLOTH`、围裙、白丝袜等未命中项）`Color(0.70,0.71,0.75)`；只有材质名含 `_EYE` 的眼球/高光保持 1.0。旧实现只压暗 SKIN/HAIR 的 0.86，白衣和丝袜完全不压，强光下死白。
-- 二次动态：`giant_skin.gd` 新增可选 `apply_secondary_motion(sway, tip_sway, bounce, tip_bounce, rot_lag, tip_rot, head_down_tilt, dt)`；`giant_visual._update_hair()` 在 `_active_skin != null` 时不再写隐藏的 Kawaii 发骨，改为在 `_distant_clipped`/剪影之外把弹簧值转发给皮肤。雪狐只驱动 `J_Sec_Hair*`（11 条锁，每条 2–5 节）和 `J_Opt_C_FoxTail*`（5 节）；裙骨未动（裙摆靠 `SkirtFront*` 继承大腿、`SkirtSide/Back` 继承髋）。
-- 第一人称：`set_first_person()` 用 `cast_shadow = SHADOWS_ONLY` 取代 `visible=false`（雪狐的 Face/Hair、Kawaii 的 7 个 HEAD_ATTACHMENTS，人类阶段的头也一样），地面影子仍有头/发/兽耳。雪狐 `_configure_visibility()` 的第三个参数要传 `[&"Body"]`：Body 网格里既有头皮 SKIN（1018 三角面）也有整块 `HairBack`（1296→24 面），不裁就会在第一人称低头时露出蓝灰网格。
-- 同口径面数：Kawaii 58.1k 面/15 网格、Hina 35.4k 面/14 材质、Chibi Catgirl 84.3k 面/22 网格、雪狐 61.0k 面/15 个 surface（Godot 合并后 44,709 顶点/29 贴图），属于同一量级。
-- 仍未做：不解析 `VRMC_springBone`（只是把现有弹簧值转发）；表情是 morph target，骨骼眼/眉/眨眼对雪狐无效。
+- 玩家导入走 `vrm_loader.gd` 的 `FileAccess → GLTFDocument.append_from_buffer()`，支持 VRM 0.x / 1.0。根据 humanoid 元数据识别骨骼，VRM 0.x 另做朝向转换。Android 由系统 SAF 提供 URI，导入时立即复制至 `user://vrm_skins/`，选用记录在 `user://vrm_skin.cfg`。仅玩家巨人通过 `HarborGame::start_round()` 在角色就绪前标记并应用选用项，AI 继续抽内置皮肤。测试见 `tests/vrm_playtest.gd`。
+- `vrm_skin.gd` 共用身高校准、Kawaii 姿态重定向、鞋底凸包与第一人称裁切。第一人称按 VRM 标注或头部及其子骨骼的蒙皮权重处理，整块头部切为仅投影。裁切重建网格时保留对应材质，避免删除一个表面后其余表面错用材质。
+- 内置雪狐使用打包后的 `assets/characters/snow_fox.glb`，源文件为新版 `AvatarSample_D.vrm`。其原始网格高 1.45281 m，校准到驱动模型的 1.7047 m，比例约 1.17338。鞋底轮廓从左右鞋的近底部蒙皮顶点分别提取，首次配置后共享。雪狐仍使用按部位降亮的 Burley 哑光材质和原有头发、狐尾弹簧。
 
 ## 第一人称相机（2026-11-25 确认）
 
-- 眼位唯一来源是 `giant_visual.first_person_eye_position()`：巨人阶段 = 当前骨架 Head 骨骼世界坐标 + 前偏 `0.045 × 身高` + 上抬 `0.055 × 身高`；人类阶段或缺 Head 骨骼回退 `0.90 × 胶囊身高`。`round.rs::follow_camera()` 直接拿它当基准，只在 `pitch < -0.35` 时再最多叠 `0.105 × 身高` 的 smoothstep 前探（`FIRST_PERSON_LOOK_DOWN_PITCH/LEAN`），**不要再在 Rust 侧重复加基础前偏**。实测雪狐眼高 0.8916 h（Head 骨骼 0.8365 h），Kawaii 0.899 h，Hina 0.890 h，Chibi 0.820 h。
+- 眼位唯一来源是 `giant_visual.first_person_eye_position()`：巨人阶段 = 当前骨架 Head 骨骼世界坐标 + 前偏 `0.045 × 身高` + 上抬 `0.055 × 身高`；人类阶段或缺 Head 骨骼回退 `0.90 × 胶囊身高`。`round.rs::follow_camera()` 直接拿它当基准，只在 `pitch < -0.35` 时再最多叠 `0.105 × 身高` 的 smoothstep 前探（`FIRST_PERSON_LOOK_DOWN_PITCH/LEAN`），**不要再在 Rust 侧重复加基础前偏**。实测新版雪狐站立眼高约 0.893 h，Kawaii 0.899 h，Hina 0.890 h，Chibi 0.820 h。
 - 第一人称转头夹紧：`self.yaw` 相对 `giants[0].body.get_rotation().y` 最多 ±`FIRST_PERSON_YAW_LIMIT (1.31 rad ≈ 75°)`，由 `clamp_first_person_view()` 在 `rotate_view()` 和每帧 `follow_camera()` 里执行；这是「看不到后背蝴蝶结和尾巴」的硬保证。
 - 设置键 `first_person_steer`（默认开，玩法页「巨人」组，立即生效）：开启时站立用 `show_motion(..., turn_target=视角 yaw, allow_standing_turn=true)` 原地小碎步带身体、行走用夹在 ±75° 的 `turn_giant_smooth`；关闭时身体不随视角。手部动作和坐压期间跳过（`steer_view` 条件），攻击锁定朝向不变。
 - 注意 `giant_visual` 的原地转身自身死区是 `STAND_START_DEADZONE (0.22 rad)` 起步、`STAND_DONE_DEADZONE (0.06)` 收尾；`FIRST_PERSON_STEER_DEADZONE (0.05)` 只是「不再请求」的门槛，所以 12.6° 以内只转头不挪脚。

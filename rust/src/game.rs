@@ -1,6 +1,7 @@
 use godot::classes::{
-    Camera3D, DirectionalLight3D, DisplayServer, Input, InputEvent, Node, PackedScene,
-    WorldEnvironment, environment::FogMode, input::MouseMode, notify::Node3DNotification,
+    Camera3D, CharacterBody3D, DirectionalLight3D, DisplayServer, Input, InputEvent, Node,
+    PackedScene, WorldEnvironment, environment::FogMode, input::MouseMode,
+    notify::Node3DNotification,
 };
 use godot::prelude::*;
 use std::time::Instant;
@@ -225,6 +226,10 @@ impl HarborGame {
             session.player = player;
             session.settings = settings;
             session.bedroom_far = bedroom_far;
+        }
+        if player == PlayerRole::Giant {
+            let mut giant = round.get_node_as::<CharacterBody3D>("Giant");
+            giant.set("_use_player_vrm", &true.to_variant());
         }
         let mut district = round.get_node_as::<Node3D>("District");
         district.set("map_side", &settings.map_side.to_variant());

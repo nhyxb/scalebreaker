@@ -105,7 +105,8 @@ func _configure_pose(driver: Skeleton3D, mapping: Dictionary, alignments: Dictio
 			var target_direction := skeleton.get_bone_global_rest(next_target).origin - target_rest.origin
 			var source_direction := driver.get_bone_global_rest(next_driver).origin - source_rest.origin
 			var driver_direction := _driver_basis * source_direction.normalized()
-			aligned_rotation = Quaternion(target_direction.normalized(), driver_direction) * aligned_rotation
+			if not target_direction.is_zero_approx() and not driver_direction.is_zero_approx():
+				aligned_rotation = Quaternion(target_direction.normalized(), driver_direction) * aligned_rotation
 		var link := BoneLink.new()
 		link.target = bone
 		link.driver = source
@@ -156,23 +157,25 @@ static func shade_anime_materials(target_meshes: Array[MeshInstance3D],
 			var mat := mesh.mesh.surface_get_material(surface) as StandardMaterial3D
 			if mat == null:
 				continue
-			var shaded := mat.duplicate() as StandardMaterial3D
-			shaded.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-			shaded.diffuse_mode = diffuse_mode
-			shaded.specular_mode = BaseMaterial3D.SPECULAR_SCHLICK_GGX
-			shaded.roughness = roughness
-			shaded.metallic = 0.0
-			shaded.metallic_specular = specular
-			shaded.emission_enabled = false
-			var tint: Color = tint_fn.call(shaded.resource_name) if tint_fn.is_valid() \
-					else default_anime_tint(shaded.resource_name)
-			shaded.albedo_color = Color(
-				shaded.albedo_color.r * tint.r,
-				shaded.albedo_color.g * tint.g,
-				shaded.albedo_color.b * tint.b,
-				shaded.albedo_color.a,
-			)
-			mesh.set_surface_override_material(surface, shaded)
+			mesh.set_surface_override_material(surface, matte_material(mat, tint_fn, diffuse_mode, roughness, specular))
+
+
+static func matte_material(material: StandardMaterial3D, tint_fn: Callable = Callable(),
+		diffuse_mode := BaseMaterial3D.DIFFUSE_BURLEY, roughness := ANIME_ROUGHNESS,
+		specular := ANIME_SPECULAR) -> StandardMaterial3D:
+	var shaded := material.duplicate() as StandardMaterial3D
+	shaded.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	shaded.diffuse_mode = diffuse_mode
+	shaded.specular_mode = BaseMaterial3D.SPECULAR_SCHLICK_GGX
+	shaded.roughness = roughness
+	shaded.metallic = 0.0
+	shaded.metallic_specular = specular
+	shaded.emission_enabled = false
+	var tint: Color = tint_fn.call(shaded.resource_name) if tint_fn.is_valid() \
+			else default_anime_tint(shaded.resource_name)
+	shaded.albedo_color = Color(shaded.albedo_color.r * tint.r, shaded.albedo_color.g * tint.g,
+			shaded.albedo_color.b * tint.b, shaded.albedo_color.a)
+	return shaded
 
 
 static func default_anime_tint(material_name: String) -> Color:

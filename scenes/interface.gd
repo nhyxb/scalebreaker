@@ -33,6 +33,7 @@ const PERCENT_SETTINGS := ["shake_strength", "sfx_volume", "ambience_volume", "c
 const AUDIO_SETTING_KEYS := ["sfx_volume", "ambience_volume"]
 const TouchControls := preload("res://scenes/touch_controls.gd")
 const SettingsSchema := preload("res://scenes/settings_schema.gd")
+const VrmLibrary := preload("res://scenes/vrm_library.gd")
 
 const FONT_SANS := ["Source Han Sans CN", "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC"]
 const FONT_MONO := ["Source Code Pro", "JetBrainsMono Nerd Font Mono", "Source Han Sans CN", "Noto Sans Mono CJK SC", "DejaVu Sans Mono"]
@@ -138,6 +139,20 @@ var _primary_modal: TacticalButton
 var _menu_button: TacticalButton
 var _pause_settings_button: TacticalButton
 
+var _skin_panel: Control
+var _skin_entry: TacticalButton
+var _skin_scroll: ScrollContainer
+var _skin_rows: VBoxContainer
+var _skin_status: Label
+var _skin_active: Label
+var _skin_import: TacticalButton
+var _skin_use: TacticalButton
+var _skin_remove: TacticalButton
+var _skin_picker: FileDialog
+var _skin_confirm: ConfirmationDialog
+var _highlighted_skin := ""
+var _skin_importing := false
+
 var _settings_panel: Control
 var _settings_page := "gameplay"
 var _settings_page_tabs: Array[Button] = []
@@ -210,6 +225,7 @@ func _ready() -> void:
 	_build_hud()
 	_build_modal()
 	_build_settings()
+	_build_skin_manager()
 	if _touch_enabled:
 		_touch = TouchControls.new()
 		_touch.name = "TouchControls"
@@ -287,7 +303,7 @@ func prepare_bedroom_menu() -> void:
 
 
 func handle_back() -> bool:
-	if dismiss_settings(true) or dismiss_ranking():
+	if _dismiss_skin_manager() or dismiss_settings(true) or dismiss_ranking():
 		return true
 	if _menu.visible and _menu_page != MenuPage.MAIN:
 		_play_ui(&"ui_back")
@@ -320,6 +336,7 @@ func show_screen(screen: String, mode: int, current_round: Node, player: PlayerR
 	_is_giant = giant
 	_player = player
 	_settings_panel.hide()
+	_skin_panel.hide()
 	if _touch_enabled:
 		_touch_ranking_layer.hide()
 		_touch.present(screen, mode, current_round, evacuation or player == PlayerRole.HUMAN_OBSERVER, giant)
@@ -946,6 +963,18 @@ func _build_menu() -> void:
 	settings_button.offset_top = 78
 	settings_button.offset_bottom = 126
 
+	_skin_entry = TacticalButton.new()
+	_skin_entry.name = "MenuSkins"
+	_skin_entry.setup_action("角色皮肤", BEDROOM_BLUE, _font_bold)
+	_skin_entry.mouse_entered.connect(_play_ui.bind(&"ui_hover"))
+	_skin_entry.pressed.connect(_open_skin_manager)
+	_menu.add_child(_skin_entry)
+	_skin_entry.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	_skin_entry.offset_left = -184
+	_skin_entry.offset_right = -34
+	_skin_entry.offset_top = 136
+	_skin_entry.offset_bottom = 184
+
 	# Bottom-left controls for the harbor modes.
 	if _touch_enabled:
 		_harbor_keys = _label("左下拖动移动  ·  右侧滑动环视", 19, PAPER, _font_medium)
@@ -1488,6 +1517,227 @@ func _build_modal() -> void:
 		_game.call("show_menu")
 	)
 	content.add_child(_menu_button)
+
+
+func _build_skin_manager() -> void:
+	_skin_panel = _layer()
+	_skin_panel.name = "SkinManager"
+	_skin_panel.hide()
+	var veil := ColorRect.new()
+	veil.color = Color(0.045, 0.052, 0.062, 0.82)
+	_skin_panel.add_child(veil)
+	veil.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_full_bleed.append(veil)
+	var center := CenterContainer.new()
+	_skin_panel.add_child(center)
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var card := ChamferBox.new()
+	card.custom_minimum_size.x = 560
+	card.fill_color = Color("#15181c", 0.98)
+	card.accent_width = 0.0
+	card.chamfer = 15.0
+	card.set_padding(26, 19, 26, 19)
+	center.add_child(card)
+	var content := _column(11)
+	card.add_child(content)
+	content.add_child(_label("角色皮肤", 31, PAPER, _font_heavy))
+	content.add_child(_label("选用的皮肤会在下一局用于你操控的巨人。", 16, WARM_GRAY, _font_regular))
+
+	_skin_active = _label("", 16, BEDROOM_BLUE, _font_bold)
+	_skin_active.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	content.add_child(_skin_active)
+	_skin_scroll = _settings_scroller()
+	content.add_child(_skin_scroll)
+	_skin_rows = _column(6)
+	_skin_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_skin_scroll.add_child(_skin_rows)
+	_skin_status = _label("", 15, PAPER, _font_regular)
+	_skin_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_skin_status.custom_minimum_size.y = 24
+	content.add_child(_skin_status)
+
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 8)
+	content.add_child(actions)
+	_skin_import = _settings_action(actions, "导入 VRM", "ImportVrm", BEDROOM_BLUE)
+	_skin_import.pressed.connect(_pick_vrm)
+	_skin_use = _settings_action(actions, "选用", "UseVrm", EVAC_GREEN)
+	_skin_use.pressed.connect(_use_highlighted_skin)
+	_skin_remove = _settings_action(actions, "删除", "RemoveVrm", SIGNAL_RED)
+	_skin_remove.pressed.connect(_confirm_remove_skin)
+	var back := _settings_action(actions, "返回", "CloseSkins", WARM_GRAY)
+	back.pressed.connect(_dismiss_skin_manager)
+
+	_skin_picker = FileDialog.new()
+	_skin_picker.name = "VrmFilePicker"
+	_skin_picker.access = FileDialog.ACCESS_FILESYSTEM
+	_skin_picker.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	_skin_picker.filters = PackedStringArray(["*.vrm, *.VRM ; VRM 模型"])
+	_skin_picker.file_selected.connect(_import_vrm)
+	add_child(_skin_picker)
+	_skin_confirm = ConfirmationDialog.new()
+	_skin_confirm.title = "删除皮肤"
+	_skin_confirm.ok_button_text = "删除"
+	_skin_confirm.cancel_button_text = "取消"
+	_skin_confirm.confirmed.connect(_remove_highlighted_skin)
+	add_child(_skin_confirm)
+	get_viewport().size_changed.connect(_fit_skin_manager)
+	VrmLibrary.open_directory()
+
+
+func _fit_skin_manager() -> void:
+	var row_height := 52.0 if _touch_enabled else 44.0
+	var content_height := _skin_rows.get_child_count() * (row_height + 6.0) - 6.0
+	var available := clampf(_root.size.y - 260.0, 68.0, 200.0)
+	_skin_scroll.custom_minimum_size.y = minf(available, maxf(row_height, content_height))
+
+
+func _open_skin_manager() -> void:
+	_play_ui(&"ui_click")
+	_menu.hide()
+	_skin_panel.show()
+	_skin_status.text = ""
+	_refresh_skin_manager(VrmLibrary.selected())
+	_skin_import.grab_focus()
+
+
+func _dismiss_skin_manager() -> bool:
+	if not _skin_panel.visible:
+		return false
+	if _skin_confirm.visible:
+		_skin_confirm.hide()
+		return true
+	if _skin_picker.visible:
+		_skin_picker.hide()
+		return true
+	if _skin_importing:
+		return true
+	_skin_panel.hide()
+	_menu.show()
+	_skin_entry.grab_focus()
+	_play_ui(&"ui_back")
+	return true
+
+
+func _refresh_skin_manager(highlight: String) -> void:
+	for child in _skin_rows.get_children():
+		_skin_rows.remove_child(child)
+		child.queue_free()
+	var selected := VrmLibrary.selected()
+	var files := VrmLibrary.files()
+	_highlighted_skin = highlight if highlight in files else ""
+	_skin_active.text = "下一局使用：随机内置皮肤"
+	if not selected.is_empty() and selected in files:
+		_skin_active.text = "下一局使用：%s" % selected.get_basename()
+	var group := ButtonGroup.new()
+	_add_skin_row("", "随机内置皮肤", group)
+	for file in files:
+		_add_skin_row(file, file.get_basename(), group)
+	_fit_skin_manager()
+	_update_skin_actions()
+
+
+func _add_skin_row(file: String, display_name: String, group: ButtonGroup) -> void:
+	var button := Button.new()
+	button.name = "RandomSkin" if file.is_empty() else "ImportedSkin"
+	button.text = display_name
+	button.tooltip_text = display_name
+	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	button.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	button.custom_minimum_size.y = 52 if _touch_enabled else 44
+	button.toggle_mode = true
+	button.button_group = group
+	button.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	button.add_theme_stylebox_override("normal", _settings_style(IRON, SLATE))
+	button.add_theme_stylebox_override("hover", _settings_style(SLATE, WARM_GRAY))
+	button.add_theme_stylebox_override("pressed", _settings_style(BEDROOM_BLUE.darkened(0.79), BEDROOM_BLUE))
+	button.add_theme_stylebox_override("hover_pressed", _settings_style(BEDROOM_BLUE.darkened(0.74), BEDROOM_BLUE))
+	button.add_theme_stylebox_override("focus", _settings_style(Color.TRANSPARENT, PAPER))
+	_skin_rows.add_child(button)
+	button.set_pressed_no_signal(file == _highlighted_skin)
+	button.pressed.connect(func():
+		_highlighted_skin = file
+		_update_skin_actions()
+	)
+
+
+func _update_skin_actions() -> void:
+	_skin_import.disabled = _skin_importing
+	_skin_use.disabled = _skin_importing or _highlighted_skin == VrmLibrary.selected()
+	_skin_remove.disabled = _skin_importing or _highlighted_skin.is_empty()
+	for action in [_skin_import, _skin_use, _skin_remove]:
+		action.modulate.a = 0.54 if action.disabled else 1.0
+	for row in _skin_rows.get_children():
+		row.disabled = _skin_importing
+
+
+func _pick_vrm() -> void:
+	_play_ui(&"ui_click")
+	if OS.has_feature("android") and DisplayServer.has_feature(DisplayServer.FEATURE_NATIVE_DIALOG_FILE):
+		# VRM often has no registered Android MIME type. SAF shows all files; the loader checks the contents.
+		var error := DisplayServer.file_dialog_show("导入 VRM", "", "", false,
+				DisplayServer.FILE_DIALOG_MODE_OPEN_FILE, PackedStringArray(), _android_vrm_picked)
+		if error == OK:
+			_skin_importing = true
+			_update_skin_actions()
+			return
+	if not OS.has_feature("android") and _skin_picker.current_file.is_empty():
+		var downloads := OS.get_system_dir(OS.SYSTEM_DIR_DOWNLOADS)
+		if DirAccess.dir_exists_absolute(downloads):
+			_skin_picker.current_dir = downloads
+	_skin_picker.popup_centered_ratio(0.78)
+
+
+func _android_vrm_picked(accepted: bool, paths: PackedStringArray, _filter: int) -> void:
+	_skin_importing = false
+	_update_skin_actions()
+	if accepted and not paths.is_empty():
+		_import_vrm(paths[0])
+
+
+func _import_vrm(path: String) -> void:
+	_skin_importing = true
+	_update_skin_actions()
+	_skin_feedback("正在导入 VRM…")
+	# Show loading feedback before decoding the textures on the main thread.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var error := VrmLibrary.import_file(path)
+	_skin_importing = false
+	_refresh_skin_manager(VrmLibrary.selected())
+	_skin_feedback("已导入并选用。" if error.is_empty() else error, not error.is_empty())
+	_skin_import.grab_focus()
+
+
+func _use_highlighted_skin() -> void:
+	var error := VrmLibrary.choose(_highlighted_skin)
+	if error.is_empty():
+		var label := "随机内置皮肤" if _highlighted_skin.is_empty() else _highlighted_skin.get_basename()
+		_skin_active.text = "下一局使用：%s" % label
+	_update_skin_actions()
+	_skin_feedback("已保存选用项。" if error.is_empty() else error, not error.is_empty())
+	if error.is_empty():
+		for row in _skin_rows.get_children():
+			if row.button_pressed:
+				row.grab_focus()
+				break
+
+
+func _confirm_remove_skin() -> void:
+	_skin_confirm.dialog_text = "从游戏目录删除「%s」？" % _highlighted_skin.get_basename().left(40)
+	_skin_confirm.popup_centered()
+
+
+func _remove_highlighted_skin() -> void:
+	var error := VrmLibrary.remove(_highlighted_skin)
+	_refresh_skin_manager(VrmLibrary.selected())
+	_skin_feedback("已删除皮肤。" if error.is_empty() else error, not error.is_empty())
+	_skin_import.grab_focus()
+
+
+func _skin_feedback(message: String, failed := false) -> void:
+	_skin_status.text = message
+	_skin_status.add_theme_color_override("font_color", Color("#ff8d77") if failed else PAPER)
 
 
 func _build_settings() -> void:
