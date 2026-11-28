@@ -1,11 +1,11 @@
 extends Node3D
 ## 1:1 soft Japanese cream & light natural-wood bedroom mounted directly into the
-## main 3D world by `scenes/harbor_skybox.gd` at `BEDROOM_SCALE = 6666.67` (Vulkan
+## main 3D world by `scenes/harbor_skybox.gd` at the active tabletop scale (Vulkan
 ## mobile, 32-bit Reversed-Z). Uses real Kenney Furniture Kit GLB assets
 ## (assets/kenney/furniture/, visual-only, zero physics collision), an airtight CSG room
 ## shell with baseboards and a recessed sunlit two-pane window framed by sheer curtains,
 ## procedural wall art / corkboard / floating shelf / live desktop monitor texture, a
-## 21.27 cm desktop harbour sandbox centred at (0, DESK_TOP, 0), Layer 2 isolated
+## desktop harbour sandbox, Layer 2 isolated
 ## interior lighting (window sun + interior bounce + ceiling fill + automatic warm night
 ## desk lamp), and an exported `ultra_giant_anchor` above the swivel chair cushion where
 ## the seated anime Yumeka mounts.
@@ -40,6 +40,7 @@ const WIN_CENTER_X := -0.05
 const WIN_WIDTH := 1.84
 const WIN_SILL_Y := 0.94
 const WIN_HEIGHT := 1.28
+const DESK_LAMP_POSITION := Vector3(0.42, DESK_TOP + 0.34, -0.10)
 
 ## Uniform scale for chairDesk.glb (seat cushion top raw Y = 0.2335 -> 0.4553 m real metric).
 const CHAIR_SCALE := 1.95
@@ -63,6 +64,11 @@ var _window_sun: DirectionalLight3D
 var _interior_bounce: DirectionalLight3D
 var _ceiling_fill: OmniLight3D
 var _desk_lamp_light: OmniLight3D
+var _lights: Node3D
+var _render_scale := BEDROOM_SCALE
+var _light_weights := Vector3(1.0, 0.0, 0.0)
+var _sandbox_shadow: MeshInstance3D
+var _desk_half_depth := 0.0
 
 var sandbox_anchor: Node3D
 ## Anchor perched directly above the chairDesk.glb cushion, facing `sandbox_anchor`, for
@@ -361,10 +367,27 @@ void fragment() {
 	smat.shader = sh
 	shadow_pad.material_override = smat
 	sandbox.add_child(shadow_pad)
+	_sandbox_shadow = shadow_pad
 	sandbox_anchor = Node3D.new()
 	sandbox_anchor.name = "SandboxAnchor"
 	sandbox_anchor.position = Vector3(0.0, DESK_TOP + SANDBOX_BASE_THICKNESS, 0.0)
 	sandbox.add_child(sandbox_anchor)
+
+
+func configure_tray(room_scale: float, side: float, base_depth: float, offset: float) -> void:
+	var shadow_side := side / room_scale + 0.036
+	var desk_offset := minf(offset, maxf(0.0, _desk_half_depth - shadow_side * 0.5))
+	sandbox_anchor.position = Vector3(0.0, DESK_TOP + base_depth / room_scale, desk_offset)
+	_sandbox_shadow.position.z = desk_offset
+	(_sandbox_shadow.mesh as PlaneMesh).size = Vector2.ONE * shadow_side
+	if is_equal_approx(_render_scale, room_scale):
+		return
+	_render_scale = room_scale
+	_lights.scale = Vector3.ONE / _render_scale
+	_window_sun.directional_shadow_max_distance = 6.0 * _render_scale
+	_desk_lamp_light.position = DESK_LAMP_POSITION * _render_scale
+	_desk_lamp_light.omni_range = 4.4 * _render_scale
+	apply_day_night(_light_weights.x, _light_weights.y, _light_weights.z)
 
 
 func _build_furniture() -> void:
@@ -411,6 +434,7 @@ func _build_furniture() -> void:
 	# --- 1. Study desk & swivel chair ---
 	var desk_probe := _load_bounds("desk")
 	var desk_scale := DESK_TOP / maxf(desk_probe.size.y, 0.001)
+	_desk_half_depth = desk_probe.size.z * desk_scale * 0.5
 	_place_glb(furniture, "Desk", "desk", Vector3(0.0, 0.0, 0.0),
 		Vector3(desk_scale * 1.14, desk_scale, desk_scale), 0.0, false, mat_wood_soft, cast_major)
 
@@ -429,7 +453,7 @@ func _build_furniture() -> void:
 	ultra_giant_anchor.set_meta(&"seat_y", ultra_giant_seat_y)
 	ultra_giant_anchor.set_meta(&"faces", &"SandboxAnchor")
 	# Use local Transform3D.looking_at so the horizontal orientation stays invariant
-	# under the parent Bedroom's 6666.67x single-world scale and world offset.
+	# under the bedroom's scale and offset. Both tray layouts use the desk centreline.
 	ultra_giant_anchor.transform = Transform3D(Basis.IDENTITY, ultra_giant_anchor.position).looking_at(
 		Vector3(sandbox_anchor.position.x, ultra_giant_seat_y, sandbox_anchor.position.z),
 		Vector3.UP,
@@ -1400,13 +1424,13 @@ func _transform_aabb(xf: Transform3D, box: AABB) -> AABB:
 # ---------------------------------------------------------------------------
 
 func _build_lights() -> void:
-	# Counter-scale the Lights pivot by SKY_SCALE (1 / 6666.67) so every Light3D runs
-	# at exact unit global scale (1, 1, 1) with world-metre positions, omni_range, and
-	# directional_shadow_max_distance calibrated to the 6666.67x single-world bedroom.
+	# Counter-scale the Lights pivot so the lights keep unit global scale and use
+	# main-world metres for positions and ranges.
 	var lights := Node3D.new()
 	lights.name = "Lights"
 	lights.scale = Vector3.ONE * SKY_SCALE
 	add_child(lights)
+	_lights = lights
 
 	# Primary window directional light (sunlight -> golden dusk -> cool moonlight).
 	_window_sun = DirectionalLight3D.new()
@@ -1457,7 +1481,7 @@ func _build_lights() -> void:
 	_desk_lamp_light = OmniLight3D.new()
 	_desk_lamp_light.name = "DeskLampLight"
 	_desk_lamp_light.light_cull_mask = BEDROOM_LAYER
-	_desk_lamp_light.position = Vector3(0.42, DESK_TOP + 0.34, -0.10) * BEDROOM_SCALE
+	_desk_lamp_light.position = DESK_LAMP_POSITION * BEDROOM_SCALE
 	_desk_lamp_light.light_color = Color(1.0, 0.76, 0.44)
 	_desk_lamp_light.light_energy = 0.0
 	_desk_lamp_light.omni_range = 4.4 * BEDROOM_SCALE
@@ -1468,10 +1492,12 @@ func _build_lights() -> void:
 
 
 func apply_day_night(day_w: float, dusk_w: float, night_w: float, _cycle_time: float = 0.0) -> void:
+	_light_weights = Vector3(day_w, dusk_w, night_w)
 	var sum := maxf(day_w + dusk_w + night_w, 0.0001)
 	var d := day_w / sum
 	var u := dusk_w / sum
 	var n := night_w / sum
+	var scale_ratio := _render_scale / BEDROOM_SCALE
 
 	if _window_sun != null:
 		_window_sun.light_cull_mask = BEDROOM_LAYER
@@ -1480,8 +1506,8 @@ func apply_day_night(day_w: float, dusk_w: float, night_w: float, _cycle_time: f
 		# Keep night moonlight shadow very soft so bangs/window frame never cut a hard dark line across Yumeka's eyes.
 		_window_sun.shadow_opacity = 0.54 * d + 0.62 * u + 0.12 * n
 		# Dusk sun slants low through the north window across Yumeka's side face and sandbox.
-		var from_p := (Vector3(1.3, 3.1, -3.8) * d + Vector3(1.8, 2.45, -3.2) * u + Vector3(-0.3, 2.8, -3.6) * n) * BEDROOM_SCALE
-		var to_p := (Vector3(-0.35, 0.55, 1.0) * d + Vector3(-0.15, 0.90, 0.65) * u + Vector3(0.05, 0.75, 0.85) * n) * BEDROOM_SCALE
+		var from_p := (Vector3(1.3, 3.1, -3.8) * d + Vector3(1.8, 2.45, -3.2) * u + Vector3(-0.3, 2.8, -3.6) * n) * _render_scale
+		var to_p := (Vector3(-0.35, 0.55, 1.0) * d + Vector3(-0.15, 0.90, 0.65) * u + Vector3(0.05, 0.75, 0.85) * n) * _render_scale
 		_window_sun.transform = Transform3D(Basis.IDENTITY, from_p).looking_at(to_p, Vector3.UP)
 
 	if _interior_bounce != null:
@@ -1490,8 +1516,8 @@ func apply_day_night(day_w: float, dusk_w: float, night_w: float, _cycle_time: f
 		_interior_bounce.light_color = Color(0.98, 0.93, 0.86) * d + Color(0.92, 0.64, 0.54) * u + Color(0.32, 0.40, 0.62) * n
 		_interior_bounce.light_energy = 0.28 * d + 0.18 * u + 0.08 * n
 		_interior_bounce.transform = Transform3D(
-			Basis.IDENTITY, Vector3(-0.8, 2.2, 3.0) * BEDROOM_SCALE
-		).looking_at(Vector3(0.2, 1.0, -0.5) * BEDROOM_SCALE, Vector3.UP)
+			Basis.IDENTITY, Vector3(-0.8, 2.2, 3.0) * _render_scale
+		).looking_at(Vector3(0.2, 1.0, -0.5) * _render_scale, Vector3.UP)
 
 	# Godot 4.7 Vulkan Forward Mobile applies `pow(distance, -omni_attenuation)` and packs
 	# `linear_color * light_energy * PI` into FP16 (max 65,504). Keeping omni_attenuation
@@ -1499,19 +1525,19 @@ func apply_day_night(day_w: float, dusk_w: float, night_w: float, _cycle_time: f
 	# radiance at 4 km distance while staying 18x-60x below the FP16 overflow ceiling.
 	if _ceiling_fill != null:
 		_ceiling_fill.light_cull_mask = BEDROOM_LAYER
-		var ceil_pos := Vector3(0.0, ROOM.y - 0.52, 1.20) * BEDROOM_SCALE
-		var desk_fill_pos := Vector3(-0.38, DESK_TOP + 0.38, -0.06) * BEDROOM_SCALE
+		var ceil_pos := Vector3(0.0, ROOM.y - 0.52, 1.20) * _render_scale
+		var desk_fill_pos := Vector3(-0.38, DESK_TOP + 0.38, -0.06) * _render_scale
 		var ceil_atten := lerpf(0.50, 0.75, n)
 		_ceiling_fill.position = ceil_pos.lerp(desk_fill_pos, n)
-		_ceiling_fill.omni_range = lerpf(6.5, 2.0, n) * BEDROOM_SCALE
+		_ceiling_fill.omni_range = lerpf(6.5, 2.0, n) * _render_scale
 		_ceiling_fill.omni_attenuation = ceil_atten
 		_ceiling_fill.light_color = Color(1.0, 0.92, 0.80) * d + Color(1.0, 0.76, 0.56) * u + Color(0.88, 0.86, 0.98) * n
-		_ceiling_fill.light_energy = 16.0 * d + 12.0 * u + 320.0 * n
+		_ceiling_fill.light_energy = (16.0 * d + 12.0 * u + 320.0 * n) * pow(scale_ratio, ceil_atten)
 
 	# Warm table lamp lights up automatically through dusk into night (Layer 2 ONLY).
 	# At d = 4,323 m & omni_attenuation = 0.75, energy 1,118 delivers exact ~2.10 warm
 	# tungsten irradiance on Yumeka's right cheek (R_ubo = 3,512 << 65,504, zero overflow).
-	var lamp_energy := 0.0 * d + 420.0 * u + 1118.0 * n
+	var lamp_energy := (420.0 * u + 1118.0 * n) * pow(scale_ratio, 0.75)
 	if _desk_lamp_light != null:
 		_desk_lamp_light.light_cull_mask = BEDROOM_LAYER
 		_desk_lamp_light.omni_attenuation = 0.75

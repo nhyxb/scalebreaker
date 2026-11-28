@@ -212,17 +212,19 @@ impl HarborGame {
         self.unpause_tree();
         self.stop_gameplay_sfx();
         self.clear_map();
+        let settings = self.settings[mode as usize];
+        let bedroom_far = self.configure_tabletop(mode, settings.map_side);
         let mut round = self
             .round_scene
             .as_ref()
             .unwrap()
             .instantiate_as::<HarborRound>();
-        let settings = self.settings[mode as usize];
         {
             let mut session = round.bind_mut();
             session.mode = mode;
             session.player = player;
             session.settings = settings;
+            session.bedroom_far = bedroom_far;
         }
         let mut district = round.get_node_as::<Node3D>("District");
         district.set("map_side", &settings.map_side.to_variant());
@@ -279,6 +281,7 @@ impl HarborGame {
         self.unpause_tree();
         self.stop_gameplay_sfx();
         self.clear_map();
+        self.configure_tabletop(Mode::Human, GameSettings::default().map_side);
         let preview = self.district_scene.as_ref().unwrap().instantiate().unwrap();
         {
             let base = self.base_mut();
@@ -456,6 +459,19 @@ impl HarborGame {
             let value = self.settings[mode as usize].time_of_day.as_str();
             controller.call("set_mode", &[GString::from(value).to_variant()]);
         }
+    }
+
+    fn configure_tabletop(&self, mode: Mode, map_side: i32) -> f32 {
+        self.base()
+            .get_node_as::<Node>("Skybox")
+            .call(
+                "configure_tabletop",
+                &[
+                    mode.uses_palm_tabletop().to_variant(),
+                    (map_side as f32).to_variant(),
+                ],
+            )
+            .to::<f32>()
     }
 
     fn stop_gameplay_sfx(&self) {

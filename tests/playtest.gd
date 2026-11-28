@@ -61,6 +61,7 @@ func _run() -> void:
 	await _own_camera_shake_toggle()
 	await _desk_hazards_finger_poke()
 	await _tall_own_camera_shake()
+	await _palm_sandbox_layout()
 	_check(_game.get_screen() == "menu", "both modes returned to the title")
 	if FileAccess.file_exists(settings_path):
 		DirAccess.remove_absolute(settings_path)
@@ -1976,6 +1977,64 @@ func _tall_own_camera_shake() -> void:
 		_game.show_menu()
 
 
+func _palm_sandbox_layout() -> void:
+	var sky := _game.get_node("Skybox")
+	var bedroom := sky.get_bedroom() as Node3D
+	var anchor: Node3D = bedroom.sandbox_anchor
+	var original_scale := bedroom.scale.x
+	var preview := _game.get_node("MapSlot/District")
+	var original_side := float(preview.map_side)
+	var original_targets := preview.get_node("Targets").get_child_count()
+	var options: Dictionary = _game.default_mode_settings(1)
+	options.merge({"npc_initial": 0, "npc_respawn": false, "desk_hazards": false}, true)
+	_game.save_settings(_game.get_settings(false), options)
+	_game.start_mode(true)
+	await _ticks(4)
+	var current := _round()
+	var district := current.get_node("District")
+	var frame := district.get_node("SandboxFrame") as MeshInstance3D
+	var tray := bedroom._transform_aabb(
+			bedroom.global_transform.affine_inverse() * frame.global_transform, frame.get_aabb()) as AABB
+	var desk := bedroom._subtree_aabb(
+			bedroom.get_node("Furniture/Desk"), Transform3D.IDENTITY) as AABB
+	_check(is_equal_approx(float(district.map_side) / bedroom.scale.x, 0.10)
+			and is_equal_approx(float(district.map_side), original_side)
+			and district.get_node("Targets").get_child_count() == original_targets,
+			"palm sandbox fits the existing harbour and every building into a 10 cm inner tray")
+	_check(anchor.global_position.length() < 0.05
+			and is_equal_approx(tray.position.y, desk.end.y)
+			and tray.end.z < desk.end.z and tray.get_center().z >= 0.29
+			and Vector3.ONE.is_equal_approx(bedroom.get_desk_lamp_light().global_basis.get_scale()),
+			"palm tray moves toward the seated giant and sits flush within the desk with unit-scale lights")
+
+	var giant := _actor(1)
+	var camera := root.get_camera_3d()
+	var observer: Node = sky.get_yumeka()
+	var face_visible := true
+	for height: float in [25.2, 500.0]:
+		current.debug_resize_giant(0, height)
+		for x: float in [-640.0, 0.0, 640.0]:
+			for z: float in [-640.0, 0.0, 640.0]:
+				giant.position = Vector3(x, 0.02, z)
+				await physics_frame
+				current.look(Vector2(0.0, -1200.0))
+				if observer != null and observer.debug_is_mounted():
+					var face: Vector3 = (observer.debug_bone_world_pos("Eye_L")
+							+ observer.debug_bone_world_pos("Eye_R")) * 0.5
+					face_visible = face_visible and camera.is_position_in_frustum(face)
+	if observer != null and observer.debug_is_mounted():
+		_check(face_visible, "looking straight up frames the seated giant from the centre and outer districts")
+
+	current.zoom_by(100.0)
+	await _ticks(60)
+	_check(-camera.global_basis.z.y > 0.99 and camera.global_position.y > 1.0
+			and camera.position.z > 1800.0,
+			"at maximum zoom the full-body camera still looks overhead from above the street")
+	_game.show_menu()
+	_check(is_equal_approx(bedroom.scale.x, original_scale) and is_zero_approx(anchor.position.z),
+			"the menu restores its tabletop layout after the palm sandbox")
+
+
 func _own_camera_shake_toggle() -> void:
 	var options: Dictionary = _game.default_mode_settings(1)
 	options.merge({"giant_count": 2, "npc_initial": 0, "npc_respawn": false}, true)
@@ -2627,11 +2686,14 @@ func _desk_hazards_finger_poke() -> void:
 	var start_wrist_err: float = (s_start.wrist_pos as Vector3).distance_to(rest_hand_start)
 	var hand_has_no_colliders := _count_collisions_in(hazards) == 0
 	var giants_unchanged := int(round.snapshot().giant_count) == giants_before
+	var bedroom_scale: float = _game.get_node("Skybox/Bedroom").scale.x
+	var arm_l1 := float(s_start.arm_l1) / bedroom_scale
+	var arm_l2 := float(s_start.arm_l2) / bedroom_scale
 	var rig_ok := bool(s_start.using_placeholder) or (bool(s_start.using_real_yumeka)
 			and not bool(s_start.placeholder_visible)
 			and bool(s_start.has_skeleton) and int(s_start.bone_count) > 100
-			and float(s_start.arm_l1) > 900.0 and float(s_start.arm_l1) < 1300.0
-			and float(s_start.arm_l2) > 950.0 and float(s_start.arm_l2) < 1400.0)
+			and arm_l1 > 0.135 and arm_l1 < 0.195
+			and arm_l2 > 0.142 and arm_l2 < 0.21)
 	_check(bool(s_start.active) and String(s_start.phase) == "raise"
 			and String(s_start.hazard) == "finger_poke"
 			and bool(s_start.hand_visible) and bool(s_start.warning_visible)
@@ -2674,12 +2736,15 @@ func _desk_hazards_finger_poke() -> void:
 		await _ticks(4)
 		var ik_st: Dictionary = yumeka.call("debug_right_arm_ik_state")
 		var ua_world: Vector3 = yumeka.call("debug_bone_world_pos", "UpperArm_R")
+		var ua_room: Vector3 = yumeka.call("debug_bone_pos", "UpperArm_R")
+		var elbow_world: Vector3 = yumeka.call("debug_bone_world_pos", "LowerArm_R")
 		var hand_world: Vector3 = yumeka.call("debug_bone_world_pos", "Hand_R")
 		var st_now: Dictionary = hazards.debug_state()
 		_check(bool(ik_st.active) and float(ik_st.lean) > 0.05
 				and not bool(st_now.placeholder_visible)
-				and ua_world.z > 2000.0 and ua_world.y > 500.0
-				and hand_world.distance_to(ua_world) > 1000.0
+				and ua_room.z > 0.30 and ua_room.y > 0.83
+				and is_equal_approx(ua_world.distance_to(elbow_world), float(ik_st.arm_l1_world) * float(ik_st.ik_stretch))
+				and is_equal_approx(elbow_world.distance_to(hand_world), float(ik_st.arm_l2_world) * float(ik_st.ik_stretch))
 				and hand_world.distance_to(st_now.wrist_pos as Vector3) < 10.0,
 				"Yumeka's real Skeleton3D drives UpperArm_R -> LowerArm_R -> Hand_R directly with subtle lean (zero relay collapse)")
 

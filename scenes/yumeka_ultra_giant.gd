@@ -182,6 +182,7 @@ var _rest_eye_mid_local := Vector3.ZERO
 var _arm_l1_skel := 0.155754
 var _arm_l2_skel := 0.167423
 var _index_distal_len_skel := 0.01535
+var _index_pad_offset_skel := 0.0
 var _poke_tip_in_hand_local_skel := Vector3(-0.0154, 0.1079, -0.0111)
 
 ## Active right-arm IK state (driven directly by scenes/desk_hazards.gd).
@@ -444,8 +445,9 @@ func _bind_right_arm_ik() -> void:
 	if _idx_dist_r_idx >= 0:
 		var hand_pose := _skeleton.get_bone_global_pose(_hand_r_idx)
 		var dist_pose := _skeleton.get_bone_global_pose(_idx_dist_r_idx)
-		var pad_off := INDEX_PAD_VENTRAL_OFFSET_WORLD / _skel_to_world_scale()
-		var tip_skel := dist_pose * Vector3(0.0, _index_distal_len_skel, -pad_off)
+		# The skin pad moves with the rig when the tabletop scale changes.
+		_index_pad_offset_skel = INDEX_PAD_VENTRAL_OFFSET_WORLD / _skel_to_world_scale()
+		var tip_skel := dist_pose * Vector3(0.0, _index_distal_len_skel, -_index_pad_offset_skel)
 		_poke_tip_in_hand_local_skel = hand_pose.affine_inverse() * tip_skel
 	set_hand_gesture_blend(HandGesture.REST_RELAXED, HandGesture.FINGER_POKE, 0.0)
 
@@ -927,8 +929,8 @@ func _apply_right_arm_ik_now() -> Dictionary:
 	_last_wrist_world = _skeleton.global_transform * wrist_eff_skel
 	if _idx_dist_r_idx >= 0:
 		var dist_pose := _skeleton.get_bone_global_pose(_idx_dist_r_idx)
-		var pad_off := INDEX_PAD_VENTRAL_OFFSET_WORLD / world_scale
-		_last_fingertip_world = _skeleton.global_transform * (dist_pose * Vector3(0.0, _index_distal_len_skel, -pad_off))
+		_last_fingertip_world = _skeleton.global_transform * (
+				dist_pose * Vector3(0.0, _index_distal_len_skel, -_index_pad_offset_skel))
 	else:
 		_last_fingertip_world = _last_wrist_world + _arm_ik_hand_basis_world * get_poke_tip_in_hand_local_world()
 	_last_elbow_bend_deg = rad_to_deg(acos(clampf(ua_y.dot(la_y), -1.0, 1.0)))

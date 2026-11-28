@@ -1141,15 +1141,17 @@ static func _build_historic_block(targets: Node3D, center: Vector3, bx: int, bz:
 # Desktop Diorama Wood Frame, Waterfront Quays, Cranes & Landmarks
 # ---------------------------------------------------------------------------
 
-## Builds a single-mesh pale natural-wood miniature sandbox frame and solid tray skirt around
-## the city footprint (`half_land`), aligned to the 1:6667 bedroom desk top in
-## `scenes/skybox_bedroom.gd` (`base_depth = 32 m` <-> `4.8 mm` tray base on `DESK_TOP`).
+static func sandbox_frame_depth(half_land: float) -> float:
+	return clampf(half_land * (32.0 / 709.0), 0.12, 32.0)
+
+
+## Builds the wooden frame and solid tray skirt aligned to the bedroom desk top.
 static func _build_sandbox_frame(district: Node3D, half_land: float) -> void:
 	if half_land <= 0.25:
 		return
 	var frame_w := clampf(half_land * 0.056, 0.05, 40.0)
 	var lip_h := clampf(half_land * 0.011, 0.02, 8.0)
-	var base_depth := clampf(half_land * (32.0 / 709.0), 0.12, 32.0)
+	var base_depth := sandbox_frame_depth(half_land)
 	var overlap := minf(0.6, half_land * 0.05)
 	var inner := half_land - overlap
 	var outer := half_land + frame_w

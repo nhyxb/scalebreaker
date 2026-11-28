@@ -60,10 +60,55 @@ func _run() -> void:
 	await _random_opening_stage()
 	_giant_skins()
 	await _distant_silhouettes()
+	await _palm_tabletop_through_transformation()
 	_game.show_menu()
 	DirAccess.remove_absolute(_game.settings_path)
 	print("Growth gameplay: %d passed, %d failed" % [_checks - _failures, _failures])
 	quit(1 if _failures else 0)
+
+
+func _palm_tabletop_through_transformation() -> void:
+	_start({"giant_height": 1.8, "coin_count": 10, "coin_interval": 600.0, "desk_hazards": false})
+	await _ticks(5)
+	var current := _round()
+	var giant := _giant()
+	var sky := _game.get_node("Skybox")
+	var bedroom := sky.get_bedroom() as Node3D
+	var anchor: Node3D = bedroom.sandbox_anchor
+	var district := current.get_node("District")
+	var camera := root.get_camera_3d()
+	var seated_giant: Node = sky.get_yumeka()
+	giant.position = OPEN_STREET
+	FootfallFixture.face(current, giant, 0.0)
+	current.look(Vector2(0.0, -1200.0))
+	await _ticks(3)
+	_check(current.snapshot().human_stage and is_equal_approx(float(district.map_side) / bedroom.scale.x, 0.10)
+			and is_equal_approx(anchor.position.z, 0.30) and -camera.global_basis.z.y > 0.99
+			and camera.global_position.y > 0.0,
+			"The growth human can look overhead from the same 10 cm tray beside the seated giant")
+	var face := Vector3.INF
+	if seated_giant != null and seated_giant.debug_is_mounted():
+		face = (seated_giant.debug_bone_world_pos("Eye_L") + seated_giant.debug_bone_world_pos("Eye_R")) * 0.5
+	var human_frames_face := face.is_finite() and camera.is_position_in_frustum(face)
+
+	var table_transform := bedroom.global_transform
+	_place_coins(current.get_node("Coins"), OPEN_STREET, 10)
+	await _ticks(8)
+	_check(is_equal_approx(current.snapshot().giant_height, 40.0)
+			and current.snapshot().coin_value == 10.0 and bedroom.global_transform == table_transform
+			and -camera.global_basis.z.y > 0.99,
+			"Collecting ten coin equivalents transforms at 40 m with the tabletop and upward view retained")
+	if face.is_finite():
+		_check(human_frames_face and camera.is_position_in_frustum(face),
+				"The seated giant's face projects into the growth camera before and after transformation")
+
+	giant.position = Vector3(0.0, 0.02, 410.0)
+	await _ticks(6)
+	var resting_pitch := camera.rotation.x
+	var landed := await FootfallFixture.land(current)
+	_check(not landed.is_empty() and absf(camera.rotation.x - resting_pitch) > 0.005
+			and -camera.global_basis.z.y > 0.99,
+			"Footfall shake adds to the upward look instead of resetting the growth camera pitch")
 
 
 func _defaults_and_coins() -> void:

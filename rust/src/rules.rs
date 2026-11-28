@@ -53,6 +53,10 @@ impl Mode {
         matches!(self, Self::Growth | Self::Brawl)
     }
 
+    pub fn uses_palm_tabletop(self) -> bool {
+        matches!(self, Self::Sandbox | Self::Growth)
+    }
+
     pub fn allows_step_demolition(self, scale: f32, destroyed: u32) -> bool {
         match self {
             Self::Sandbox | Self::Brawl => true,

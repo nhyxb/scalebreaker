@@ -66,8 +66,9 @@ const FIRST_PERSON_STEER_DEADZONE: f32 = 0.05;
 /// neck instead of staring into the stump; scaled by the giant's height.
 const FIRST_PERSON_LOOK_DOWN_PITCH: f32 = -0.35;
 const FIRST_PERSON_LOOK_DOWN_LEAN: f32 = 0.105;
-/// The evacuee can look up without swinging the spring arm through the street.
-const EVAC_ARM_MAX_PITCH: f32 = 0.26;
+/// Keep a third-person spring arm above the street while the lens tilts higher.
+const ARM_MAX_UP_PITCH: f32 = 0.26;
+const TABLETOP_LOOK_UP_LIMIT: f32 = 1.50;
 const MOUSE_LOOK_SENSITIVITY: f32 = 0.0028;
 const KEYBOARD_LOOK_SPEED: f32 = FRAC_PI_2;
 const GROWTH_DURATION: f32 = 0.60;
@@ -880,6 +881,8 @@ pub struct HarborRound {
     max_height: f32,
     orbit: Option<Gd<Node3D>>,
     camera: Option<Gd<Camera3D>>,
+    camera_base_pitch: f32,
+    pub bedroom_far: f32,
     regular_camera_far: f32,
     effects: Option<Gd<Node3D>>,
     state: RoundState,
@@ -964,6 +967,8 @@ impl INode3D for HarborRound {
             max_height: GIANT_DEFAULT_MAX_HEIGHT,
             orbit: None,
             camera: None,
+            camera_base_pitch: 0.0,
+            bedroom_far: 50000.0,
             regular_camera_far: 0.0,
             effects: None,
             state: RoundState::default(),
@@ -1485,15 +1490,21 @@ impl HarborRound {
 
     fn rotate_view(&mut self, angles: Vector2) {
         self.yaw = (self.yaw - angles.x).rem_euclid(TAU);
-        let (bottom, top) = if self.first_person || self.player == PlayerRole::Spectator {
+        let (bottom, top) = self.pitch_limits();
+        self.pitch = (self.pitch - angles.y).clamp(bottom, top);
+        self.clamp_first_person_view();
+    }
+
+    fn pitch_limits(&self) -> (f32, f32) {
+        if self.first_person || self.player == PlayerRole::Spectator {
             (-1.45, 1.45)
         } else if matches!(self.player, PlayerRole::Evacuee | PlayerRole::HumanObserver) {
             (-1.15, 1.45)
+        } else if self.mode.uses_palm_tabletop() && !self.foot_view {
+            (-1.15, TABLETOP_LOOK_UP_LIMIT)
         } else {
-            (-1.15, 0.26)
-        };
-        self.pitch = (self.pitch - angles.y).clamp(bottom, top);
-        self.clamp_first_person_view();
+            (-1.15, ARM_MAX_UP_PITCH)
+        }
     }
 
     /// First person is not a free-look camera: the head turns at most ±75° off the
@@ -2486,13 +2497,23 @@ impl HarborRound {
                     self.pitch.clamp(-0.9, 0.3) + FOOT_VIEW_PITCH,
                 )
             } else {
-                ((height * focus_ratio).max(focus_floor), self.pitch)
+                let focus_height = (height * focus_ratio).max(focus_floor);
+                let mut arm_pitch = self.pitch.min(ARM_MAX_UP_PITCH);
+                if self.mode.uses_palm_tabletop() {
+                    // Leave street clearance even at maximum zoom out. The camera's local
+                    // pitch takes the rest of the look angle without lowering the boom.
+                    let safe_pitch = (focus_height * 0.8 / arm_length).min(1.0).asin();
+                    arm_pitch = arm_pitch.min(safe_pitch);
+                }
+                camera_pitch = self.pitch - arm_pitch;
+                (focus_height, arm_pitch)
             }
         } else {
-            let arm_pitch = self.pitch.min(EVAC_ARM_MAX_PITCH);
+            let arm_pitch = self.pitch.min(ARM_MAX_UP_PITCH);
             camera_pitch = self.pitch - arm_pitch;
             (1.52, arm_pitch)
         };
+        self.camera_base_pitch = camera_pitch;
         if let Some(camera) = &mut self.camera {
             camera.set_rotation(Vector3::RIGHT * camera_pitch);
         }
@@ -2529,9 +2550,7 @@ impl HarborRound {
             } else {
                 eye_height
             };
-            // The far plane covers the whole island, the tallest body, and the 30 km
-            // single-world bedroom walls & seated Yumeka (Vulkan mobile 32-bit Reversed-Z).
-            let regular_far = (self.world_limit * 6.5 + height * 3.0).max(50000.0);
+            let regular_far = (self.world_limit * 6.5 + height * 3.0).max(self.bedroom_far);
             if regular_far != self.regular_camera_far {
                 self.regular_camera_far = regular_far;
                 camera.set_far(regular_far);
@@ -2748,6 +2767,7 @@ impl HarborRound {
         };
         if changed {
             self.camera_focus_offset = Vector3::ZERO;
+            self.camera_base_pitch = 0.0;
             // The foot view owns the yaw; park the player's look direction while it is on.
             if foot_view {
                 self.foot_view_yaw = Some(self.yaw);
@@ -2755,7 +2775,8 @@ impl HarborRound {
                 self.yaw = saved;
             }
             if !first_person {
-                self.pitch = self.pitch.clamp(-1.15, 0.26);
+                let (bottom, top) = self.pitch_limits();
+                self.pitch = self.pitch.clamp(bottom, top);
             }
             body.clone()
                 .call("set_first_person", &[first_person.to_variant()]);
@@ -2799,6 +2820,7 @@ impl HarborRound {
                 (height * 0.12)
                     .clamp(0.05, 0.06)
                     .max((height * 0.005).min(3.0))
+                    .max(self.bedroom_far / 1_000_000.0)
             } else {
                 // Near plane scales with the arm so a 500 m pull-back never clips the world.
                 // 0.018 (was 0.005) pulls the plane 4-5x closer to the body: the 24-bit
@@ -2979,7 +3001,11 @@ impl HarborRound {
                 // Angular motion keeps fine differences in strength visible at centimeter scale.
                 let angle = |force: f32| 0.12 * force / (0.65 + force.abs());
                 let translation = camera.get_near() * if self.first_person { 0.12 } else { 1.5 };
-                camera.set_rotation(Vector3::new(angle(y), angle(x) * 0.45, angle(x)));
+                camera.set_rotation(Vector3::new(
+                    self.camera_base_pitch + angle(y),
+                    angle(x) * 0.45,
+                    angle(x),
+                ));
                 camera.set_h_offset(shoulder + x * translation);
                 camera.set_v_offset(y * translation);
                 return;
